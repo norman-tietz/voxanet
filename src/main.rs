@@ -10,6 +10,7 @@ mod noise;
 mod lod_animation;
 mod cmd;
 mod rt_shadow;
+mod rt_blur;
 mod system_diagnostics; 
 
 

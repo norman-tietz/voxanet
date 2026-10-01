@@ -32,6 +32,8 @@ struct RtParams {
 }
 @group(0) @binding(3) var<uniform> rt: RtParams;
 @group(0) @binding(4) var<storage, read> rt_bits: array<u32>;
+// blurred shadow term written by fs_rt + blur.wgsl (r = shadow), see rt_blur.rs
+@group(2) @binding(0) var rt_blurred: texture_2d<f32>;
 
 struct Local {
     model: mat4x4<f32>,
@@ -352,9 +354,22 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
 
 fn shadow_factor(in: VertexOut, N: vec3<f32>, L: vec3<f32>, NdotL: f32) -> f32 {
     if (rt.enabled == 1u) {
-        return rt_shadow(in.world_pos, N, L);
+        return textureLoad(rt_blurred, vec2<i32>(in.clip_pos.xy), 0).r;
     }
     return fetch_shadow_accurate(in.shadow_pos, NdotL);
+}
+
+// sharp ray-marched shadow term + camera distance, blurred afterwards (rt_blur.rs)
+@fragment
+fn fs_rt(in: VertexOut) -> @location(0) vec4<f32> {
+    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+        discard;
+    }
+    let N = normalize(in.world_normal);
+    let L = normalize(global.sun_dir.xyz);
+    var s = 0.0; // faces turned away from the sun are in their own shadow
+    if (dot(N, L) > 0.0) { s = rt_shadow(in.world_pos, N, L); }
+    return vec4<f32>(s, distance(global.camera_pos.xyz, in.world_pos), 0.0, 1.0);
 }
 
 // --- UTILS ---

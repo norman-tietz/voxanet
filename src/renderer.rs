@@ -13,6 +13,7 @@ use crate::entity::Player;
 use glam::Vec3;
 use crate::lod_animation::{LodAnimator, AnyKey};
 use crate::rt_shadow::{RtParams, ShadowWindow};
+use crate::rt_blur::RtBlur;
 use bytemuck::{Pod, Zeroable};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -137,6 +138,7 @@ pub struct Renderer<'a> {
     rt_bits_buf: wgpu::Buffer,
     rt_center: Option<BlockId>,
     rt_dirty: bool,
+    rt_blur: RtBlur,
 }
 
 impl<'a> Renderer<'a> {
@@ -393,7 +395,10 @@ let size = window.inner_size();
 
         // --- PIPELINES ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()) });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&global_layout, &local_layout], push_constant_ranges: &[] });
+        // group 2: the blurred ray-marched shadow term, read by fs_main
+        let rt_sample_layout = RtBlur::sample_layout(&device);
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&global_layout, &local_layout, &rt_sample_layout], push_constant_ranges: &[] });
+        let rt_blur = RtBlur::new(&device, rt_sample_layout, &layout, &shader, config.width, config.height);
 
         let pipeline_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Shadow Pipeline"),
@@ -550,6 +555,7 @@ let size = window.inner_size();
             rt_bits_buf,
             rt_center: None,
             rt_dirty: true,
+            rt_blur,
         }
     }
 
@@ -578,6 +584,7 @@ let size = window.inner_size();
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth = Self::mk_depth(&self.device, &self.config);
+        self.rt_blur.resize(&self.device, width, height);
     }
 
     pub fn update_console_mesh(&mut self, t: f32) {
@@ -1224,6 +1231,7 @@ if controller.show_collisions {
 
             shadow_pass.set_pipeline(&self.pipeline_shadow);
             shadow_pass.set_bind_group(0, &self.shadow_global_bind, &[]);
+            shadow_pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
 
             // the ray-marched shadows don't need the shadow map
             if !self.rt_enabled {
@@ -1245,6 +1253,40 @@ if controller.show_collisions {
                 }
             }
             }
+        }
+
+        // --- PASS 1b: RAY-MARCHED SHADOWS + BLUR ---
+        if self.rt_enabled {
+            let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
+            self.rt_blur.set_focal(&self.queue, self.config.height as f32 * 0.5 / (fov.to_radians() * 0.5).tan());
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("RT Shadow Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.rt_blur.rt_pipeline);
+                pass.set_bind_group(0, &self.global_bind, &[]);
+                pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
+                // the same meshes the main pass draws below
+                let meshes = self.lod_chunks.values().chain(self.chunks.values()).filter(|m| cull_frustum.intersects_sphere(m.center, m.radius))
+                    .chain(self.animator.dying_chunks.values().map(|d| &d.mesh).filter(|m| frustum.intersects_sphere(m.center, m.radius)));
+                for mesh in meshes {
+                    pass.set_bind_group(1, &mesh.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
+                    pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+                }
+                if !controller.first_person {
+                    pass.set_bind_group(1, &self.local_bind_player, &[]);
+                    pass.set_vertex_buffer(0, self.player_v_buf.slice(..));
+                    pass.set_index_buffer(self.player_i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..self.player_inds, 0, 0..1);
+                }
+            }
+            self.rt_blur.blur(&mut enc);
         }
 
         // --- PASS 2: MAIN RENDER ---
@@ -1269,6 +1311,7 @@ if controller.show_collisions {
             else { pass.set_pipeline(&self.pipeline_fill); }
             
             pass.set_bind_group(0, &self.global_bind, &[]);
+            pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
             
             // DRAW LOD CHUNKS
             for mesh in self.lod_chunks.values() {
