@@ -48,6 +48,10 @@ const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounc
 const WATER_DEEP      = vec3<f32>(0.002, 0.030, 0.090); // linear colour of deep water
 const WATER_SHALLOW   = vec3<f32>(0.020, 0.150, 0.170); // ... and of shallow water (turquoise)
 const FOAM_COLOR      = vec3<f32>(0.80, 0.85, 0.88);  // shore foam (linear albedo)
+const CAUSTIC_FOCUS   = 0.15;                        // how strongly the ripples focus sunlight below them
+const CAUSTIC_STEEP   = 0.08;                        // slope of the caustic ripples
+const CAUSTIC_BASE    = 0.7;                         // plain sunlight under water, between the caustic lines
+const CAUSTIC_MAX     = 3.0;                         // brightest caustic, times the plain sunlight
 const FOAM_DEPTH      = 2.0;                         // vertical water depth below which foam forms
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
 const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
@@ -431,8 +435,12 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
-    // A. Direct Sun Light
-    let direct_light = SUN_COLOR * NdotL * shadow;
+    // A. Direct Sun Light, focused into caustics below the sea surface (sunlit parts only)
+    var direct_light = SUN_COLOR * NdotL * shadow;
+    let sea_depth = global.screen.z - length(world_pos);
+    if (global.screen.z > 0.0 && sea_depth > 0.0 && shadow_raw > 0.0) {
+        direct_light *= mix(1.0, caustics(world_pos, L, sea_depth), shadow_raw);
+    }
 
     // B. Hemispheric Ambient
     // Top of objects gets Sky Color, Bottom gets Ground Bounce
@@ -567,6 +575,40 @@ fn water_waves(p: vec3<f32>, t: f32, dist: f32) -> vec4<f32> {
     s += water_wave(p, vec3<f32>(0.2, 0.9, -1.0), 1.6, 0.05, 5.7, t, dist);
     s += water_wave(p, vec3<f32>(0.9, -1.0, -0.5), 1.1, 0.05, 0.6, t, dist);
     return s;
+}
+
+// one short ripple that only drives the caustics (too small to matter for the surface shading; caustic cells
+// of a few tenths of a block): its curvature (Laplacian of the height) at p, negative under crests, which
+// focus the sunlight below them, positive under troughs, which spread it. Faded out with camera distance.
+fn ripple(p: vec3<f32>, dir: vec3<f32>, len: f32, phase: f32, t: f32, dist: f32) -> f32 {
+    let k = 6.2832 / len;
+    let fade = clamp(1.0 - dist / (len * 150.0), 0.0, 1.0);
+    return -CAUSTIC_STEEP * k * fade * sin(k * dot(p, dir) - sqrt(9.81 * k) * 0.5 * t + phase);
+}
+
+// directions are unit vectors
+fn ripple_curvature(p: vec3<f32>, t: f32, dist: f32) -> f32 {
+    var c = ripple(p, vec3<f32>(0.9397, 0.0940, 0.3289), 0.93, 0.0, t, dist);
+    c += ripple(p, vec3<f32>(-0.3651, 0.1826, 0.9129), 0.77, 1.7, t, dist);
+    c += ripple(p, vec3<f32>(0.5345, -0.2673, -0.8018), 0.64, 3.4, t, dist);
+    c += ripple(p, vec3<f32>(-0.7553, 0.4196, -0.5035), 0.53, 5.1, t, dist);
+    c += ripple(p, vec3<f32>(0.2716, -0.7243, 0.6338), 0.47, 6.8, t, dist);
+    c += ripple(p, vec3<f32>(-0.1881, 0.9407, -0.2822), 0.41, 8.5, t, dist);
+    return c;
+}
+
+// caustics: sunlight on a surface `depth` units below the sea surface, focused (> 1) or spread (< 1) by the
+// ripples where the sun ray entered the water. 1 / |1 + depth * curvature * CAUSTIC_FOCUS| is the light
+// density of a refracted beam; bright lines form where it focuses. The plain sunlight is dimmed
+// (CAUSTIC_BASE) so the lines stand out; faded out right at the surface and with depth (absorption).
+fn caustics(world_pos: vec3<f32>, L: vec3<f32>, depth: f32) -> f32 {
+    let up = normalize(world_pos);
+    let entry = world_pos + L * (depth / max(dot(up, L), 0.2));
+    let dist = distance(global.camera_pos.xyz, world_pos);
+    let curvature = ripple_curvature(entry, global.screen.w, dist);
+    let focus = min(1.0 / max(abs(1.0 + depth * curvature * CAUSTIC_FOCUS), 0.01), CAUSTIC_MAX);
+    let strength = smoothstep(0.0, 0.6, depth) * exp(-depth * 0.12);
+    return mix(1.0, focus * CAUSTIC_BASE, strength);
 }
 
 @fragment
