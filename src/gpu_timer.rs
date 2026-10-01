@@ -4,7 +4,7 @@
 //
 // Apple GPUs overlap passes: a pass's begin timestamp is taken when its vertex work starts, often while
 // the previous pass is still shading, so begin-to-end intervals overlap and include waiting. The parts
-// form a dependency chain (shadows -> blur -> main reads the blur -> text draws over main), so their
+// form a dependency chain (G-buffer -> rays -> blur -> main reads the blur -> text draws over main), so their
 // fragment work is serialised and a part's time is measured from the previous part's end to its own end.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // measured parts of a frame; each has a begin and an end timestamp (query 2i and 2i + 1)
-pub const PARTS: [&str; 4] = ["Shadows", "Blur", "Main", "Text"];
-pub const SHADOWS: usize = 0;
-pub const BLUR: usize = 1;
-pub const MAIN: usize = 2;
-pub const TEXT: usize = 3;
+pub const PARTS: [&str; 5] = ["G-buffer", "Rays", "Blur", "Main", "Text"];
+pub const GBUFFER: usize = 0; // shadow G-buffer pass
+pub const RAYS: usize = 1;    // shadow compute pass (ray march or hardware rays)
+pub const BLUR: usize = 2;
+pub const MAIN: usize = 3;
+pub const TEXT: usize = 4;
 
 const QUERIES: u32 = 2 * PARTS.len() as u32;
 const BYTES: u64 = QUERIES as u64 * wgpu::QUERY_SIZE as u64;

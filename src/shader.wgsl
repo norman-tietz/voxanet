@@ -30,7 +30,7 @@ struct RtParams {
 }
 @group(0) @binding(1) var<uniform> rt: RtParams;
 @group(0) @binding(2) var<storage, read> rt_bits: array<u32>;
-// blurred shadow term written by fs_rt + blur.wgsl (r = shadow), see rt_blur.rs
+// blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
 @group(2) @binding(0) var rt_blurred: texture_2d<f32>;
 
 struct Local {
@@ -325,21 +325,29 @@ fn shadow_factor(in: VertexOut) -> f32 {
     return sum / wsum;
 }
 
-// sharp ray-marched shadow term + camera distance, blurred afterwards (rt_blur.rs)
-@fragment
-fn fs_rt(in: VertexOut) -> @location(0) vec4<f32> {
-    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
-        discard;
+// ray-marched shadow term, once per shadow texel from the G-buffer written by fs_gbuf (rt_blur.rs)
+@group(3) @binding(0) var g_pos: texture_2d<f32>;    // xyz world position, w camera distance (0 = sky)
+@group(3) @binding(1) var g_nrm: texture_2d<f32>;    // xyz world normal
+@group(3) @binding(2) var shadow_out: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn cs_march(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(shadow_out);
+    if (id.x >= size.x || id.y >= size.y) { return; }
+    let p = vec2<i32>(id.xy);
+    let g = textureLoad(g_pos, p, 0);
+    if (g.w <= 0.0) {
+        textureStore(shadow_out, p, vec4<f32>(1.0, 0.0, 0.0, 0.0)); // sky
+        return;
     }
-    let N = normalize(in.world_normal);
+    let N = normalize(textureLoad(g_nrm, p, 0).xyz);
     let L = normalize(global.sun_dir.xyz);
     var s = 0.0; // faces turned away from the sun are in their own shadow
-    if (dot(N, L) > 0.0) { s = rt_shadow(in.world_pos, N, L); }
-    return vec4<f32>(s, distance(global.camera_pos.xyz, in.world_pos), 0.0, 1.0);
+    if (dot(N, L) > 0.0) { s = rt_shadow(g.xyz, N, L); }
+    textureStore(shadow_out, p, vec4<f32>(s, g.w, 0.0, 1.0));
 }
 
-// world position, camera distance and normal per shadow texel for the hardware ray-traced shadows
-// (hw_rt.rs, rt_hw.wgsl casts the rays in a compute pass)
+// world position, camera distance and normal per shadow texel, read by cs_march or rt_hw.wgsl
 struct GBufOut {
     @location(0) pos: vec4<f32>,
     @location(1) nrm: vec4<f32>,
@@ -415,7 +423,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // 3. Lighting Math
     let NdotL = max(dot(N, L), 0.0);
     
-    // Shadow (ray-marched, see rt_shadow() / fs_rt); faces turned away from the sun are in their own shadow
+    // Shadow (ray-traced, see rt_blur.rs); faces turned away from the sun are in their own shadow
     let shadow_raw = select(shadow_factor(in), 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);

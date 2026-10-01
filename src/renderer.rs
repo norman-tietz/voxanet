@@ -210,21 +210,21 @@ let size = window.inner_size();
 
                 wgpu::BindGroupLayoutEntry { 
                     binding: 0, 
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT, 
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE, 
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, 
                     count: None 
                 },
                 // 1: ray-marched shadow window params
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
                 // 2: ray-marched shadow window solid/air bits
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
@@ -322,7 +322,7 @@ let size = window.inner_size();
         // group 2: the blurred ray-marched shadow term, read by fs_main
         let rt_sample_layout = RtBlur::sample_layout(&device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&local_layout), Some(&rt_sample_layout)], immediate_size: 0 });
-        let rt_blur = RtBlur::new(&device, rt_sample_layout, &layout, &shader, config.width, config.height);
+        let rt_blur = RtBlur::new(&device, rt_sample_layout, &global_layout, &layout, &shader, config.width, config.height);
 
         let pipeline_fill = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, false);
         let pipeline_wire = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, true);
@@ -408,7 +408,7 @@ let size = window.inner_size();
         });
 
         let gpu_timer = GpuTimer::new(&device, &queue);
-        let hw_rt = HwRt::supported(&device).then(|| HwRt::new(&device, &layout, &shader, rt_blur.size));
+        let hw_rt = HwRt::supported(&device).then(|| HwRt::new(&device));
         let hw_shadows = hw_rt.is_some();
         println!("Shadows: {}", if hw_shadows { "hardware ray tracing" } else { "ray marching (no hardware ray queries)" });
         let (mesh_tx, mesh_rx) = channel(); 
@@ -492,7 +492,6 @@ let size = window.inner_size();
         self.surface.configure(&self.device, &self.config);
         self.depth = Self::mk_depth(&self.device, &self.config);
         self.rt_blur.resize(&self.device, width, height);
-        if let Some(hw) = &mut self.hw_rt { hw.resize(&self.device, self.rt_blur.size); }
     }
 
     pub fn update_console_mesh(&mut self, t: f32) {
@@ -1081,25 +1080,22 @@ if controller.show_collisions {
         {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
             self.rt_blur.set_fov(&self.queue, fov.to_radians());
-            // hardware: this pass writes the G-buffer and HwRt::trace casts the rays (compute) below;
-            // ray march: this pass computes the shadow term directly
+            // the G-buffer pass below, then one compute invocation per shadow texel: hardware rays
+            // (HwRt::trace) or the ray march (RtBlur::march), so hidden surfaces cost nothing
             let hw = self.hw_rt.as_ref().filter(|_| self.hw_shadows);
-            let march_targets = [Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })];
-            let gbuf_targets = hw.map(|hw| [
-                Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &hw.g_pos, resolve_target: None, ops: HwRt::gbuf_clear_ops() }),
-                Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &hw.g_nrm, resolve_target: None, ops: HwRt::gbuf_clear_ops() }),
-            ]);
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("RT Shadow Pass"),
-                    color_attachments: gbuf_targets.as_ref().map_or(&march_targets[..], |t| &t[..]),
+                    label: Some("Shadow G-Buffer Pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.g_pos, resolve_target: None, ops: RtBlur::gbuf_clear_ops() }),
+                        Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.g_nrm, resolve_target: None, ops: RtBlur::gbuf_clear_ops() }),
+                    ],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                    // with hardware rays the compute pass writes the end timestamp
-                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::SHADOWS, true, hw.is_none())),
+                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::GBUFFER, true, true)),
                     occlusion_query_set: None,
                 multiview_mask: None,
                 });
-                pass.set_pipeline(hw.map_or(&self.rt_blur.rt_pipeline, |hw| &hw.gbuf_pipeline));
+                pass.set_pipeline(&self.rt_blur.gbuf_pipeline);
                 pass.set_bind_group(0, &self.global_bind, &[]);
                 pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
                 // the same meshes the main pass draws below
@@ -1118,8 +1114,10 @@ if controller.show_collisions {
                     pass.draw_indexed(0..self.player_inds, 0, 0..1);
                 }
             }
-            if let Some(hw) = hw {
-                hw.trace(&self.device, &self.queue, &mut enc, &self.rt_blur.target, sun_dir, self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::SHADOWS, false, true)));
+            let compute_writes = self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::RAYS, true, true));
+            match hw {
+                Some(hw) => hw.trace(&self.device, &self.queue, &mut enc, &self.rt_blur, sun_dir, compute_writes),
+                None => self.rt_blur.march(&mut enc, &self.global_bind, compute_writes),
             }
             self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
         }
