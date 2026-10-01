@@ -11,7 +11,8 @@ This project is a high-performance voxel engine built from scratch in **Rust**, 
 
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
-*   **Custom Rendering Engine:** Powered by **wgpu**, featuring ray-marched sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
+*   **Custom Rendering Engine:** Powered by **wgpu**, featuring soft sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
+*   **Ray-Traced Shadows without Shadow Maps:** Sun shadows are traced per pixel, either with **hardware ray tracing** on GPUs that support it (Apple M3 and later, NVIDIA RTX, AMD RX 6000 and later) or with a custom **voxel ray march** in the shader as a fallback. Shadow edges stay exact at any distance, with no texel aliasing; the method can be switched at runtime from the console.
 *   **Dynamic LOD System:** Implements a recursive Quadtree-based Level of Detail system that renders high-fidelity voxels near the player while optimizing geometry at the horizon.
 *   **Custom Physics Engine:** A specialized physics solver designed for spherical gravity, handling collision detection and character orientation on a curved surface.
 
@@ -68,6 +69,7 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `/debug_mode set true\|false` | Enable or disable the debug keys below |
 | `/move_speed get` / `/move_speed set <value>` | Read or change walking speed |
 | `/jump_force get` / `/jump_force set <value>` | Read or change jump strength |
+| `/hw_shadows set true\|false` | Switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
 
 ### Debug Keys (require `/debug_mode set true`)
 
@@ -98,6 +100,8 @@ The rendering pipeline is constructed using **wgpu (WebGPU)**, featuring a custo
     *   8x8-column maximum-height tiles let rays skip segments that pass above all terrain.
 
 *   **Soft Shadow Edges:** The sharp ray-marched shadow term is written to an offscreen texture together with the camera distance and blurred with a separable, **depth-aware** kernel whose radius covers a fixed width in world space. Edges get a soft penumbra at a constant cost per pixel, without bleeding across silhouettes.
+
+*   **Hardware Ray-Traced Shadows:** On GPUs with ray-tracing hardware (e.g. Apple M3 and later, NVIDIA RTX, AMD RX 6000 and later) every chunk mesh gets a bottom-level acceleration structure, and a top-level structure over all loaded chunks is rebuilt each frame. A G-buffer pass stores each shadow texel's world position and normal; a **compute pass** then casts one hardware ray per texel toward the sun. The rays hit the real triangles, so distant LOD terrain casts shadows too. Keeping the ray queries out of the large scene fragment shader was essential: inside it they made every fragment several times slower. In a mountain scene this halves the shadow cost compared to ray marching (5.8 ms vs 11.7 ms on an M4); other GPUs fall back to ray marching.
 
 *   **Resolution-Independent Shadow Cost:** Ray marching costs per pixel, so on large screens the shadow term is computed at no more than 1.5 megapixels and upsampled with a **depth-aware 4-tap filter** (taps weighted by how well their stored camera distance matches the pixel). On a 6K display this cut the frame time from 53 ms to 15 ms with no visible difference, since the soft edges hide the lower shadow resolution.
 

@@ -12,6 +12,7 @@ mod cmd;
 mod rt_shadow;
 mod rt_blur;
 mod gpu_timer;
+mod hw_rt;
 mod material;
 mod system_diagnostics;
 
@@ -116,6 +117,15 @@ impl Game {
 
         // UPDATE ANIMATION
         console.update_animation(dt);
+
+        if let Some(on) = console.hw_shadows_request.take() {
+            let active = renderer.set_hw_shadows(on);
+            if on && !active {
+                console.log("Hardware ray tracing is not supported on this GPU; using ray marching.", [1.0, 0.5, 0.0]);
+            } else {
+                console.log(if active { "Shadows: hardware ray tracing" } else { "Shadows: ray marching" }, [0.0, 1.0, 0.0]);
+            }
+        }
 
         // the console takes the keyboard (see window_event) and needs a free mouse cursor
         if console.is_open {

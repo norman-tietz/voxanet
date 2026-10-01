@@ -338,6 +338,24 @@ fn fs_rt(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(s, distance(global.camera_pos.xyz, in.world_pos), 0.0, 1.0);
 }
 
+// world position, camera distance and normal per shadow texel for the hardware ray-traced shadows
+// (hw_rt.rs, rt_hw.wgsl casts the rays in a compute pass)
+struct GBufOut {
+    @location(0) pos: vec4<f32>,
+    @location(1) nrm: vec4<f32>,
+}
+
+@fragment
+fn fs_gbuf(in: VertexOut) -> GBufOut {
+    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+        discard;
+    }
+    var out: GBufOut;
+    out.pos = vec4<f32>(in.world_pos, distance(global.camera_pos.xyz, in.world_pos));
+    out.nrm = vec4<f32>(normalize(in.world_normal), 0.0);
+    return out;
+}
+
 // --- UTILS ---
 
 fn dither_opacity(pos: vec4<f32>, alpha: f32) -> bool {

@@ -126,7 +126,7 @@ impl RtBlur {
             label: None, size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[],
         }).create_view(&wgpu::TextureViewDescriptor::default());
         let color = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let target = tex(FORMAT, color);
+        let target = tex(FORMAT, color | wgpu::TextureUsages::STORAGE_BINDING); // hw_rt.rs writes it from a compute pass
         let tmp = tex(FORMAT, color);
         let out = tex(FORMAT, color);
         let depth = tex(wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT);

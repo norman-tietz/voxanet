@@ -42,6 +42,7 @@ pub struct ChunkMesh {
     pub bind_group: wgpu::BindGroup,
     pub center: glam::Vec3,
     pub radius: f32,
+    pub blas: Option<wgpu::Blas>, // for hardware ray-traced shadows (hw_rt.rs), when supported
 }
 
 

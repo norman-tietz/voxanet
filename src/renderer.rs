@@ -16,6 +16,7 @@ use crate::lod_animation::{LodAnimator, AnyKey};
 use crate::rt_shadow::{RtParams, ShadowWindow};
 use crate::rt_blur::RtBlur;
 use crate::gpu_timer::{self, GpuTimer};
+use crate::hw_rt::HwRt;
 use bytemuck::{Pod, Zeroable};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -129,6 +130,8 @@ pub struct Renderer {
     rt_dirty: bool,
     rt_blur: RtBlur,
     gpu_timer: Option<GpuTimer>, // None without timestamp queries
+    hw_rt: Option<HwRt>, // hardware ray-traced shadows, None without ray queries
+    pub hw_shadows: bool, // use hw_rt instead of the ray march (console: /hw_shadows)
 }
 
 impl Renderer {
@@ -156,10 +159,17 @@ impl Renderer {
             features |= wgpu::Features::POLYGON_MODE_LINE;
         }
         features |= GpuTimer::required_features(&adapter);
+        features |= HwRt::required_features(&adapter);
+        // ray queries are an experimental wgpu feature and need the explicit opt-in
+        let experimental_features = if features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        };
 
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: None, required_features: features, required_limits: limits,
-            experimental_features: Default::default(), memory_hints: Default::default(), trace: Default::default(),
+            experimental_features, memory_hints: Default::default(), trace: Default::default(),
         }).await.unwrap();
 
 let size = window.inner_size();
@@ -398,6 +408,9 @@ let size = window.inner_size();
         });
 
         let gpu_timer = GpuTimer::new(&device, &queue);
+        let hw_rt = HwRt::supported(&device).then(|| HwRt::new(&device, &layout, &shader, rt_blur.size));
+        let hw_shadows = hw_rt.is_some();
+        println!("Shadows: {}", if hw_shadows { "hardware ray tracing" } else { "ray marching (no hardware ray queries)" });
         let (mesh_tx, mesh_rx) = channel(); 
         let (lod_tx, lod_rx) = channel();
 
@@ -448,6 +461,8 @@ let size = window.inner_size();
             rt_dirty: true,
             rt_blur,
             gpu_timer,
+            hw_rt,
+            hw_shadows,
         }
     }
 
@@ -477,6 +492,7 @@ let size = window.inner_size();
         self.surface.configure(&self.device, &self.config);
         self.depth = Self::mk_depth(&self.device, &self.config);
         self.rt_blur.resize(&self.device, width, height);
+        if let Some(hw) = &mut self.hw_rt { hw.resize(&self.device, self.rt_blur.size); }
     }
 
     pub fn update_console_mesh(&mut self, t: f32) {
@@ -667,8 +683,11 @@ let size = window.inner_size();
     }
 
     fn upload_lod_buffer(&mut self, key: LodKey, v: Vec<Vertex>, i: Vec<u32>) {
-        let v_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST });
-        let i_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST });
+        // with hardware ray tracing every chunk mesh also gets a BLAS, built from the same buffers
+        let blas_input = if self.hw_rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
+        let v_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | blas_input });
+        let i_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas_input });
+        let blas = self.hw_rt.is_some().then(|| HwRt::build_blas(&self.device, &self.queue, &v_buf, v.len() as u32, &i_buf, i.len() as u32));
 
         let uniform_data = LocalUniform {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -701,7 +720,8 @@ let size = window.inner_size();
         self.lod_chunks.insert(key, ChunkMesh { 
             v_buf, i_buf, num_inds: i.len() as u32, num_verts: v.len(), uniform_buf, bind_group,
             center: real_center, // <--- ADDED
-            radius: real_radius  // <--- ADDED
+            radius: real_radius, // <--- ADDED
+            blas,
         });
         self.animator.start_spawn(AnyKey::Lod(key));
     }
@@ -773,7 +793,23 @@ let size = window.inner_size();
     }
 
 
+    // switch between hardware ray-traced and ray-marched shadows; returns the method now in use
+    pub fn set_hw_shadows(&mut self, on: bool) -> bool {
+        self.hw_shadows = on && self.hw_rt.is_some();
+        if !self.hw_shadows {
+            self.rt_dirty = true; // the ray-march window wasn't updated while hardware rays were used
+        }
+        self.hw_shadows
+    }
+
     fn update_rt_window(&mut self, player_pos: Vec3, planet: &PlanetData) {
+        if self.hw_shadows {
+            // the ray-march windows aren't needed while hardware rays are used, but fs_main reads the shadow
+            // texture only when rt.enabled is set (set_hw_shadows marks the windows dirty for switching back)
+            let params = RtParams { enabled: 1, ..RtParams::zeroed() };
+            self.queue.write_buffer(&self.rt_params_buf, 0, bytemuck::cast_slice(&[params]));
+            return;
+        }
         let Some(id) = CoordSystem::pos_to_id(player_pos, planet.resolution) else { return };
         // small planets are stored completely, so only big ones follow the player
         let whole_planet = planet.resolution <= crate::rt_shadow::WINDOW_SIZE;
@@ -803,8 +839,11 @@ let size = window.inner_size();
 
 
     fn upload_chunk_buffers(&mut self, key: ChunkKey, v: Vec<Vertex>, i: Vec<u32>) {
-        let v_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST });
-        let i_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST });
+        // with hardware ray tracing every chunk mesh also gets a BLAS, built from the same buffers
+        let blas_input = if self.hw_rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
+        let v_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | blas_input });
+        let i_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas_input });
+        let blas = self.hw_rt.is_some().then(|| HwRt::build_blas(&self.device, &self.queue, &v_buf, v.len() as u32, &i_buf, i.len() as u32));
         
         let is_update = self.chunks.contains_key(&key);
         let start_opacity = if is_update { 1.0 } else { 0.0 };
@@ -843,7 +882,8 @@ let size = window.inner_size();
         self.chunks.insert(key, ChunkMesh { 
             v_buf, i_buf, num_inds: i.len() as u32, num_verts: v.len(), uniform_buf, bind_group,
             center: real_center, 
-            radius: real_radius  
+            radius: real_radius,
+            blas,
         });
         
         if !is_update {
@@ -1030,20 +1070,36 @@ if controller.show_collisions {
 
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         
-        // --- PASS 1: RAY-MARCHED SHADOWS + BLUR ---
+        // --- PASS 1: SHADOWS (HARDWARE RAY TRACING OR RAY MARCHING) + BLUR ---
+        if let Some(hw) = &mut self.hw_rt {
+            if self.hw_shadows {
+                // all loaded chunks, also those outside the view: they cast shadows into it
+                let blases = self.chunks.values().chain(self.lod_chunks.values()).filter_map(|m| m.blas.as_ref());
+                hw.update(&self.device, &mut enc, blases);
+            }
+        }
         {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
             self.rt_blur.set_fov(&self.queue, fov.to_radians());
+            // hardware: this pass writes the G-buffer and HwRt::trace casts the rays (compute) below;
+            // ray march: this pass computes the shadow term directly
+            let hw = self.hw_rt.as_ref().filter(|_| self.hw_shadows);
+            let march_targets = [Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })];
+            let gbuf_targets = hw.map(|hw| [
+                Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &hw.g_pos, resolve_target: None, ops: HwRt::gbuf_clear_ops() }),
+                Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &hw.g_nrm, resolve_target: None, ops: HwRt::gbuf_clear_ops() }),
+            ]);
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("RT Shadow Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })],
+                    color_attachments: gbuf_targets.as_ref().map_or(&march_targets[..], |t| &t[..]),
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::SHADOWS, true, true)),
+                    // with hardware rays the compute pass writes the end timestamp
+                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::SHADOWS, true, hw.is_none())),
                     occlusion_query_set: None,
                 multiview_mask: None,
                 });
-                pass.set_pipeline(&self.rt_blur.rt_pipeline);
+                pass.set_pipeline(hw.map_or(&self.rt_blur.rt_pipeline, |hw| &hw.gbuf_pipeline));
                 pass.set_bind_group(0, &self.global_bind, &[]);
                 pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
                 // the same meshes the main pass draws below
@@ -1061,6 +1117,9 @@ if controller.show_collisions {
                     pass.set_index_buffer(self.player_i_buf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.player_inds, 0, 0..1);
                 }
+            }
+            if let Some(hw) = hw {
+                hw.trace(&self.device, &self.queue, &mut enc, &self.rt_blur.target, sun_dir, self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::SHADOWS, false, true)));
             }
             self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
         }
@@ -1241,13 +1300,14 @@ if controller.show_collisions {
             if player.debug_mode {
                 let status = if controller.freeze_culling { "FROZEN" } else { "ACTIVE" };
                 let info = format!(
-                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\nScreen  {}x{}\nShadows {}x{}\n{}", 
+                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\nScreen  {}x{}\nShadows {}x{} {}\n{}", 
                     status,
                     rendered_chunks, self.chunks.len(),
                     rendered_lods, self.lod_chunks.len(),
                     self.load_queue.len(),
                     self.config.width, self.config.height,
                     self.rt_blur.size.0, self.rt_blur.size.1,
+                    if self.hw_shadows { "HW" } else { "march" },
                     self.gpu_timer.as_ref().map_or("GPU timing unavailable".to_string(), |t| t.summary())
                 );
 

@@ -5,6 +5,7 @@ pub struct Console {
     pub input_buffer: String,
     pub history: Vec<(String, [f32; 3])>, 
     pub height_fraction: f32, 
+    pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
     
    
     history_capacity: usize,
@@ -17,6 +18,7 @@ impl Console {
             input_buffer: String::new(),
             history: Vec::new(),
             height_fraction: 0.0,
+            hw_shadows_request: None,
             history_capacity: 50,
         }
     }
@@ -88,11 +90,20 @@ impl Console {
                 }
             },
          
+            "/hw_shadows" => {
+                match (parts.get(1), parts.get(2)) {
+                    (Some(&"set"), Some(&"true")) => self.hw_shadows_request = Some(true),
+                    (Some(&"set"), Some(&"false")) => self.hw_shadows_request = Some(false),
+                    _ => self.log("Usage: /hw_shadows set [true/false]", [1.0, 0.5, 0.0]),
+                }
+            },
+
             "help" => {
                 self.log("Available Commands:", [0.0, 1.0, 1.0]);
                 self.log("  /debug_mode set true", [0.8, 0.8, 0.8]); 
                 self.log("  /move_speed set {value}", [0.8, 0.8, 0.8]);
                 self.log("  /jump_force set {value}", [0.8, 0.8, 0.8]);
+                self.log("  /hw_shadows set true|false  (hardware ray-traced shadows)", [0.8, 0.8, 0.8]);
             },
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);

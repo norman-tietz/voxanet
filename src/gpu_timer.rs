@@ -71,6 +71,14 @@ impl GpuTimer {
         })
     }
 
+    pub fn compute_writes(&self, part: usize, begin: bool, end: bool) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        Some(wgpu::ComputePassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: begin.then_some(2 * part as u32),
+            end_of_pass_write_index: end.then_some(2 * part as u32 + 1),
+        })
+    }
+
     // call after all passes of the frame are encoded
     pub fn resolve(&mut self, enc: &mut wgpu::CommandEncoder) {
         enc.resolve_query_set(&self.query_set, 0..QUERIES, &self.resolve_buf, 0);
