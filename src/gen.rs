@@ -602,39 +602,13 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
 
         if has_top && has_btm && has_left && has_right && has_front && has_back { return; }
 
-        // --- LIGHTING CALCULATION ( this is simple, i will change this later)---
-        // we cast a short ray (8 blocks)
-        // if we hit nothing, we assume we are near the surface
-        // if we hit blocks, we darken
-
-        let mut sky_occlusion: f32 = 0.0; 
-        for i in 1..=8 {
-            if check(id.face, i, 0, 0) {
-                sky_occlusion += 1.0;
-            }
-        }
-        // 0.0 = full sky, 1.0 = buried
-
-        let mut light_val: f32 = 1.0; 
-        
-        for i in 1..=8 {
-            if check(id.face, i, 0, 0) {
-                light_val = 0.15; // Dark shadow immediately
-                break;
-            }
-        }
-
-        // boost light if it's the natural surface (Grass) to ensure terrain looks bright
-        let natural_h = data.terrain.get_height(id.face, id.u, id.v);
-        if id.layer >= natural_h { light_val = 1.0; }
-
-     
-        let mut base_color = data.block_type(id).unwrap_or(BlockType::Dirt).color();
-
-        // apply Skylight
-        base_color[0] *= light_val;
-        base_color[1] *= light_val;
-        base_color[2] *= light_val;
+        // --- SKY LIGHT ---
+        // a face is darkened when the air cell it looks into has something solid within 8 layers above
+        // it (tunnels, overhangs); open cliff faces stay lit even though their own column continues up
+        let sky = |du: i32, dv: i32| -> f32 {
+            if (1..=8).any(|i| check(id.face, i, du, dv)) { 0.15 } else { 1.0 }
+        };
+        let base_color = data.block_type(id).unwrap_or(BlockType::Dirt).color();
 
         // geometry Helpers
         let p = |u_off: u32, v_off: u32, l_off: u32| CoordSystem::get_vertex_pos(id.face, id.u + u_off, id.v + v_off, id.layer + l_off, res);
@@ -643,6 +617,7 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
 
         let block_center = (i_bl + o_tr) * 0.5;
         let apply = |ao: f32| -> [f32; 3] { [base_color[0] * ao, base_color[1] * ao, base_color[2] * ao] };
+        let side = |du: i32, dv: i32| { let c = apply(0.8 * sky(du, dv)); [c, c, c, c] };
 
    
         if !has_top {
@@ -652,6 +627,8 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
             let ao_br = Self::calculate_ao(n(1, 0),  n(0, -1), n(1, -1));
             let ao_tr = Self::calculate_ao(n(1, 0),  n(0, 1),  n(1, 1));
             let ao_tl = Self::calculate_ao(n(-1, 0), n(0, 1),  n(-1, 1));
+            let top_sky = sky(0, 0);
+            let apply = |ao: f32| apply(ao * top_sky);
             // quad() splits along vertex 0-2; split along the darker diagonal so the AO gradient stays symmetric
             if ao_bl + ao_tr > ao_br + ao_tl {
                 Self::quad(verts, inds, idx, [o_br, o_tr, o_tl, o_bl], [apply(ao_br), apply(ao_tr), apply(ao_tl), apply(ao_bl)], true, block_center);
@@ -665,13 +642,10 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
             Self::quad(verts, inds, idx, [i_tl, i_tr, i_br, i_bl], [c,c,c,c], true, block_center); 
         }
 
-        let side_c = apply(0.8); 
-        let colors = [side_c, side_c, side_c, side_c];
-
-        if !has_front { Self::quad(verts, inds, idx, [i_bl, i_br, o_br, o_bl], colors, false, block_center); }
-        if !has_back  { Self::quad(verts, inds, idx, [o_tl, o_tr, i_tr, i_tl], colors, false, block_center); }
-        if !has_left  { Self::quad(verts, inds, idx, [i_tl, i_bl, o_bl, o_tl], colors, false, block_center); }
-        if !has_right { Self::quad(verts, inds, idx, [i_br, i_tr, o_tr, o_br], colors, false, block_center); }
+        if !has_front { Self::quad(verts, inds, idx, [i_bl, i_br, o_br, o_bl], side(0, -1), false, block_center); }
+        if !has_back  { Self::quad(verts, inds, idx, [o_tl, o_tr, i_tr, i_tl], side(0, 1), false, block_center); }
+        if !has_left  { Self::quad(verts, inds, idx, [i_tl, i_bl, o_bl, o_tl], side(-1, 0), false, block_center); }
+        if !has_right { Self::quad(verts, inds, idx, [i_br, i_tr, o_tr, o_br], side(1, 0), false, block_center); }
     }
     pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();

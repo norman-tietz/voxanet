@@ -2,39 +2,58 @@ use glam::Vec3;
 use crate::gen::CoordSystem;
 use std::sync::Arc; 
 
-// --- SETTINGS & ENUMS ---
+// --- TERRAIN SHAPE ---
+// Heights are layers relative to sea level (layer res/2). Continents and mountain ranges are sized
+// relative to the planet; hills keep roughly the same size in blocks at any resolution. The overall
+// relief grows with the square root of the radius so small planets don't turn into spikes.
 
-#[derive(Clone, Copy, Debug)]
-pub enum NoiseType {
-    Perlin,
-    Simplex,  
-    Cellular, 
+struct TerrainShape {
+    relief: f32,      // highest mountains above sea level, in layers
+    hill_freq: f32,   // noise frequencies on the unit sphere (cycles per radian)
+    ridge_freq: f32,
+    range_freq: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct NoiseSettings {
-    pub noise_type: NoiseType,
-    pub frequency: f32,
-    pub amplitude: f32,
-    pub octaves: u32,
-    pub persistence: f32, 
-    pub lacunarity: f32,  
-    pub offset: Vec3,     
-}
-
-impl NoiseSettings {
-   
-    pub fn default_terrain(res: u32) -> Self {
+impl TerrainShape {
+    fn new(resolution: u32) -> Self {
+        let radius = resolution as f32 / 2.0;
         Self {
-            noise_type: NoiseType::Perlin,
-            frequency: res as f32 / 100.0, 
-            amplitude: 24.0,
-            octaves: 4,      
-            persistence: 0.5,
-            lacunarity: 2.0,
-            offset: Vec3::ZERO,
+            relief: 3.0 * radius.sqrt(),
+            hill_freq: (radius / 35.0).max(2.0),
+            ridge_freq: (radius / 120.0).max(2.5),
+            range_freq: (radius / 400.0).max(1.5),
         }
     }
+
+    // height above (or below) sea level for a direction on the unit sphere
+    fn height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        // continents: low-frequency, positive = land
+        let c = g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + 0.08;
+        let land = smoothstep(-0.02, 0.12, c);
+        // short continental shelves: coasts are a narrow band, not wide flats around sea level
+        let base = if c < 0.0 {
+            -0.4 * self.relief * smoothstep(0.0, 0.12, -c) // ocean floor
+        } else {
+            0.12 * self.relief * smoothstep(0.0, 0.12, c) // lowlands rise inland
+        };
+
+        let hills = g.fbm(dir * self.hill_freq + Vec3::new(-5.3, 11.9, 2.4), 4) * 0.15 * self.relief * (0.4 + 0.6 * land);
+
+        // mountain ranges: ridged noise, only where the range mask is high and on land
+        let range = smoothstep(-0.05, 0.25, g.fbm(dir * self.range_freq + Vec3::new(8.8, -2.6, 31.5), 3)) * land;
+        let mountains = if range > 0.0 {
+            g.ridged(dir * self.ridge_freq + Vec3::new(1.9, 23.3, -7.7), 5).powf(1.5) * self.relief * range
+        } else {
+            0.0
+        };
+
+        base + hills + mountains
+    }
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 // --- PLANET TERRAIN DATA ---
@@ -44,27 +63,26 @@ pub struct PlanetTerrain {
     heights: Arc<Vec<u16>>, 
     resolution: u32,
     height_range: (u32, u32), // lowest and highest column
+    sea_level: u32,
 }
 
 impl PlanetTerrain {
     pub fn new(resolution: u32) -> Self {
-        let size = (6 * resolution * resolution) as usize;
-        let mut heights = vec![0; size];
+        use rayon::prelude::*;
         let generator = NoiseGenerator::new(42); // Seed 42
-        let settings = NoiseSettings::default_terrain(resolution);
-        let base_radius = resolution as f32 / 2.0;
-        for face in 0..6 {
-            for v in 0..resolution {
-                for u in 0..resolution {
-                    let dir = CoordSystem::get_direction(face, u, v, resolution);
-                    let noise_val = generator.compute(dir, &settings);
-                    let h_offset = noise_val * settings.amplitude;
-                    let final_layer = (base_radius + h_offset).max(1.0) as u16;
-                    let idx = Self::get_index(face, u, v, resolution);
-                    heights[idx] = final_layer;
-                }
+        let shape = TerrainShape::new(resolution);
+        let sea_level = resolution / 2;
+        let mut heights = vec![0u16; (6 * resolution * resolution) as usize];
+
+        // rows are independent, so generate them in parallel
+        heights.par_chunks_mut(resolution as usize).enumerate().for_each(|(row, out)| {
+            let face = (row as u32 / resolution) as u8;
+            let v = row as u32 % resolution;
+            for (u, h) in out.iter_mut().enumerate() {
+                let dir = CoordSystem::get_direction(face, u as u32, v, resolution);
+                *h = (sea_level as f32 + shape.height(&generator, dir)).max(1.0) as u16;
             }
-        }
+        });
 
         let height_range = (
             heights.iter().copied().min().unwrap_or(0) as u32,
@@ -72,7 +90,12 @@ impl PlanetTerrain {
         );
 
         // Wrap in Arc for cheap cloning
-        Self { heights: Arc::new(heights), resolution, height_range } 
+        Self { heights: Arc::new(heights), resolution, height_range, sea_level } 
+    }
+
+    // the layer of the water surface: columns at or below it are sea floor
+    pub fn sea_level(&self) -> u32 {
+        self.sea_level
     }
 
     pub fn height_range(&self) -> (u32, u32) {
@@ -102,6 +125,7 @@ impl Clone for PlanetTerrain {
             heights: self.heights.clone(),
             resolution: self.resolution,
             height_range: self.height_range,
+            sea_level: self.sea_level,
         }
     }
 }
@@ -131,44 +155,31 @@ impl NoiseGenerator {
         Self { perm: p }
     }
 
-    fn compute(&self, pos: Vec3, settings: &NoiseSettings) -> f32 {
-        if settings.octaves <= 1 {
-            let p = pos * settings.frequency + settings.offset;
-            return self.compute_base(p, settings.noise_type); // Returns 0..1
+    // fractal Brownian motion, roughly -1..1
+    fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
+        let (mut sum, mut amp, mut norm, mut freq) = (0.0, 1.0, 0.0, 1.0);
+        for _ in 0..octaves {
+            sum += self.perlin(p * freq) * amp;
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
         }
-
-        let mut total_val = 0.0;
-        let mut total_amp = 0.0;
-        
-        let mut amp = 1.0;
-        let mut freq = settings.frequency;
-        let mut p = pos;
-
-        for _ in 0..settings.octaves {
-            let sample_pos = p * freq + settings.offset;
-            total_val += self.compute_base(sample_pos, settings.noise_type) * amp;
-            total_amp += amp;
-
-            amp *= settings.persistence;
-            freq *= settings.lacunarity;
-        }
-
-        // normalize result to 0..1 range
-        if total_amp > 0.0 {
-            total_val / total_amp
-        } else {
-            0.0
-        }
+        sum / norm
     }
 
-    fn compute_base(&self, p: Vec3, type_: NoiseType) -> f32 {
-        match type_ {
-            NoiseType::Perlin => {
-                (self.perlin(p) + 1.0) * 0.5
-            },
-            NoiseType::Simplex => 0.0, // TODO: implement simplex
-            NoiseType::Cellular => 0.0, // TODO: implement cellular
+    // ridged multifractal, 0..1: sharp crests where the noise crosses zero
+    fn ridged(&self, p: Vec3, octaves: u32) -> f32 {
+        let (mut sum, mut amp, mut norm, mut freq, mut weight) = (0.0, 1.0, 0.0, 1.0, 1.0);
+        for _ in 0..octaves {
+            let r = 1.0 - self.perlin(p * freq).abs();
+            let r = r * r * weight;
+            weight = (r * 2.0).clamp(0.0, 1.0); // detail mostly on the crests
+            sum += r * amp;
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
         }
+        sum / norm
     }
 
     // --- PERLIN MATH ---

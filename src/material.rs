@@ -41,10 +41,10 @@ impl BlockType {
     }
 }
 
-// fractions of the planet's height range (min..max column height)
-const SEA_LEVEL: f32 = 0.2;  // sand at and below (sea floor, beaches)
-const ROCK_LINE: f32 = 0.75; // bare stone above
-const SNOW_LINE: f32 = 0.88; // snow above
+const BEACH: f32 = 1.5;      // layers above sea level that are still sand
+// fractions of the height from sea level up to the highest peak
+const ROCK_LINE: f32 = 0.45; // bare stone above
+const SNOW_LINE: f32 = 0.62; // snow above
 const STEEP: u32 = 3;        // a height step of this many layers to a neighbour exposes stone
 const SOIL_DEPTH: u32 = 3;   // layers of dirt/sand below the surface before stone
 pub const CORE_LAYERS: u32 = 6;
@@ -73,9 +73,11 @@ fn jitter(face: u8, u: u32, v: u32) -> f32 {
 // the type of the top block of a column
 pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockType {
     let h = terrain.get_height(face, u, v);
-    let (lo, hi) = terrain.height_range();
-    let range = (hi - lo).max(1) as f32;
-    let rel = (h - lo) as f32 / range + jitter(face, u, v) * 2.0 / range; // up to +-2 layers of jitter
+    let sea = terrain.sea_level() as f32;
+    let peak = (terrain.height_range().1 as f32 - sea).max(1.0);
+    let j = jitter(face, u, v);
+    let above_sea = h as f32 - sea;
+    let rel = above_sea / peak + j * 0.04; // borders wander by about 4% of the relief
 
     let neighbours = [
         terrain.get_height(face, u.saturating_sub(1), v),
@@ -89,7 +91,7 @@ pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockT
         BlockType::Snow
     } else if steep || rel >= ROCK_LINE {
         BlockType::Stone
-    } else if rel <= SEA_LEVEL {
+    } else if above_sea <= BEACH + j {
         BlockType::Sand
     } else {
         BlockType::Grass

@@ -21,12 +21,12 @@ There are no tests (`cargo test` builds but runs nothing).
 
 ### Data model: heightmap + sparse edit diffs
 The planet is not stored as a voxel array. `PlanetData` (`src/common.rs`) holds:
-- `terrain: PlanetTerrain` (`src/noise.rs`): a precomputed per-column height map indexed by `(face, u, v)`, generated once per resolution.
+- `terrain: PlanetTerrain` (`src/noise.rs`): a precomputed per-column height map indexed by `(face, u, v)`, generated once per resolution (in parallel with rayon). `TerrainShape` builds it from continent noise (ocean vs land around a sea level at layer `res/2`), hills, and ridged mountain noise inside low-frequency mountain zones; overall relief scales with `3·sqrt(res/2)`.
 - `chunks: HashMap<ChunkKey, ChunkMods>`: only the player's edits per 32×32 column chunk (`CHUNK_SIZE`): `placed: HashMap<BlockId, BlockType>` and `mined: HashSet<BlockId>`.
 
 `PlanetData::exists(id)` is the single source of truth for solidity: placed → true, mined → false, otherwise `layer <= height`. Meshing, physics, and raycasting all go through it. Layers below 6 are an unbreakable core (`remove_block`).
 
-Block types live in `src/material.rs`. Natural blocks have no stored type: `material::natural_type` derives it from the column's height within the planet's height range (`PlanetTerrain::height_range`), the slope to neighbouring columns and smooth per-column jitter (sand low, stone steep/high, snow highest, dirt then stone below the surface). `PlanetData::block_type(id)` combines that with edits; voxel and LOD meshes both use it, so they agree.
+Block types live in `src/material.rs`. Natural blocks have no stored type: `material::natural_type` derives it from the column's height within the planet's height range (`PlanetTerrain::height_range`), the slope to neighbouring columns and smooth per-column jitter (sand on beaches and the sea floor, stone on steep steps and from 45% of the peak height above sea level, snow from 62%, dirt then stone below the surface). `PlanetData::block_type(id)` combines that with edits; voxel and LOD meshes both use it, so they agree.
 
 ### Coordinates (`src/gen.rs`, `CoordSystem`)
 A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the voxel count per face edge. Cube→sphere uses the Nowell mapping (`cube_to_sphere`), and `cubize_point` is its inverse. Layers are radially **exponential**, not linear: `get_layer_radius(layer, res) = (res/2) * exp(K*(layer/(res/2) - 1))` with `K = 0.85`, so voxels keep a roughly cubic shape at every depth. Convert between world positions and blocks only through `CoordSystem` (`pos_to_id`, `get_local_coords`, `get_block_center`, `get_vertex_pos`). Never hand-roll the math.
