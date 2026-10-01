@@ -12,6 +12,27 @@ struct Global {
 @group(0) @binding(1) var t_shadow: texture_depth_2d;
 @group(0) @binding(2) var s_shadow: sampler_comparison;
 
+// ray-marched shadows (prototype): per cube face a window of solid/air bits near the player, see rt_shadow.rs
+struct FaceWindow {
+    origin_u: i32,
+    origin_v: i32,
+    size: u32, // 0 = no data for this face
+    base_layer: i32,
+    words_per_column: u32,
+    offset: u32,
+    max_layer: i32,
+    tile_offset: u32, // highest solid layer per RT_TILE x RT_TILE columns
+}
+struct RtParams {
+    faces: array<FaceWindow, 6>,
+    resolution: u32,
+    enabled: u32,
+    max_layer: i32,
+    _pad: u32,
+}
+@group(0) @binding(3) var<uniform> rt: RtParams;
+@group(0) @binding(4) var<storage, read> rt_bits: array<u32>;
+
 struct Local {
     model: mat4x4<f32>,
     params: vec4<f32>, // x = opacity
@@ -128,6 +149,214 @@ fn fetch_shadow_accurate(shadow_pos: vec3<f32>, NdotL: f32) -> f32 {
     return shadow_sum / total_weight;
 }
 
+// --- RAY-MARCHED SHADOWS ---
+// Walks the window's cells from the fragment toward the sun. Block space (u, v, layer) is curved
+// in world space, so the ray is split into short segments and the direction is re-linearised per segment.
+
+const LAYER_K: f32 = 0.85;     // CoordSystem::K in gen.rs
+const RT_RANGE: f32 = 128.0;   // max ray length in world units
+
+struct BlockPos {
+    face: u32,
+    p: vec3<f32>, // continuous (u, v, layer)
+}
+
+// inverse of CoordSystem::cube_to_sphere for one face's in-plane pair (x, z) of a unit vector.
+// Same as cubize_point in gen.rs, rewritten so it doesn't cancel catastrophically in f32 near face centres.
+fn cube_pair(x: f32, z: f32) -> vec2<f32> {
+    let a2 = 2.0 * x * x;
+    let b2 = 2.0 * z * z;
+    let d = sqrt(max((a2 - b2) * (a2 - b2) - 6.0 * (a2 + b2) + 9.0, 0.0));
+    let cx = x * sqrt(12.0 / (a2 - b2 + 3.0 + d));
+    let cz = z * sqrt(12.0 / (b2 - a2 + 3.0 + d));
+    return clamp(vec2<f32>(cx, cz), vec2<f32>(-1.0), vec2<f32>(1.0));
+}
+
+// world position -> face + continuous block coordinates (CoordSystem::get_local_coords)
+fn to_block(world: vec3<f32>) -> BlockPos {
+    let res = f32(rt.resolution);
+    let s = res * 0.5;
+    let dist = length(world);
+    let n = world / dist;
+    let a = abs(n);
+
+    var face: u32;
+    var c: vec2<f32>;
+    if (a.y >= a.x && a.y >= a.z) {
+        face = select(1u, 0u, n.y > 0.0);
+        c = cube_pair(n.x, n.z);
+    } else if (a.x >= a.y && a.x >= a.z) {
+        face = select(3u, 2u, n.x > 0.0);
+        c = cube_pair(n.y, n.z);
+    } else {
+        face = select(5u, 4u, n.z > 0.0);
+        c = cube_pair(n.x, n.y);
+    }
+
+    let layer = s * (1.0 + log(dist / s) / LAYER_K);
+    return BlockPos(face, vec3<f32>((c * res + res) * 0.5, layer));
+}
+
+const RT_AIR: i32 = 0;
+const RT_SOLID: i32 = 1;
+const RT_NO_DATA: i32 = 2;  // outside every window: stop and treat as lit
+const RT_CONTINUE: i32 = 3;
+const RT_CROSSES_FACE: i32 = 4;
+const RT_TILE: i32 = 16; // rt_shadow.rs TILE
+
+// true if the segment a..b (same face, ray climbing) stays above every tile it passes over
+fn rt_above_tiles(a: BlockPos, b: BlockPos) -> bool {
+    let w = rt.faces[a.face];
+    let size = i32(w.size);
+    let lo = vec2<i32>(floor(min(a.p.xy, b.p.xy))) - vec2<i32>(w.origin_u, w.origin_v);
+    let hi = vec2<i32>(floor(max(a.p.xy, b.p.xy))) - vec2<i32>(w.origin_u, w.origin_v);
+    if (any(lo < vec2<i32>(0)) || any(hi >= vec2<i32>(size))) { return false; }
+    let tiles = (size + RT_TILE - 1) / RT_TILE;
+    let lowest = min(a.p.z, b.p.z);
+    for (var tv = lo.y / RT_TILE; tv <= hi.y / RT_TILE; tv++) {
+        for (var tu = lo.x / RT_TILE; tu <= hi.x / RT_TILE; tu++) {
+            let top = rt_bits[w.tile_offset + u32(tv * tiles + tu)];
+            if (lowest < f32(top + 1u)) { return false; }
+        }
+    }
+    return true;
+}
+
+fn rt_cell(face: u32, cell: vec3<i32>) -> i32 {
+    return rt_cell_in(rt.faces[face], cell);
+}
+
+fn rt_cell_in(w: FaceWindow, cell: vec3<i32>) -> i32 {
+    let lu = cell.x - w.origin_u;
+    let lv = cell.y - w.origin_v;
+    if (w.size == 0u || lu < 0 || lv < 0 || lu >= i32(w.size) || lv >= i32(w.size)) { return RT_NO_DATA; }
+    let l = cell.z - w.base_layer;
+    if (l < 0) { return RT_SOLID; }                                // below the window: solid ground
+    if (l >= i32(w.words_per_column * 32u)) { return RT_AIR; }     // above the window: air
+    let col = u32(lv) * w.size + u32(lu);
+    let word = rt_bits[w.offset + col * w.words_per_column + u32(l) / 32u];
+    return select(RT_AIR, RT_SOLID, ((word >> (u32(l) & 31u)) & 1u) == 1u);
+}
+
+// exact 3D DDA over the cells between a and b on one face (the cell containing a was checked already)
+fn rt_walk(a: BlockPos, b: BlockPos) -> i32 {
+    let res = i32(rt.resolution);
+    let w = rt.faces[a.face]; // load once: indexing the uniform array per cell is slow
+    let d = b.p - a.p;
+    let step = vec3<i32>(sign(d));
+    let inv = 1.0 / max(abs(d), vec3<f32>(1e-6));
+    var cell = vec3<i32>(floor(a.p));
+    let cell_f = vec3<f32>(cell);
+    var t_max = select(a.p - cell_f, cell_f + 1.0 - a.p, d > vec3<f32>(0.0)) * inv;
+
+    loop {
+        if (t_max.x < t_max.y && t_max.x < t_max.z) {
+            if (t_max.x > 1.0) { break; }
+            cell.x += step.x;
+            t_max.x += inv.x;
+        } else if (t_max.y < t_max.z) {
+            if (t_max.y > 1.0) { break; }
+            cell.y += step.y;
+            t_max.y += inv.y;
+        } else {
+            if (t_max.z > 1.0) { break; }
+            cell.z += step.z;
+            t_max.z += inv.z;
+        }
+        if (cell.x < 0 || cell.y < 0 || cell.x >= res || cell.y >= res) { return RT_CROSSES_FACE; }
+        let c = rt_cell_in(w, cell);
+        if (c != RT_AIR) { return c; }
+    }
+    return RT_CONTINUE;
+}
+
+// block coordinates of two faces don't line up: split the segment at the face edge (found by bisection)
+// and walk each side on its own face. Point sampling is the fallback, e.g. near cube corners.
+fn rt_cross(a: BlockPos, wa: vec3<f32>, wb: vec3<f32>) -> i32 {
+    var lo = 0.0;
+    var hi = 1.0;
+    for (var i = 0; i < 10; i++) {
+        let mid = 0.5 * (lo + hi);
+        if (to_block(mix(wa, wb, mid)).face == a.face) { lo = mid; } else { hi = mid; }
+    }
+    var r = rt_walk(a, to_block(mix(wa, wb, lo)));
+    if (r != RT_CONTINUE) { return r; }
+
+    let c = to_block(mix(wa, wb, hi));
+    let b = to_block(wb);
+    if (c.face != b.face) { return rt_sample(wa, wb); }
+    r = rt_cell(c.face, vec3<i32>(floor(c.p))); // rt_walk skips its start cell
+    if (r != RT_AIR) { return r; }
+    return rt_walk(c, b);
+}
+
+fn rt_sample(wa: vec3<f32>, wb: vec3<f32>) -> i32 {
+    let n = max(i32(ceil(length(wb - wa) / 0.1)), 1);
+    for (var k = 1; k <= n; k++) {
+        let s = to_block(mix(wa, wb, f32(k) / f32(n)));
+        let c = rt_cell(s.face, vec3<i32>(floor(s.p)));
+        if (c != RT_AIR) { return c; }
+    }
+    return RT_CONTINUE;
+}
+
+// 1.0 = lit, 0.0 = shadowed
+fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
+    var a = to_block(world_pos);
+    if (rt.faces[a.face].size == 0u) { return 1.0; }
+
+    // Faces are drawn as flat quads but are curved in block space, so the fragment can sit slightly
+    // inside its own block. Snap the coordinate along the face normal onto the cell boundary,
+    // just on the air side, so the ray can't clip the neighbouring block on the same line.
+    let an = to_block(world_pos + N * 0.05);
+    if (an.face == a.face) {
+        let dn = an.p - a.p;
+        let adn = abs(dn);
+        if (adn.x >= adn.y && adn.x >= adn.z) {
+            a.p.x = round(a.p.x) + sign(dn.x) * 1e-3;
+        } else if (adn.y >= adn.z) {
+            a.p.y = round(a.p.y) + sign(dn.y) * 1e-3;
+        } else {
+            a.p.z = round(a.p.z) + sign(dn.z) * 1e-3;
+        }
+    } else {
+        a = to_block(world_pos + N * 0.01); // right at a face edge
+    }
+
+    // segments short enough that the planet's curvature over one segment stays below ~0.01 units
+    let seg_len = clamp(sqrt(0.02 * f32(rt.resolution) * 0.5), 0.25, 4.0);
+    let segments = min(i32(ceil(RT_RANGE / seg_len)), 512);
+    let top = f32(rt.max_layer + 1);
+    var wa = world_pos;
+
+    for (var seg = 1; seg <= segments; seg++) {
+        if (a.p.z >= top) { return 1.0; } // above every solid cell, and the ray only climbs
+        let wb = world_pos + L * (seg_len * f32(seg));
+        let b = to_block(wb);
+
+        var r = RT_CROSSES_FACE;
+        if (b.face == a.face) {
+            r = RT_CONTINUE;
+            if (!rt_above_tiles(a, b)) { r = rt_walk(a, b); }
+        } else {
+            r = rt_cross(a, wa, wb);
+        }
+        if (r == RT_CROSSES_FACE) { r = rt_sample(wa, wb); }
+        if (r == RT_SOLID) { return 0.0; }
+        if (r == RT_NO_DATA) { return 1.0; }
+        a = b;
+        wa = wb;
+    }
+    return 1.0;
+}
+
+fn shadow_factor(in: VertexOut, N: vec3<f32>, L: vec3<f32>, NdotL: f32) -> f32 {
+    if (rt.enabled == 1u) {
+        return rt_shadow(in.world_pos, N, L);
+    }
+    return fetch_shadow_accurate(in.shadow_pos, NdotL);
+}
+
 // --- UTILS ---
 
 fn dither_opacity(pos: vec4<f32>, alpha: f32) -> bool {
@@ -189,7 +418,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     
     // Shadow Map
     // faces turned away from the sun are in their own shadow; skipping the lookup there avoids acne
-    let shadow_raw = select(fetch_shadow_accurate(in.shadow_pos, NdotL), 0.0, NdotL <= 0.0);
+    let shadow_raw = select(shadow_factor(in, N, L, NdotL), 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 

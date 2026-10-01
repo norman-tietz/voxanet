@@ -12,6 +12,7 @@ use crate::controller::Controller;
 use crate::entity::Player;
 use glam::Vec3;
 use crate::lod_animation::{LodAnimator, AnyKey};
+use crate::rt_shadow::{RtParams, ShadowWindow};
 use bytemuck::{Pod, Zeroable};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -129,6 +130,13 @@ pub struct Renderer<'a> {
     last_fps_time: std::time::Instant,
     frame_count: u32,
     current_fps: u32,
+
+    // --- RAY-MARCHED SHADOWS (prototype, enabled with VOXANET_RT_SHADOWS=1) ---
+    rt_enabled: bool,
+    rt_params_buf: wgpu::Buffer,
+    rt_bits_buf: wgpu::Buffer,
+    rt_center: Option<BlockId>,
+    rt_dirty: bool,
 }
 
 impl<'a> Renderer<'a> {
@@ -229,7 +237,21 @@ let size = window.inner_size();
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
-                }
+                },
+                // 3: ray-marched shadow window params
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                // 4: ray-marched shadow window solid/air bits
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
             ],
             label: Some("global_layout"),
         });
@@ -252,12 +274,34 @@ let size = window.inner_size();
             mapped_at_creation: false 
         });
 
+        // ray-marched shadows; bind groups that must not ray march (shadow pass, UI) get rt_off_buf
+        let rt_enabled = std::env::var("VOXANET_RT_SHADOWS").is_ok();
+        let rt_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RT Shadow Params"),
+            size: std::mem::size_of::<RtParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let rt_off_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("RT Shadow Params (off)"),
+            contents: bytemuck::cast_slice(&[RtParams::zeroed()]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let rt_bits_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RT Shadow Bits"),
+            size: ShadowWindow::max_words() * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor { 
             layout: &global_layout, 
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: global_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: rt_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
             ], 
             label: None 
         });
@@ -292,6 +336,8 @@ let size = window.inner_size();
                 wgpu::BindGroupEntry { binding: 0, resource: shadow_global_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dummy_depth_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: rt_off_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
             ],
         });
 
@@ -442,6 +488,8 @@ let size = window.inner_size();
                 wgpu::BindGroupEntry { binding: 0, resource: global_buf_identity.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: rt_off_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
             ],
             label: Some("Identity Bind Group"), 
         });
@@ -496,6 +544,12 @@ let size = window.inner_size();
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
             current_fps: 0,
+
+            rt_enabled,
+            rt_params_buf,
+            rt_bits_buf,
+            rt_center: None,
+            rt_dirty: true,
         }
     }
 
@@ -809,10 +863,12 @@ let size = window.inner_size();
         self.pending_chunks.clear();
         self.pending_lods.clear(); 
         self.player_chunk_pos = None; 
+        self.rt_dirty = true;
         self.update_view(player_pos, planet);
     }
 
     pub fn refresh_neighbors(&mut self, id: BlockId, planet: &PlanetData) {
+        self.rt_dirty = true;
         let u_c = id.u / CHUNK_SIZE;
         let v_c = id.v / CHUNK_SIZE;
         let keys = vec![
@@ -834,6 +890,31 @@ let size = window.inner_size();
         }
     }
 
+
+    fn update_rt_window(&mut self, player_pos: Vec3, planet: &PlanetData) {
+        if !self.rt_enabled { return; }
+        let Some(id) = CoordSystem::pos_to_id(player_pos, planet.resolution) else { return };
+        // small planets are stored completely, so only big ones follow the player
+        let whole_planet = planet.resolution <= crate::rt_shadow::WINDOW_SIZE;
+        let recenter = match self.rt_center {
+            Some(c) => {
+                let limit = (crate::rt_shadow::WINDOW_SIZE / 8) as i32;
+                !whole_planet && (c.face != id.face || (c.u as i32 - id.u as i32).abs() > limit || (c.v as i32 - id.v as i32).abs() > limit)
+            }
+            None => true,
+        };
+        if !recenter && !self.rt_dirty { return; }
+
+        let start = std::time::Instant::now();
+        let window = ShadowWindow::build(planet, id, player_pos.normalize_or_zero());
+        self.queue.write_buffer(&self.rt_params_buf, 0, bytemuck::cast_slice(&[window.params]));
+        self.queue.write_buffer(&self.rt_bits_buf, 0, bytemuck::cast_slice(&window.bits));
+        let faces: Vec<u32> = (0..6).filter(|&f| window.params.faces[f].size > 0).map(|f| f as u32).collect();
+        println!("RT shadow windows rebuilt: faces {:?}, {} KB in {:.2} ms",
+            faces, window.bits.len() * 4 / 1024, start.elapsed().as_secs_f32() * 1000.0);
+        self.rt_center = Some(id);
+        self.rt_dirty = false;
+    }
 
     fn calculate_bounds(&self, face: u8, u_start: u32, v_start: u32, size: u32, planet_res: u32) -> (Vec3, f32) {
         // calculate center
@@ -992,6 +1073,8 @@ if controller.show_collisions {
         let out = match self.surface.get_current_texture() { Ok(o) => o, _ => return };
         let view = out.texture.create_view(&wgpu::TextureViewDescriptor::default());
         
+        self.update_rt_window(player.position, planet);
+
         // -- sun matrix --
         let sun_dir = glam::Vec3::new(0.5, 0.8, 0.4).normalize();
         // the light's depth range (shadow_dist +- 150) must match SHADOW_DEPTH_RANGE in shader.wgsl
@@ -1142,6 +1225,9 @@ if controller.show_collisions {
             shadow_pass.set_pipeline(&self.pipeline_shadow);
             shadow_pass.set_bind_group(0, &self.shadow_global_bind, &[]);
 
+            // the ray-marched shadows don't need the shadow map
+            if !self.rt_enabled {
+
             for mesh in self.chunks.values() {
                 if frustum.intersects_sphere(mesh.center, mesh.radius) {
                     shadow_pass.set_bind_group(1, &mesh.bind_group, &[]);
@@ -1157,6 +1243,7 @@ if controller.show_collisions {
                 shadow_pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
                 shadow_pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
                 }
+            }
             }
         }
 

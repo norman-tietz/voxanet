@@ -9,6 +9,7 @@ mod renderer;
 mod noise;
 mod lod_animation;
 mod cmd;
+mod rt_shadow;
 mod system_diagnostics; 
 
 
