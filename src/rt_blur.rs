@@ -1,7 +1,10 @@
 // rt_blur.rs
 // Screen-space soft shadows for the ray-marched shadows: the scene is drawn once with fs_rt, which
 // writes the sharp shadow term and the camera distance to `target`; blur.wgsl blurs it horizontally
-// into `tmp` and vertically into `out`; the main pass reads `out` at its own pixel (group 2).
+// into `tmp` and vertically into `out`; the main pass upsamples `out` at its pixel (group 2).
+//
+// Ray marching costs per pixel, so these targets are capped at MAX_RT_PIXELS: on large screens the
+// shadow term is computed at a lower resolution and upsampled depth-aware in fs_main (shadow_factor).
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -10,6 +13,13 @@ use crate::gpu_timer::{self, GpuTimer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const PENUMBRA_WIDTH: f32 = 0.3; // world units
+pub const MAX_RT_PIXELS: f32 = 1.5e6;
+
+// size of the shadow targets for a screen size, keeping the aspect ratio
+fn rt_size(width: u32, height: u32) -> (u32, u32) {
+    let scale = (MAX_RT_PIXELS / (width.max(1) * height.max(1)) as f32).sqrt().min(1.0);
+    (((width as f32 * scale).round() as u32).max(1), ((height as f32 * scale).round() as u32).max(1))
+}
 
 // must match BlurParams in blur.wgsl
 #[repr(C)]
@@ -21,6 +31,7 @@ struct BlurParams {
 }
 
 pub struct RtBlur {
+    pub size: (u32, u32), // of the shadow targets, at most MAX_RT_PIXELS
     pub target: wgpu::TextureView,
     pub depth: wgpu::TextureView,
     tmp: wgpu::TextureView,
@@ -101,9 +112,10 @@ impl RtBlur {
         let params_h = params([1.0, 0.0]);
         let params_v = params([0.0, 1.0]);
 
+        let size = rt_size(width, height);
         let (target, depth, tmp, out, sample_bind, bind_h, bind_v) =
-            Self::make_targets(device, &sample_layout, &blur_layout, &params_h, &params_v, width, height);
-        Self { target, depth, tmp, out, sample_layout, sample_bind, rt_pipeline, blur_layout, blur_pipeline, params_h, params_v, bind_h, bind_v }
+            Self::make_targets(device, &sample_layout, &blur_layout, &params_h, &params_v, size.0, size.1);
+        Self { size, target, depth, tmp, out, sample_layout, sample_bind, rt_pipeline, blur_layout, blur_pipeline, params_h, params_v, bind_h, bind_v }
     }
 
     #[allow(clippy::type_complexity)]
@@ -135,14 +147,17 @@ impl RtBlur {
         (target, depth, tmp, out, sample_bind, bind_h, bind_v)
     }
 
+    // width/height: the screen size
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.size = rt_size(width, height);
         let (target, depth, tmp, out, sample_bind, bind_h, bind_v) =
-            Self::make_targets(device, &self.sample_layout, &self.blur_layout, &self.params_h, &self.params_v, width, height);
+            Self::make_targets(device, &self.sample_layout, &self.blur_layout, &self.params_h, &self.params_v, self.size.0, self.size.1);
         (self.target, self.depth, self.tmp, self.out, self.sample_bind, self.bind_h, self.bind_v) = (target, depth, tmp, out, sample_bind, bind_h, bind_v);
     }
 
-    // focal: pixels per world unit at distance 1 (half the screen height / tan(fov / 2))
-    pub fn set_focal(&self, queue: &wgpu::Queue, focal: f32) {
+    // the camera's vertical field of view, so the blur radius covers PENUMBRA_WIDTH at the targets' size
+    pub fn set_fov(&self, queue: &wgpu::Queue, fov_y: f32) {
+        let focal = self.size.1 as f32 * 0.5 / (fov_y * 0.5).tan(); // pixels per world unit at distance 1
         for (buf, dir) in [(&self.params_h, [1.0, 0.0]), (&self.params_v, [0.0, 1.0])] {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&[BlurParams { dir, focal, width: PENUMBRA_WIDTH }]));
         }

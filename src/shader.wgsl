@@ -5,6 +5,7 @@ struct Global {
     view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     sun_dir: vec4<f32>,
+    screen: vec4<f32>, // width, height in pixels
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -293,12 +294,35 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
     return 1.0;
 }
 
-// blurred ray-marched shadow term at this pixel (1 = lit); the UI bind group has rt.enabled = 0
+// blurred ray-marched shadow term at this pixel (1 = lit); the UI bind group has rt.enabled = 0.
+// The shadow targets can be smaller than the screen (rt_blur.rs MAX_RT_PIXELS): upsample from the
+// four nearest texels, weighted bilinearly and by how well their camera distance matches this pixel's,
+// so shadows don't bleed across silhouettes. At full resolution this is a single exact tap.
 fn shadow_factor(in: VertexOut) -> f32 {
-    if (rt.enabled == 1u) {
-        return textureLoad(rt_blurred, vec2<i32>(in.clip_pos.xy), 0).r;
+    if (rt.enabled != 1u) { return 1.0; }
+    let dims = vec2<i32>(textureDimensions(rt_blurred));
+    let p = in.clip_pos.xy * vec2<f32>(dims) / global.screen.xy - 0.5;
+    let base = vec2<i32>(floor(p));
+    let f = fract(p);
+    let dist = distance(global.camera_pos.xyz, in.world_pos);
+
+    var sum = 0.0;
+    var wsum = 0.0;
+    var closest = 1.0;
+    var closest_err = 1e9;
+    for (var i = 0; i < 4; i++) {
+        let o = vec2<i32>(i & 1, i >> 1u);
+        let t = textureLoad(rt_blurred, clamp(base + o, vec2<i32>(0), dims - 1), 0);
+        if (t.g <= 0.0) { continue; } // sky
+        let err = abs(t.g - dist) / dist;
+        if (err < closest_err) { closest_err = err; closest = t.r; }
+        let bilinear = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        let w = bilinear / (1.0 + (err / 0.02) * (err / 0.02));
+        sum += t.r * w;
+        wsum += w;
     }
-    return 1.0;
+    if (wsum < 1e-3) { return closest; }
+    return sum / wsum;
 }
 
 // sharp ray-marched shadow term + camera distance, blurred afterwards (rt_blur.rs)

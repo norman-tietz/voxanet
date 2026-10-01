@@ -99,6 +99,8 @@ The rendering pipeline is constructed using **wgpu (WebGPU)**, featuring a custo
 
 *   **Soft Shadow Edges:** The sharp ray-marched shadow term is written to an offscreen texture together with the camera distance and blurred with a separable, **depth-aware** kernel whose radius covers a fixed width in world space. Edges get a soft penumbra at a constant cost per pixel, without bleeding across silhouettes.
 
+*   **Resolution-Independent Shadow Cost:** Ray marching costs per pixel, so on large screens the shadow term is computed at no more than 1.5 megapixels and upsampled with a **depth-aware 4-tap filter** (taps weighted by how well their stored camera distance matches the pixel). On a 6K display this cut the frame time from 53 ms to 15 ms with no visible difference, since the soft edges hide the lower shadow resolution.
+
 *   **Atmospheric Scattering & Tone Mapping:**
     *   Implemented an **Exponential Squared Fog** model ($\displaystyle e^{-(d \cdot \rho)^2}$) to simulate atmospheric depth.
     *   Applied **ACES** approximation for HDR to LDR tone mapping.

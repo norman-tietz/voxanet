@@ -27,6 +27,7 @@ pub struct GlobalUniform {
     pub view_proj: [f32; 16],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],   
+    pub screen: [f32; 4], // width, height in pixels
 }
 
 #[repr(C)]
@@ -376,6 +377,7 @@ let size = window.inner_size();
         let identity_global_data = GlobalUniform {
             view_proj: identity_mat.to_cols_array(),
             cam_pos: [0.0, 0.0, 0.0, 0.0],
+            screen: [config.width as f32, config.height as f32, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
         };
         
@@ -982,6 +984,7 @@ if controller.show_collisions {
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
+            screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
         };
         self.queue.write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -1030,7 +1033,7 @@ if controller.show_collisions {
         // --- PASS 1: RAY-MARCHED SHADOWS + BLUR ---
         {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
-            self.rt_blur.set_focal(&self.queue, self.config.height as f32 * 0.5 / (fov.to_radians() * 0.5).tan());
+            self.rt_blur.set_fov(&self.queue, fov.to_radians());
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("RT Shadow Pass"),
@@ -1238,11 +1241,13 @@ if controller.show_collisions {
             if player.debug_mode {
                 let status = if controller.freeze_culling { "FROZEN" } else { "ACTIVE" };
                 let info = format!(
-                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\n{}", 
+                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\nScreen  {}x{}\nShadows {}x{}\n{}", 
                     status,
                     rendered_chunks, self.chunks.len(),
                     rendered_lods, self.lod_chunks.len(),
                     self.load_queue.len(),
+                    self.config.width, self.config.height,
+                    self.rt_blur.size.0, self.rt_blur.size.1,
                     self.gpu_timer.as_ref().map_or("GPU timing unavailable".to_string(), |t| t.summary())
                 );
 
