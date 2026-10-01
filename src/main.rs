@@ -13,6 +13,7 @@ mod rt_shadow;
 mod rt_blur;
 mod gpu_timer;
 mod hw_rt;
+mod deferred;
 mod material;
 mod system_diagnostics;
 

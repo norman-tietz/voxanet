@@ -15,6 +15,7 @@ use glam::Vec3;
 use crate::lod_animation::{LodAnimator, AnyKey};
 use crate::rt_shadow::{RtParams, ShadowWindow};
 use crate::rt_blur::RtBlur;
+use crate::deferred::Deferred;
 use crate::gpu_timer::{self, GpuTimer};
 use crate::hw_rt::HwRt;
 use bytemuck::{Pod, Zeroable};
@@ -26,6 +27,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GlobalUniform {
     pub view_proj: [f32; 16],
+    // camera ray through screen pixel (x, y) = col0 + x/width * col1 + y/height * col2 (unnormalised, from
+    // the camera); computed in f64, since an f32 inverse of the projection (near 0.1, far 20000) is too
+    // imprecise to reconstruct distant surfaces from their camera distance (deferred lighting)
+    pub ray_dirs: [f32; 16],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],   
     pub screen: [f32; 4], // width, height in pixels
@@ -66,7 +71,6 @@ pub struct Renderer {
     local_layout: wgpu::BindGroupLayout,
 
     pipeline_fill: wgpu::RenderPipeline,
-    pipeline_wire: wgpu::RenderPipeline,
     pipeline_line: wgpu::RenderPipeline,
     
     chunks: HashMap<ChunkKey, ChunkMesh>,     
@@ -82,7 +86,7 @@ pub struct Renderer {
     local_bind_player: wgpu::BindGroup,
 
 
-    depth: wgpu::TextureView,
+    deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
     global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
 
     // --- MESHES ---
@@ -322,12 +326,12 @@ let size = window.inner_size();
         // group 2: the blurred ray-marched shadow term, read by fs_main
         let rt_sample_layout = RtBlur::sample_layout(&device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&local_layout), Some(&rt_sample_layout)], immediate_size: 0 });
-        let rt_blur = RtBlur::new(&device, rt_sample_layout, &global_layout, &layout, &shader, config.width, config.height);
+        let rt_blur = RtBlur::new(&device, rt_sample_layout, &global_layout, &shader, config.width, config.height);
 
         let pipeline_fill = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, false);
-        let pipeline_wire = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, true);
         let pipeline_line = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::LineList, false);
-        let depth = Self::mk_depth(&device, &config);
+        let deferred = Deferred::new(&device, &layout, &global_layout, &rt_blur.sample_layout, &shader, config.format,
+            features.contains(wgpu::Features::POLYGON_MODE_LINE), config.width, config.height);
 
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -386,6 +390,7 @@ let size = window.inner_size();
         // global identity
         let identity_global_data = GlobalUniform {
             view_proj: identity_mat.to_cols_array(),
+            ray_dirs: [0.0; 16],
             cam_pos: [0.0, 0.0, 0.0, 0.0],
             screen: [config.width as f32, config.height as f32, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
@@ -416,13 +421,13 @@ let size = window.inner_size();
 
         Self { 
             window, surface, device, queue, config, 
-            pipeline_fill, pipeline_wire, pipeline_line,
+            pipeline_fill, pipeline_line,
             chunks: HashMap::new(), 
             lod_chunks: HashMap::new(),
             global_buf, global_bind, 
             local_bind_identity,
             local_buf_player, local_bind_player,
-            depth,
+            deferred,
 
             font_system,
             swash_cache,
@@ -482,15 +487,28 @@ let size = window.inner_size();
         })
     }
 
-    fn mk_depth(dev: &wgpu::Device, cfg: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
-        dev.create_texture(&wgpu::TextureDescriptor { size: wgpu::Extent3d { width: cfg.width, height: cfg.height, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, label: None, view_formats: &[] }).create_view(&wgpu::TextureViewDescriptor::default())
+    fn ray_dirs(view_proj: glam::Mat4, cam_pos: Vec3) -> [f32; 16] {
+        let inv = view_proj.as_dmat4().inverse();
+        // inv * (ndc, 1, 1) is linear in ndc in homogeneous coordinates; keeping the direction homogeneous
+        // (xyz - cam * w) keeps it linear, so interpolating it across the screen is exact (w > 0)
+        let toward = |x: f64, y: f64| {
+            let h = inv * glam::DVec4::new(x, y, 1.0, 1.0);
+            (h.truncate() - cam_pos.as_dvec3() * h.w) * h.w.signum()
+        };
+        let top_left = toward(-1.0, 1.0);
+        let scale = 1.0 / top_left.length(); // keep the magnitudes near 1
+        let top_left = top_left * scale;
+        let dx = toward(1.0, 1.0) * scale - top_left;
+        let dy = toward(-1.0, -1.0) * scale - top_left;
+        let col = |v: glam::DVec3| [v.x as f32, v.y as f32, v.z as f32, 0.0];
+        [col(top_left), col(dx), col(dy), [0.0; 4]].concat().try_into().unwrap()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.depth = Self::mk_depth(&self.device, &self.config);
+        self.deferred.resize(&self.device, width, height);
         self.rt_blur.resize(&self.device, width, height);
     }
 
@@ -1022,6 +1040,7 @@ if controller.show_collisions {
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
+            ray_dirs: Self::ray_dirs(mvp, cam_pos),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
             screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
@@ -1069,7 +1088,7 @@ if controller.show_collisions {
 
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         
-        // --- PASS 1: SHADOWS (HARDWARE RAY TRACING OR RAY MARCHING) + BLUR ---
+        // hardware ray tracing: rebuild the TLAS over the current chunk BLASes before pass 2 uses it
         if let Some(hw) = &mut self.hw_rt {
             if self.hw_shadows {
                 // all loaded chunks, also those outside the view: they cast shadows into it
@@ -1077,77 +1096,22 @@ if controller.show_collisions {
                 hw.update(&self.device, &mut enc, blases);
             }
         }
+        // --- PASS 1: GEOMETRY (DEFERRED G-BUFFER, FULL RESOLUTION) ---
+        // all scene geometry is drawn once, here; lighting runs per pixel in pass 4
         {
-            let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
-            self.rt_blur.set_fov(&self.queue, fov.to_radians());
-            // the G-buffer pass below, then one compute invocation per shadow texel: hardware rays
-            // (HwRt::trace) or the ray march (RtBlur::march), so hidden surfaces cost nothing
-            let hw = self.hw_rt.as_ref().filter(|_| self.hw_shadows);
-            {
-                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow G-Buffer Pass"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.g_pos, resolve_target: None, ops: RtBlur::gbuf_clear_ops() }),
-                        Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.g_nrm, resolve_target: None, ops: RtBlur::gbuf_clear_ops() }),
-                    ],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::GBUFFER, true, true)),
-                    occlusion_query_set: None,
-                multiview_mask: None,
-                });
-                pass.set_pipeline(&self.rt_blur.gbuf_pipeline);
-                pass.set_bind_group(0, &self.global_bind, &[]);
-                pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
-                // the same meshes the main pass draws below
-                let meshes = self.lod_chunks.values().chain(self.chunks.values()).filter(|m| cull_frustum.intersects_sphere(m.center, m.radius))
-                    .chain(self.animator.dying_chunks.values().map(|d| &d.mesh).filter(|m| frustum.intersects_sphere(m.center, m.radius)));
-                for mesh in meshes {
-                    pass.set_bind_group(1, &mesh.bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
-                    pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
-                }
-                if !controller.first_person {
-                    pass.set_bind_group(1, &self.local_bind_player, &[]);
-                    pass.set_vertex_buffer(0, self.player_v_buf.slice(..));
-                    pass.set_index_buffer(self.player_i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.player_inds, 0, 0..1);
-                }
-            }
-            let compute_writes = self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::RAYS, true, true));
-            match hw {
-                Some(hw) => hw.trace(&self.device, &self.queue, &mut enc, &self.rt_blur, sun_dir, compute_writes),
-                None => self.rt_blur.march(&mut enc, &self.global_bind, compute_writes),
-            }
-            self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
-        }
-
-        // --- PASS 2: MAIN RENDER ---
-        {
+            let geometry_targets = self.deferred.geometry_targets();
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-
-            label: None, color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                depth_slice: None, 
-                view: &view, 
-                resolve_target: None, 
-                ops: wgpu::Operations { 
-                    // Matches the atmospheric fog color in shader
-
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }),
-                    store: wgpu::StoreOp::Store 
-                } 
-            })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::MAIN, true, true)), occlusion_query_set: None, multiview_mask: None,
+                label: Some("Geometry Pass"),
+                color_attachments: &geometry_targets,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.deferred.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::GEOMETRY, true, true)),
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
-            
-            if controller.is_wireframe { pass.set_pipeline(&self.pipeline_wire); } 
-            else { pass.set_pipeline(&self.pipeline_fill); }
-            
+            pass.set_pipeline(if controller.is_wireframe { &self.deferred.geom_wire } else { &self.deferred.geom_fill });
             pass.set_bind_group(0, &self.global_bind, &[]);
             pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
-            
-            // DRAW LOD CHUNKS
+
             for mesh in self.lod_chunks.values() {
                 if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
                     rendered_lods += 1; // Count
@@ -1157,8 +1121,6 @@ if controller.show_collisions {
                     pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
                 }
             }
-
-            // DRAW VOXEL CHUNKS
             for mesh in self.chunks.values() {
                 if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
                     rendered_chunks += 1; // Count
@@ -1168,8 +1130,7 @@ if controller.show_collisions {
                     pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
                 }
             }
-
-            // DRAW DYING ANIMATIONS
+            // fading chunks are dithered (fs_geom discards), so they work in the G-buffer too
             for state in self.animator.dying_chunks.values() {
                 if frustum.intersects_sphere(state.mesh.center, state.mesh.radius) {
                     pass.set_bind_group(1, &state.mesh.bind_group, &[]);
@@ -1178,15 +1139,52 @@ if controller.show_collisions {
                     pass.draw_indexed(0..state.mesh.num_inds, 0, 0..1);
                 }
             }
-
             if !controller.first_person {
-                if controller.is_wireframe { pass.set_pipeline(&self.pipeline_wire); } 
-                else { pass.set_pipeline(&self.pipeline_fill); }
                 pass.set_bind_group(1, &self.local_bind_player, &[]);
                 pass.set_vertex_buffer(0, self.player_v_buf.slice(..));
                 pass.set_index_buffer(self.player_i_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.player_inds, 0, 0..1);
             }
+        }
+
+        // --- PASS 2: SHADOWS (HARDWARE RAY TRACING OR RAY MARCHING) + BLUR ---
+        // the shadow-resolution G-buffer comes from pass 1, then one compute invocation per shadow texel
+        {
+            let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
+            self.rt_blur.set_fov(&self.queue, fov.to_radians());
+            self.deferred.downsample(&self.device, &mut enc, &self.global_bind, &self.rt_blur, self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::RAYS, true, false)));
+            let compute_writes = self.gpu_timer.as_ref().and_then(|t| t.compute_writes(gpu_timer::RAYS, false, true));
+            match self.hw_rt.as_ref().filter(|_| self.hw_shadows) {
+                Some(hw) => hw.trace(&self.device, &self.queue, &mut enc, &self.rt_blur, sun_dir, compute_writes),
+                None => self.rt_blur.march(&mut enc, &self.global_bind, compute_writes),
+            }
+            self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
+        }
+
+        // --- PASS 3: LIGHTING (ONCE PER PIXEL) + FORWARD OVERLAYS ---
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Lighting Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                    depth_slice: None, 
+                    view: &view, 
+                    resolve_target: None, 
+                    ops: wgpu::Operations { 
+                        // sky; fs_light discards pixels without geometry
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }),
+                        store: wgpu::StoreOp::Store 
+                    } 
+                })],
+                // the G-buffer depth, so the overlays below are hidden behind terrain
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.deferred.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::LIGHTING, true, true)), occlusion_query_set: None, multiview_mask: None,
+            });
+
+            pass.set_pipeline(&self.deferred.light_pipeline);
+            pass.set_bind_group(0, &self.global_bind, &[]);
+            pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
+            pass.set_bind_group(3, &self.deferred.textures_bind, &[]);
+            pass.draw(0..3, 0..1);
 
             if self.collision_inds > 0 {
                 pass.set_pipeline(&self.pipeline_line); // Use line pipeline
@@ -1196,8 +1194,6 @@ if controller.show_collisions {
                 pass.set_index_buffer(self.collision_i_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.collision_inds, 0, 0..1);
             }
-
-
 
             if self.cursor_inds > 0 {
                 pass.set_pipeline(&self.pipeline_fill); 
@@ -1236,7 +1232,7 @@ if controller.show_collisions {
             self.last_fps_time = now;
         }
 
-        // --- PASS 3: TEXT RENDER ---
+        // --- PASS 4: TEXT RENDER ---
         // run this pass every frame to show FPS
         {
             let mut text_buffers = Vec::new();

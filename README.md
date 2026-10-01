@@ -106,6 +106,8 @@ The rendering pipeline is constructed using **wgpu (WebGPU)**, featuring a custo
 
 *   **Resolution-Independent Shadow Cost:** Ray marching costs per pixel, so on large screens the shadow term is computed at no more than 1.5 megapixels and upsampled with a **depth-aware 4-tap filter** (taps weighted by how well their stored camera distance matches the pixel). On a 6K display this cut the frame time from 53 ms to 15 ms with no visible difference, since the soft edges hide the lower shadow resolution.
 
+*   **Deferred Shading:** All scene geometry (about 2 million triangles at high resolution) is drawn once per frame into a G-buffer of vertex colour, normal and camera distance; lighting then runs exactly once per pixel in a full-screen pass, and the shadow passes read their input from the same G-buffer. World positions are reconstructed from the stored distance with a camera ray basis computed in double precision, since an f32 inverse projection is too imprecise for distant terrain. Compared to forward rendering with a separate shadow G-buffer this raised the frame rate by 22-37% in demanding scenes.
+
 *   **Atmospheric Scattering & Tone Mapping:**
     *   Implemented an **Exponential Squared Fog** model ($\displaystyle e^{-(d \cdot \rho)^2}$) to simulate atmospheric depth.
     *   Applied **ACES** approximation for HDR to LDR tone mapping.

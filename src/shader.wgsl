@@ -3,6 +3,7 @@
 // basic shading (IMPROVE THIS LATER)
 struct Global {
     view_proj: mat4x4<f32>,
+    ray_dirs: mat4x4<f32>, // camera rays: col0 through the top-left corner, col1/col2 per screen width/height
     camera_pos: vec4<f32>,
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels
@@ -314,17 +315,17 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
     return 1.0;
 }
 
-// blurred ray-marched shadow term at this pixel (1 = lit); the UI bind group has rt.enabled = 0.
+// blurred ray-traced shadow term at screen pixel frag_xy (1 = lit); the UI bind group has rt.enabled = 0.
 // The shadow targets can be smaller than the screen (rt_blur.rs MAX_RT_PIXELS): upsample from the
 // four nearest texels, weighted bilinearly and by how well their camera distance matches this pixel's,
 // so shadows don't bleed across silhouettes. At full resolution this is a single exact tap.
-fn shadow_factor(in: VertexOut) -> f32 {
+fn shadow_at(frag_xy: vec2<f32>, world_pos: vec3<f32>) -> f32 {
     if (rt.enabled != 1u) { return 1.0; }
     let dims = vec2<i32>(textureDimensions(rt_blurred));
-    let p = in.clip_pos.xy * vec2<f32>(dims) / global.screen.xy - 0.5;
+    let p = frag_xy * vec2<f32>(dims) / global.screen.xy - 0.5;
     let base = vec2<i32>(floor(p));
     let f = fract(p);
-    let dist = distance(global.camera_pos.xyz, in.world_pos);
+    let dist = distance(global.camera_pos.xyz, world_pos);
 
     var sum = 0.0;
     var wsum = 0.0;
@@ -345,7 +346,7 @@ fn shadow_factor(in: VertexOut) -> f32 {
     return sum / wsum;
 }
 
-// ray-marched shadow term, once per shadow texel from the G-buffer written by fs_gbuf (rt_blur.rs)
+// ray-marched shadow term, once per shadow texel of the shadow G-buffer (cs_gbuf_down, rt_blur.rs)
 @group(3) @binding(0) var g_pos: texture_2d<f32>;    // xyz world position, w camera distance (0 = sky)
 @group(3) @binding(1) var g_nrm: texture_2d<f32>;    // xyz world normal
 @group(3) @binding(2) var shadow_out: texture_storage_2d<rgba16float, write>;
@@ -365,23 +366,6 @@ fn cs_march(@builtin(global_invocation_id) id: vec3<u32>) {
     var s = 0.0; // faces turned away from the sun are in their own shadow
     if (dot(N, L) > 0.0) { s = rt_shadow(g.xyz, N, L); }
     textureStore(shadow_out, p, vec4<f32>(s, g.w, 0.0, 1.0));
-}
-
-// world position, camera distance and normal per shadow texel, read by cs_march or rt_hw.wgsl
-struct GBufOut {
-    @location(0) pos: vec4<f32>,
-    @location(1) nrm: vec4<f32>,
-}
-
-@fragment
-fn fs_gbuf(in: VertexOut) -> GBufOut {
-    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
-        discard;
-    }
-    var out: GBufOut;
-    out.pos = vec4<f32>(in.world_pos, distance(global.camera_pos.xyz, in.world_pos));
-    out.nrm = vec4<f32>(normalize(in.world_normal), 0.0);
-    return out;
 }
 
 // --- UTILS ---
@@ -421,30 +405,25 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 
 // --- FRAGMENT SHADER ---
 
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // 1. Transparency Dithering
-    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
-        discard;
-    }
-
-    let N = normalize(in.world_normal);
+// lighting, fog, tone mapping and output colour space of one surface point (vertex colour `color`,
+// unit normal N); used per pixel by fs_light (deferred) and by the forward-drawn overlays (fs_main)
+fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32>) -> vec3<f32> {
     let L = normalize(global.sun_dir.xyz);
-    let V = normalize(global.camera_pos.xyz - in.world_pos);
+    let V = normalize(global.camera_pos.xyz - world_pos);
 
     // 2. Material Setup
     // De-Gamma the vertex color to Linear Space for math
-    let vert_color_linear = pow(in.color, vec3<f32>(2.2));
+    let vert_color_linear = pow(color, vec3<f32>(2.2));
     
     // Apply Detail Noise (Grain)
-    let noise = triplanar_detail(in.world_pos, N);
+    let noise = triplanar_detail(world_pos, N);
     let albedo = vert_color_linear * (1.0 + 0.03 * noise);
 
     // 3. Lighting Math
     let NdotL = max(dot(N, L), 0.0);
     
     // Shadow (ray-traced, see rt_blur.rs); faces turned away from the sun are in their own shadow
-    let shadow_raw = select(shadow_factor(in), 0.0, NdotL <= 0.0);
+    let shadow_raw = select(shadow_at(frag_xy, world_pos), 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
@@ -453,7 +432,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // B. Hemispheric Ambient
     // Top of objects gets Sky Color, Bottom gets Ground Bounce
-    let up_dot = dot(N, normalize(in.world_pos)); // Relative Up for sphere
+    let up_dot = dot(N, normalize(world_pos)); // Relative Up for sphere
     let hemi_factor = up_dot * 0.5 + 0.5;
     let ambient_light = mix(GROUND_COLOR, SKY_COLOR, hemi_factor);
 
@@ -467,7 +446,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var final_color = albedo * (direct_light + ambient_light + rim_light);
 
     // 4. Fog (Atmospheric Scattering)
-    let dist = distance(global.camera_pos.xyz, in.world_pos);
+    let dist = distance(global.camera_pos.xyz, world_pos);
     // Fog density tuned for the scale defined in gen.rs
     let fog_density = 0.0015; 
     let fog_factor = 1.0 - exp(-(dist * fog_density) * (dist * fog_density * 0.5)); // Exp2 fog
@@ -489,5 +468,86 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         final_color = clamp(SRGB_TO_P3 * final_color, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
-    return vec4<f32>(final_color, 1.0);
+    return final_color;
+}
+
+// forward shading, for overlays drawn after the deferred lighting (cursor box, player in third person...)
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // 1. Transparency Dithering
+    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+        discard;
+    }
+    return vec4<f32>(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy), 1.0);
+}
+
+// --- DEFERRED SHADING (deferred.rs) ---
+// The geometry pass writes vertex colour, normal and camera distance per screen pixel; fs_light shades
+// each pixel once and cs_gbuf_down derives the shadow-resolution G-buffer for the shadow passes.
+
+struct GeomOut {
+    @location(0) albedo: vec4<f32>,   // vertex colour (with baked AO)
+    @location(1) normal: vec4<f32>,   // world normal * 0.5 + 0.5
+    @location(2) dist: f32,           // camera distance, 0 = sky
+}
+
+@fragment
+fn fs_geom(in: VertexOut) -> GeomOut {
+    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+        discard;
+    }
+    var out: GeomOut;
+    out.albedo = vec4<f32>(in.color, 1.0);
+    out.normal = vec4<f32>(normalize(in.world_normal) * 0.5 + 0.5, 0.0);
+    out.dist = distance(global.camera_pos.xyz, in.world_pos);
+    return out;
+}
+
+@group(3) @binding(3) var d_albedo: texture_2d<f32>;
+@group(3) @binding(4) var d_normal: texture_2d<f32>;
+@group(3) @binding(5) var d_dist: texture_2d<f32>;
+
+// world position of the surface `dist` units from the camera behind screen pixel `frag_xy`
+fn world_from_pixel(frag_xy: vec2<f32>, dist: f32) -> vec3<f32> {
+    let uv = frag_xy / global.screen.xy;
+    let dir = normalize(global.ray_dirs[0].xyz + uv.x * global.ray_dirs[1].xyz + uv.y * global.ray_dirs[2].xyz);
+    return global.camera_pos.xyz + dir * dist;
+}
+
+// one triangle covering the screen
+@vertex
+fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(pos.xy);
+    let dist = textureLoad(d_dist, p, 0).r;
+    if (dist <= 0.0) { discard; } // sky: the pass's clear colour
+    let N = normalize(textureLoad(d_normal, p, 0).xyz * 2.0 - 1.0);
+    let world_pos = world_from_pixel(pos.xy, dist);
+    return vec4<f32>(shade(textureLoad(d_albedo, p, 0).rgb, N, world_pos, pos.xy), 1.0);
+}
+
+// shadow-resolution G-buffer (rt_blur.rs g_pos / g_nrm) from the full-resolution one, nearest pixel
+@group(1) @binding(1) var down_pos: texture_storage_2d<rgba32float, write>;
+@group(1) @binding(2) var down_nrm: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn cs_gbuf_down(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(down_pos);
+    if (id.x >= size.x || id.y >= size.y) { return; }
+    let screen = vec2<i32>(textureDimensions(d_dist));
+    let src = min(vec2<i32>((vec2<f32>(id.xy) + 0.5) * vec2<f32>(screen) / vec2<f32>(size)), screen - 1);
+    let dist = textureLoad(d_dist, src, 0).r;
+    if (dist <= 0.0) {
+        textureStore(down_pos, vec2<i32>(id.xy), vec4<f32>(0.0));
+        textureStore(down_nrm, vec2<i32>(id.xy), vec4<f32>(0.0));
+        return;
+    }
+    let world_pos = world_from_pixel(vec2<f32>(src) + 0.5, dist);
+    textureStore(down_pos, vec2<i32>(id.xy), vec4<f32>(world_pos, dist));
+    textureStore(down_nrm, vec2<i32>(id.xy), vec4<f32>(textureLoad(d_normal, src, 0).xyz * 2.0 - 1.0, 0.0));
 }

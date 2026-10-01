@@ -28,23 +28,32 @@ The planet is not stored as a voxel array. `PlanetData` (`src/common.rs`) holds:
 
 Block types live in `src/material.rs`. Natural blocks have no stored type: `material::natural_type` derives it from the column's height within the planet's height range (`PlanetTerrain::height_range`), the slope to neighbouring columns and smooth per-column jitter (sand on beaches and the sea floor, stone on steep steps and from 45% of the peak height above sea level, snow from 62%, dirt then stone below the surface). `PlanetData::block_type(id)` combines that with edits; voxel and LOD meshes both use it, so they agree.
 
+### Frame structure: deferred shading (`src/deferred.rs`)
+`Renderer::render` draws the scene geometry once per frame:
+1. **Geometry pass** (`fs_geom`, full screen resolution): vertex colour (`Rgba8Unorm`), normal (`Rgb10a2Unorm`, `n * 0.5 + 0.5`), camera distance (`R32Float`, 0 = sky) and depth. Chunks, LOD meshes, fading chunks and the third-person player are drawn here; fading chunks dither (discard) as before.
+2. **Shadows** (below): `cs_gbuf_down` derives the shadow-resolution G-buffer from it, then one compute invocation per shadow texel, then the blur.
+3. **Lighting pass** (`vs_full` + `fs_light`): one full-screen triangle; `shade()` in `shader.wgsl` (lighting, fog, ACES, P3 output) runs once per pixel. Sky pixels are discarded and keep the pass's clear colour.
+4. **Forward overlays** in the same pass, depth-tested against the G-buffer depth: collision lines, cursor box (`fs_main`, which also calls `shade()`), crosshair, console; then text.
+
+World positions are reconstructed from the camera distance and a camera ray basis (`GlobalUniform.ray_dirs`, built in f64 by `Renderer::ray_dirs` in homogeneous form so the per-pixel interpolation is exact). Don't use an f32 inverse view-projection for this: with near 0.1 / far 20000 it was off by ~0.5 units at 500 units, which made hardware rays self-shadow distant surfaces.
+
 ### Sun shadows: hardware ray tracing or ray marching, no shadow map
 The sun is a fixed directional light (`sun_dir` in `Renderer::render`). There is no shadow map. Per frame (`src/rt_blur.rs`):
-1. A G-buffer pass draws the scene with `fs_gbuf` (world position + camera distance, normal) at the shadow resolution, capped at `MAX_RT_PIXELS` (1.5 MP).
-2. A compute pass computes the sharp shadow term once per G-buffer texel into `RtBlur::target`, using one of two paths. Hidden surfaces cost nothing.
-3. `blur.wgsl` blurs it (separable, depth-aware, `PENUMBRA_WIDTH`), and `fs_main` upsamples it through bind group 2 (`shadow_factor()`: 4 taps weighted by camera-distance match; `GlobalUniform.screen` carries the screen size). Every pipeline using the scene layout must bind group 2.
+1. `Deferred::downsample` (`cs_gbuf_down`) fills `RtBlur::g_pos` / `g_nrm` (world position + camera distance, normal) at the shadow resolution, capped at `MAX_RT_PIXELS` (1.5 MP).
+2. A compute pass computes the sharp shadow term once per texel into `RtBlur::target`, using one of two paths.
+3. `blur.wgsl` blurs it (separable, depth-aware, `PENUMBRA_WIDTH`), and `shade()` upsamples it through bind group 2 (`shadow_at()`: 4 taps weighted by camera-distance match; `GlobalUniform.screen` carries the screen size). Every pipeline using the scene layout must bind group 2.
 
 The two paths:
 - **Hardware ray tracing** (`src/hw_rt.rs`, `src/rt_hw.wgsl`), the default when the device has `EXPERIMENTAL_RAY_QUERY` (opted in with `ExperimentalFeatures::enabled()`); console `/hw_shadows set true|false` switches (`Renderer::set_hw_shadows`). Every `ChunkMesh` gets a `blas` (vertex/index buffers need `BLAS_INPUT`); `HwRt::update` rebuilds the TLAS over all loaded chunks each frame; `HwRt::trace` casts one ray per texel. Don't put ray-query code into `shader.wgsl`: in the big scene shader it made the whole pass ~3× slower even unexecuted.
 - **Ray marching** (fallback, `cs_march` in `shader.wgsl`, `RtBlur::march`): `src/rt_shadow.rs` builds a window of solid/air bits per cube face (whole faces up to `WINDOW_SIZE` = 256 columns per face, otherwise windows on the faces turned toward the player) plus 8×8-column max-height tiles, rebuilt in `Renderer::update_rt_window` when the player moves far, changes face, or a block is edited (`rt_dirty`). `rt_shadow()` walks those cells toward the sun: 3D DDA in block space on short segments (re-linearised for the planet's curvature), bisection across cube-face edges, and adaptive steps that double (up to `RT_MAX_STRIDE`) while a climbing ray passes above the max-height tiles.
 - `RtParams`/`FaceWindow` in `rt_shadow.rs` must match the WGSL structs. The UI bind group uses `rt.enabled = 0` ("lit, don't read the shadow texture"); in hardware mode `update_rt_window` still writes `enabled = 1`.
-- The debug overlay's GPU timer (`src/gpu_timer.rs`) shows the G-buffer and rays parts separately.
+- The debug overlay's GPU timer (`src/gpu_timer.rs`) shows geometry, rays (downsample + shadow compute), blur, lighting and text.
 
 ### Coordinates (`src/gen.rs`, `CoordSystem`)
 A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the voxel count per face edge. Cube→sphere uses the Nowell mapping (`cube_to_sphere`), and `cubize_point` is its inverse. Layers are radially **exponential**, not linear: `get_layer_radius(layer, res) = (res/2) * exp(K*(layer/(res/2) - 1))` with `K = 0.85`, so voxels keep a roughly cubic shape at every depth. Convert between world positions and blocks only through `CoordSystem` (`pos_to_id`, `get_local_coords`, `get_block_center`, `get_vertex_pos`). Never hand-roll the math.
 
 ### Renderer owns streaming and LOD (`src/renderer.rs`)
-`Renderer` is the largest module. Besides the wgpu pipelines (fill/wire/line/UI, the ray-marched shadow pass and blur, plus glyphon text), it also owns world streaming:
+`Renderer` is the largest module. Besides the frame passes (deferred geometry/lighting, shadows, overlays, glyphon text), it also owns world streaming:
 - `update_view` walks a quadtree per face (`process_quadtree`, logical size `res.next_power_of_two()`). Nodes split on distance against `node_radius * lod_factor`, and `lod_factor` grows as node size shrinks. Leaf nodes at `CHUNK_SIZE` near the player become full voxel chunks (`ChunkKey` → `chunks`). Coarser nodes become heightfield LOD meshes (`LodKey` → `lod_chunks`).
 - Mesh generation runs on `std::thread::spawn` workers that get a **cloned `PlanetData`** and send `(key, verts, indices)` back over `mpsc` channels (`mesh_tx/rx`, `lod_tx/rx`). Per-frame budgets cap spawns and GPU uploads. `pending_*` sets dedupe in-flight work.
 - An LOD mesh is kept alive until all overlapping voxel chunks have loaded, which prevents holes. Removed meshes go to `LodAnimator` (`src/lod_animation.rs`) to fade out, and new ones fade in.

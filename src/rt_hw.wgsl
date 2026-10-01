@@ -1,5 +1,5 @@
 // rt_hw.wgsl
-// Hardware ray-traced shadow term (see hw_rt.rs). fs_gbuf (shader.wgsl) has written each shadow texel's world
+// Hardware ray-traced shadow term (see hw_rt.rs). cs_gbuf_down (shader.wgsl) has written each shadow texel's world
 // position, camera distance and normal; this compute shader casts one ray per texel toward the sun and
 // writes the same (shadow, distance) texel as the ray march (cs_march), so the blur and upsampling are shared.
 // Kept in its own small module: ray-query code in the big scene shader made every fragment much slower.
