@@ -97,7 +97,8 @@ The rendering pipeline is constructed using **wgpu (WebGPU)**, featuring a custo
     Instead of rendering a shadow map, every pixel traces a ray toward the sun through the voxel grid. The terrain around the player is uploaded as a compact grid of solid/air bits (one bit per block, 32 layers per `u32`) for each cube face, and the fragment shader walks it with a **3D DDA** in block coordinates. Shadow edges are therefore exact block edges at any distance, with no texel aliasing, shimmering, or bias tuning.
     *   The block grid is curved in world space, so the ray is split into short segments and re-linearised per segment; the segment length scales with the planet radius.
     *   Rays crossing a cube-face edge are split there by bisection and continue on the neighbouring face.
-    *   8x8-column maximum-height tiles let rays skip segments that pass above all terrain.
+    *   8x8-column maximum-height tiles let rays skip segments that pass above all terrain; while a ray keeps climbing above them its step length doubles, so rays over open terrain finish in a few steps.
+    *   Rays are cast from a **compute pass** over a G-buffer (world position and normal per pixel), so each visible pixel is traced exactly once and hidden surfaces cost nothing.
 
 *   **Soft Shadow Edges:** The sharp ray-marched shadow term is written to an offscreen texture together with the camera distance and blurred with a separable, **depth-aware** kernel whose radius covers a fixed width in world space. Edges get a soft penumbra at a constant cost per pixel, without bleeding across silhouettes.
 

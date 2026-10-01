@@ -147,6 +147,7 @@ const RT_NO_DATA: i32 = 2;  // outside every window: stop and treat as lit
 const RT_CONTINUE: i32 = 3;
 const RT_CROSSES_FACE: i32 = 4;
 const RT_TILE: i32 = 8;  // rt_shadow.rs TILE
+const RT_MAX_STRIDE: f32 = 8.0; // longest ray step, in base segments
 
 // true if the segment a..b (same face, ray climbing) stays above every tile it passes over
 fn rt_above_tiles(a: BlockPos, b: BlockPos) -> bool {
@@ -269,19 +270,37 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
 
     // segments short enough that the planet's curvature over one segment stays below ~0.01 units
     let seg_len = clamp(sqrt(0.02 * f32(rt.resolution) * 0.5), 0.25, 4.0);
-    let segments = min(i32(ceil(RT_RANGE / seg_len)), 512);
     let top = f32(rt.max_layer + 1);
     var wa = world_pos;
+    var t = 0.0;
+    var len = seg_len;
 
-    for (var seg = 1; seg <= segments; seg++) {
+    // Adaptive steps: while the ray climbs above every height tile it passes, the step doubles (up to
+    // RT_MAX_STRIDE segments). A long step that isn't clearly above the terrain is retried as a short one,
+    // so cells are only ever walked on short, curvature-accurate segments. Once a straight ray climbs
+    // relative to the planet it keeps climbing, so a climbing segment's lowest point is its start.
+    for (var i = 0; i < 512; i++) {
+        if (t >= RT_RANGE) { break; }
         if (a.p.z >= top) { return 1.0; } // above every solid cell, and the ray only climbs
-        let wb = world_pos + L * (seg_len * f32(seg));
+        let t1 = min(t + len, RT_RANGE);
+        let wb = world_pos + L * t1;
         let b = to_block(wb);
+
+        if (b.face == a.face && rt_above_tiles(a, b)) {
+            if (b.p.z > a.p.z) { len = min(len * 2.0, seg_len * RT_MAX_STRIDE); }
+            a = b;
+            wa = wb;
+            t = t1;
+            continue;
+        }
+        if (len > seg_len) {
+            len = seg_len; // retry from `a` with a short segment
+            continue;
+        }
 
         var r = RT_CROSSES_FACE;
         if (b.face == a.face) {
-            r = RT_CONTINUE;
-            if (!rt_above_tiles(a, b)) { r = rt_walk(a, b); }
+            r = rt_walk(a, b);
         } else {
             r = rt_cross(a, wa, wb);
         }
@@ -290,6 +309,7 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
         if (r == RT_NO_DATA) { return 1.0; }
         a = b;
         wa = wb;
+        t = t1;
     }
     return 1.0;
 }
