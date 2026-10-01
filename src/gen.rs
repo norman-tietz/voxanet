@@ -456,6 +456,29 @@ impl MeshGen {
 
 
     // generates a simplified heightmap mesh for distant terrain
+    // the water surface of a chunk: one quad at sea level over every column whose natural terrain is below it
+    // (the top of layer sea level, flush with sea-level beaches). Edits don't change the water.
+    pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        let (mut verts, mut inds, mut idx) = (Vec::new(), Vec::new(), 0u32);
+        let res = data.resolution;
+        let sea = data.terrain.sea_level();
+        let u_start = key.u_idx * CHUNK_SIZE;
+        let v_start = key.v_idx * CHUNK_SIZE;
+        for u in u_start..(u_start + CHUNK_SIZE).min(res) {
+            for v in v_start..(v_start + CHUNK_SIZE).min(res) {
+                if data.terrain.get_height(key.face, u, v) >= sea { continue; }
+                let p = |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, sea + 1, res);
+                let corners = [p(0, 0), p(1, 0), p(1, 1), p(0, 1)];
+                for c in corners {
+                    verts.push(Vertex { pos: c.to_array(), color: crate::material::WATER_COLOR, normal: c.normalize().to_array() });
+                }
+                inds.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
+                idx += 4;
+            }
+        }
+        (verts, inds)
+    }
+
     pub fn generate_lod_mesh(key: crate::common::LodKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
@@ -475,7 +498,8 @@ impl MeshGen {
              let abs_u = (key.x as i64 + step_u).clamp(0, data.resolution as i64) as u32;
              let abs_v = (key.y as i64 + step_v).clamp(0, data.resolution as i64) as u32;
              
-             let h = data.terrain.get_height(key.face, abs_u, abs_v);
+             // oceans are flat at sea level from afar (LOD surfaces sit at layer h, like the land)
+             let h = data.terrain.get_height(key.face, abs_u, abs_v).max(data.terrain.sea_level());
              CoordSystem::get_vertex_pos(key.face, abs_u, abs_v, h, data.resolution)
         };
 
@@ -510,7 +534,7 @@ impl MeshGen {
                 let h = data.terrain.get_height(key.face, su, sv);
                 let surface = crate::material::natural_type(&data.terrain, data.has_core, key.face, su, sv, h);
                 let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
-                let color = surface.color().map(|c| c * shade);
+                let color = if h < data.terrain.sea_level() { crate::material::WATER_COLOR } else { surface.color().map(|c| c * shade) };
 
                 verts.push(Vertex { pos: pos.to_array(), color, normal: normal.to_array() });
             }

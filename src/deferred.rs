@@ -5,8 +5,8 @@
 // 2. shadow prep (cs_gbuf_down): the shadow-resolution G-buffer of rt_blur.rs, from the full-resolution one
 //    (then the shadow compute pass and the blur run as before)
 // 3. lighting pass (fs_light): a full-screen triangle that shades each pixel once (shade() in shader.wgsl)
-// Overlays (cursor box, collision lines, crosshair, console) are drawn forward after the lighting pass,
-// depth-tested against the G-buffer depth.
+// The translucent water surface (fs_water) and the overlays (cursor box, collision lines, crosshair,
+// console) are drawn forward after the lighting pass, depth-tested against the G-buffer depth.
 
 use crate::common::Vertex;
 use crate::rt_blur::RtBlur;
@@ -20,6 +20,7 @@ pub struct Deferred {
     pub geom_fill: wgpu::RenderPipeline,
     pub geom_wire: wgpu::RenderPipeline, // the same as geom_fill on devices without POLYGON_MODE_LINE
     pub light_pipeline: wgpu::RenderPipeline,
+    pub water_pipeline: wgpu::RenderPipeline,
     down_pipeline: wgpu::ComputePipeline,
     textures_layout: wgpu::BindGroupLayout, // group 3: the full-resolution G-buffer
     down_layout: wgpu::BindGroupLayout,     // group 1 of cs_gbuf_down: shadow G-buffer outputs
@@ -31,9 +32,9 @@ pub struct Deferred {
 }
 
 impl Deferred {
-    // scene_layout: groups 0-2 of the scene pipelines; global_layout / sample_layout: its groups 0 and 2
+    // scene_layout: groups 0-2 of the scene pipelines; global/local/sample_layout: its groups 0, 1 and 2
     #[allow(clippy::too_many_arguments)]
-    pub fn new(device: &wgpu::Device, scene_layout: &wgpu::PipelineLayout, global_layout: &wgpu::BindGroupLayout, sample_layout: &wgpu::BindGroupLayout,
+    pub fn new(device: &wgpu::Device, scene_layout: &wgpu::PipelineLayout, global_layout: &wgpu::BindGroupLayout, local_layout: &wgpu::BindGroupLayout, sample_layout: &wgpu::BindGroupLayout,
                shader: &wgpu::ShaderModule, surface_format: wgpu::TextureFormat, wireframe: bool, width: u32, height: u32) -> Self {
         let geom = |polygon_mode| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Geometry Pipeline"),
@@ -75,6 +76,23 @@ impl Deferred {
             multiview_mask: None, cache: None,
         });
 
+        // water: scene vertices, alpha-blended over the lit image, depth-tested but not written
+        let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("water_layout"),
+            bind_group_layouts: &[Some(global_layout), Some(local_layout), Some(sample_layout), Some(&textures_layout)],
+            immediate_size: 0,
+        });
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Pipeline"),
+            layout: Some(&water_layout),
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })] },
+            fragment: Some(wgpu::FragmentState { module: shader, entry_point: Some("fs_water"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: surface_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })] }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
+            multisample: Default::default(),
+            multiview_mask: None, cache: None,
+        });
+
         let storage = |binding, format| wgpu::BindGroupLayoutEntry {
             binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
             ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 },
@@ -93,7 +111,7 @@ impl Deferred {
         });
 
         let (albedo, normal, dist, depth, textures_bind) = Self::make_targets(device, &textures_layout, width, height);
-        Self { geom_fill, geom_wire, light_pipeline, down_pipeline, textures_layout, down_layout, albedo, normal, dist, depth, textures_bind }
+        Self { geom_fill, geom_wire, light_pipeline, water_pipeline, down_pipeline, textures_layout, down_layout, albedo, normal, dist, depth, textures_bind }
     }
 
     fn make_targets(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, width: u32, height: u32)

@@ -43,6 +43,9 @@ pub struct LocalUniform {
     pub params: [f32; 4], // x = opacity
 }
 
+// a voxel chunk's meshes from a worker thread: key, terrain vertices/indices, water vertices/indices
+type ChunkGeometry = (ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
+
 // --- RENDERER STRUCT ---
 
 pub struct Renderer {
@@ -113,8 +116,8 @@ pub struct Renderer {
     load_queue: Vec<ChunkKey>, 
     player_chunk_pos: Option<ChunkKey>, 
     
-    mesh_tx: Sender<(ChunkKey, Vec<Vertex>, Vec<u32>)>,
-    mesh_rx: Receiver<(ChunkKey, Vec<Vertex>, Vec<u32>)>,
+    mesh_tx: Sender<ChunkGeometry>,
+    mesh_rx: Receiver<ChunkGeometry>,
     pending_chunks: HashSet<ChunkKey>, 
 
     lod_tx: Sender<(LodKey, Vec<Vertex>, Vec<u32>)>,
@@ -330,7 +333,7 @@ let size = window.inner_size();
 
         let pipeline_fill = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, false);
         let pipeline_line = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::LineList, false);
-        let deferred = Deferred::new(&device, &layout, &global_layout, &rt_blur.sample_layout, &shader, config.format,
+        let deferred = Deferred::new(&device, &layout, &global_layout, &local_layout, &rt_blur.sample_layout, &shader, config.format,
             features.contains(wgpu::Features::POLYGON_MODE_LINE), config.width, config.height);
 
         // --- UI PIPELINE ---
@@ -739,15 +742,16 @@ let size = window.inner_size();
             center: real_center, // <--- ADDED
             radius: real_radius, // <--- ADDED
             blas,
+            water: None,
         });
         self.animator.start_spawn(AnyKey::Lod(key));
     }
     fn process_load_queue(&mut self, _player_pos: Vec3, planet: &PlanetData) {
         let mut upload_budget = 4; 
-        while let Ok((key, v, i)) = self.mesh_rx.try_recv() {
+        while let Ok((key, v, i, wv, wi)) = self.mesh_rx.try_recv() {
             self.pending_chunks.remove(&key);
             if !v.is_empty() {
-                self.upload_chunk_buffers(key, v, i);
+                self.upload_chunk_buffers(key, v, i, wv, wi);
                 upload_budget -= 1;
             }
             if upload_budget <= 0 { break; }
@@ -768,7 +772,8 @@ let size = window.inner_size();
                 let tx = self.mesh_tx.clone();
                 std::thread::spawn(move || {
                     let (v, i) = MeshGen::build_chunk(key, &planet_clone);
-                    let _ = tx.send((key, v, i));
+                    let (wv, wi) = MeshGen::build_water(key, &planet_clone);
+                    let _ = tx.send((key, v, i, wv, wi));
                 });
             } else {
                 break;
@@ -803,7 +808,8 @@ let size = window.inner_size();
                 if v.is_empty() { 
                     self.chunks.remove(&key);
                 } else {
-                    self.upload_chunk_buffers(key, v, i);
+                    let (wv, wi) = MeshGen::build_water(key, planet);
+                    self.upload_chunk_buffers(key, v, i, wv, wi);
                 }
             }
         }
@@ -855,7 +861,12 @@ let size = window.inner_size();
 
 
 
-    fn upload_chunk_buffers(&mut self, key: ChunkKey, v: Vec<Vertex>, i: Vec<u32>) {
+    fn upload_chunk_buffers(&mut self, key: ChunkKey, v: Vec<Vertex>, i: Vec<u32>, wv: Vec<Vertex>, wi: Vec<u32>) {
+        let water = (!wi.is_empty()).then(|| WaterMesh {
+            v_buf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Water V"), contents: bytemuck::cast_slice(&wv), usage: wgpu::BufferUsages::VERTEX }),
+            i_buf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Water I"), contents: bytemuck::cast_slice(&wi), usage: wgpu::BufferUsages::INDEX }),
+            num_inds: wi.len() as u32,
+        });
         // with hardware ray tracing every chunk mesh also gets a BLAS, built from the same buffers
         let blas_input = if self.hw_rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let v_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | blas_input });
@@ -887,7 +898,7 @@ let size = window.inner_size();
         if v.is_empty() {
              min = Vec3::ZERO; max = Vec3::ZERO;
         } else {
-            for vert in &v {
+            for vert in v.iter().chain(&wv) { // the water surface can lie far above the sea floor
                 let p = Vec3::from_array(vert.pos);
                 min = min.min(p);
                 max = max.max(p);
@@ -901,6 +912,7 @@ let size = window.inner_size();
             center: real_center, 
             radius: real_radius,
             blas,
+            water,
         });
         
         if !is_update {
@@ -1042,7 +1054,7 @@ if controller.show_collisions {
             view_proj: mvp.to_cols_array(),
             ray_dirs: Self::ray_dirs(mvp, cam_pos),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
+            screen: [self.config.width as f32, self.config.height as f32, CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution), 0.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
         };
         self.queue.write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -1185,6 +1197,19 @@ if controller.show_collisions {
             pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
             pass.set_bind_group(3, &self.deferred.textures_bind, &[]);
             pass.draw(0..3, 0..1);
+
+            // translucent water over the lit sea floor
+            pass.set_pipeline(&self.deferred.water_pipeline);
+            for mesh in self.chunks.values() {
+                if let Some(water) = &mesh.water {
+                    if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
+                        pass.set_bind_group(1, &mesh.bind_group, &[]);
+                        pass.set_vertex_buffer(0, water.v_buf.slice(..));
+                        pass.set_index_buffer(water.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..water.num_inds, 0, 0..1);
+                    }
+                }
+            }
 
             if self.collision_inds > 0 {
                 pass.set_pipeline(&self.pipeline_line); // Use line pipeline

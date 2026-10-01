@@ -43,6 +43,14 @@ pub struct ChunkMesh {
     pub center: glam::Vec3,
     pub radius: f32,
     pub blas: Option<wgpu::Blas>, // for hardware ray-traced shadows (hw_rt.rs), when supported
+    pub water: Option<WaterMesh>, // voxel chunks with ocean columns
+}
+
+// translucent water surface of a voxel chunk, drawn by fs_water after the deferred lighting
+pub struct WaterMesh {
+    pub v_buf: wgpu::Buffer,
+    pub i_buf: wgpu::Buffer,
+    pub num_inds: u32,
 }
 
 

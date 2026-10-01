@@ -6,7 +6,7 @@ struct Global {
     ray_dirs: mat4x4<f32>, // camera rays: col0 through the top-left corner, col1/col2 per screen width/height
     camera_pos: vec4<f32>,
     sun_dir: vec4<f32>,
-    screen: vec4<f32>, // width, height in pixels
+    screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -45,6 +45,8 @@ struct Local {
 const SUN_COLOR       = vec3<f32>(1.6, 1.5, 1.3);    // High intensity warm sun
 const SKY_COLOR       = vec3<f32>(0.15, 0.3, 0.6);   // Deep blue ambient sky
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
+const WATER_DEEP      = vec3<f32>(0.002, 0.030, 0.090); // linear colour of deep water
+const WATER_SHALLOW   = vec3<f32>(0.020, 0.150, 0.170); // ... and of shallow water (turquoise)
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
 const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
     vec3<f32>(0.8225, 0.0332, 0.0171),
@@ -443,10 +445,21 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
-    var final_color = albedo * (direct_light + ambient_light + rim_light);
+    let final_color = albedo * (direct_light + ambient_light + rim_light);
+    return finish(final_color, world_pos);
+}
+
+// fog, underwater tint, tone mapping and output colour space of a linear HDR colour at world_pos
+fn finish(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    var final_color = lit;
 
     // 4. Fog (Atmospheric Scattering)
     let dist = distance(global.camera_pos.xyz, world_pos);
+
+    // seen from below the sea surface, everything fades into deep water instead
+    if (length(global.camera_pos.xyz) < global.screen.z) {
+        final_color = mix(final_color * vec3<f32>(0.4, 0.75, 0.9), WATER_DEEP * 2.0, 1.0 - exp(-dist * 0.12));
+    }
     // Fog density tuned for the scale defined in gen.rs
     let fog_density = 0.0015; 
     let fog_factor = 1.0 - exp(-(dist * fog_density) * (dist * fog_density * 0.5)); // Exp2 fog
@@ -529,6 +542,41 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let N = normalize(textureLoad(d_normal, p, 0).xyz * 2.0 - 1.0);
     let world_pos = world_from_pixel(pos.xy, dist);
     return vec4<f32>(shade(textureLoad(d_albedo, p, 0).rgb, N, world_pos, pos.xy), 1.0);
+}
+
+// translucent water surface (MeshGen::build_water), drawn after the lighting over the lit sea floor.
+// Opacity grows with the depth of water along the view ray (G-buffer distance behind the surface).
+@fragment
+fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
+    let N = normalize(in.world_pos); // calm sea: the surface faces straight up
+    let L = normalize(global.sun_dir.xyz);
+    let to_cam = global.camera_pos.xyz - in.world_pos;
+    let water_dist = length(to_cam);
+    let V = to_cam / water_dist;
+    let underwater = length(global.camera_pos.xyz) < global.screen.z;
+
+    let floor_dist = textureLoad(d_dist, vec2<i32>(in.clip_pos.xy), 0).r;
+    var depth = 30.0;
+    if (floor_dist > 0.0) { depth = max(floor_dist - water_dist, 0.0); }
+    var alpha = 1.0 - exp(-depth * 0.35);
+
+    // the sea floor's shadow (no shadow texel belongs to the surface itself)
+    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos));
+    let NdotL = max(dot(N, L), 0.0);
+    let body = mix(WATER_SHALLOW, WATER_DEEP, 1.0 - exp(-depth * 0.15));
+    var color = body * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
+
+    // sky reflection at grazing angles and a sun glint
+    let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+    color = mix(color, SKY_COLOR * 1.2, fresnel);
+    let spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
+    color += SUN_COLOR * spec * 3.0;
+    alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
+    if (underwater) {
+        color = WATER_DEEP * SKY_COLOR * 4.0; // looking up at the surface from below
+        alpha = 0.6;
+    }
+    return vec4<f32>(finish(color, in.world_pos), alpha * local.params.x);
 }
 
 // shadow-resolution G-buffer (rt_blur.rs g_pos / g_nrm) from the full-resolution one, nearest pixel

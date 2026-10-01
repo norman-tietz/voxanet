@@ -50,6 +50,9 @@ const STEEP: u32 = 3;        // a height step of this many layers to a neighbour
 const SOIL_DEPTH: u32 = 3;   // layers of dirt/sand below the surface before stone
 pub const CORE_LAYERS: u32 = 6;
 
+// colour of the ocean in the distant LOD meshes (near water is drawn translucent by fs_water)
+pub const WATER_COLOR: [f32; 3] = [0.12, 0.32, 0.55];
+
 // deterministic value in -1..1 per lattice point
 fn hash(face: u8, x: u32, y: u32) -> f32 {
     let mut h = (face as u32).wrapping_mul(0x9E37_79B9) ^ x.wrapping_mul(0x85EB_CA6B) ^ y.wrapping_mul(0xC2B2_AE35);
