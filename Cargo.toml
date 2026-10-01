@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = "0.29"
-wgpu = "0.19"
-pollster = "0.3"
-bytemuck = { version = "1.14", features = ["derive"] }
-glam = "0.25" 
-rayon = "1.8" 
-glyphon = "0.5"
-sysinfo = "0.30"
+winit = "0.30"
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = "0.33"
+rayon = "1.12"
+glyphon = "0.12"
+sysinfo = "0.39"
 
 

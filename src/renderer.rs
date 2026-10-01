@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use wgpu::PresentMode;
 use winit::window::Window;
 use wgpu::util::DeviceExt;
-use glyphon::{FontSystem, SwashCache, TextAtlas, TextArea, TextRenderer as GlyphRenderer, TextBounds, Resolution, Buffer, Metrics, Shaping, Attrs, Family};
+use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextArea, TextRenderer as GlyphRenderer, TextBounds, Resolution, Buffer, Metrics, Shaping, Attrs, Family, Viewport};
+use std::sync::Arc;
 use crate::cmd::Console;
 use crate::common::*;
 use crate::gen::{MeshGen, CoordSystem};
@@ -37,9 +38,9 @@ pub struct LocalUniform {
 
 // --- RENDERER STRUCT ---
 
-pub struct Renderer<'a> {
-    pub window: &'a Window,
-    surface: wgpu::Surface<'a>,
+pub struct Renderer {
+    pub window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -48,6 +49,7 @@ pub struct Renderer<'a> {
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
+    text_viewport: Viewport,
     text_renderer: GlyphRenderer,
     
     // --- SHADOWS ---
@@ -123,6 +125,7 @@ pub struct Renderer<'a> {
     last_fps_time: std::time::Instant,
     frame_count: u32,
     current_fps: u32,
+    output_p3: bool, // surface tagged Display P3, fs_main converts to P3 primaries
 
     // --- RAY-MARCHED SHADOWS (prototype, enabled with VOXANET_RT_SHADOWS=1) ---
     rt_enabled: bool,
@@ -133,15 +136,16 @@ pub struct Renderer<'a> {
     rt_blur: RtBlur,
 }
 
-impl<'a> Renderer<'a> {
-    pub async fn new(window: &'a Window) -> Self {
+impl Renderer {
+    pub async fn new(window: Arc<Window>) -> Self {
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(window.clone()).unwrap();
 
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }).await.unwrap();
         
         // log GPU info
@@ -159,10 +163,20 @@ impl<'a> Renderer<'a> {
 
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: None, required_features: features, required_limits: limits,
-        }, None).await.unwrap();
+            experimental_features: Default::default(), memory_hints: Default::default(), trace: Default::default(),
+        }).await.unwrap();
 
 let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width, size.height).unwrap();
+        // macOS only colour-manages the window when its layer has a colour space; for 8-bit surfaces wgpu
+        // offers sRGB (which leaves the layer untagged) or Display P3, so tag it P3 and convert the
+        // output to P3 primaries in fs_main. Otherwise sRGB colours show oversaturated on P3 displays.
+        let output_p3 = surface.get_capabilities(&adapter).format_capabilities.iter()
+            .any(|c| c.format == config.format && c.color_spaces.contains(wgpu::SurfaceColorSpaces::DISPLAY_P3));
+        if output_p3 {
+            config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
+        }
+        let p3_flag = if output_p3 { 1.0 } else { 0.0 }; // sun_dir.w, read by fs_main
 
         let available_present_modes = surface.get_capabilities(&adapter).present_modes;
 
@@ -180,7 +194,9 @@ let size = window.inner_size();
         let font_system = FontSystem::new();
 
         let swash_cache = SwashCache::new();
-        let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
+        let glyph_cache = Cache::new(&device);
+        let text_viewport = Viewport::new(&device, &glyph_cache);
+        let mut text_atlas = TextAtlas::new(&device, &queue, &glyph_cache, config.format);
         let text_renderer = GlyphRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
 
         let shadow_size = 4096; 
@@ -203,7 +219,7 @@ let size = window.inner_size();
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: Some(wgpu::CompareFunction::LessEqual), 
             ..Default::default()
         });
@@ -376,17 +392,17 @@ let size = window.inner_size();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()) });
         // group 2: the blurred ray-marched shadow term, read by fs_main
         let rt_sample_layout = RtBlur::sample_layout(&device);
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&global_layout, &local_layout, &rt_sample_layout], push_constant_ranges: &[] });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&local_layout), Some(&rt_sample_layout)], immediate_size: 0 });
         let rt_blur = RtBlur::new(&device, rt_sample_layout, &layout, &shader, config.width, config.height);
 
         let pipeline_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Shadow Pipeline"),
             layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] }]},
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })]},
             fragment: None, 
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() }, 
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 } }),
-            multisample: Default::default(), multiview: None,
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 } }),
+            multisample: Default::default(), multiview_mask: None, cache: None,
         });
 
         let pipeline_fill = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, false);
@@ -398,10 +414,10 @@ let size = window.inner_size();
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("UI Pipeline"),
             layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] }]},
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })]},
             fragment: Some(wgpu::FragmentState { 
                 module: &shader, 
-                entry_point: "fs_main", 
+                entry_point: Some("fs_main"), compilation_options: Default::default(), 
                 targets: &[Some(wgpu::ColorTargetState { 
                     format: config.format, 
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -411,12 +427,12 @@ let size = window.inner_size();
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: Default::default(), multiview: None,
+            multisample: Default::default(), multiview_mask: None, cache: None,
         });
 
         // --- MESHES ---
@@ -453,7 +469,7 @@ let size = window.inner_size();
             view_proj: identity_mat.to_cols_array(),
             light_view_proj: identity_mat.to_cols_array(),
             cam_pos: [0.0, 0.0, 0.0, 0.0],
-            sun_dir: [0.0, 1.0, 0.0, 0.0],
+            sun_dir: [0.0, 1.0, 0.0, p3_flag],
         };
         
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -491,6 +507,7 @@ let size = window.inner_size();
             font_system,
             swash_cache,
             text_atlas,
+            text_viewport,
             text_renderer,
             shadow_view,
             pipeline_shadow,
@@ -520,6 +537,7 @@ let size = window.inner_size();
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
             current_fps: 0,
+            output_p3,
 
             rt_enabled,
             rt_params_buf,
@@ -533,16 +551,16 @@ let size = window.inner_size();
     fn create_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule, topology: wgpu::PrimitiveTopology, wireframe: bool) -> wgpu::RenderPipeline {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None, layout: Some(layout),
-            vertex: wgpu::VertexState { module: shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] }]},
-            fragment: Some(wgpu::FragmentState { module: shader, entry_point: "fs_main", targets: &[Some(config.format.into())] }),
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })]},
+            fragment: Some(wgpu::FragmentState { module: shader, entry_point: Some("fs_main"), compilation_options: Default::default(), targets: &[Some(config.format.into())] }),
             primitive: wgpu::PrimitiveState { 
                 topology, 
                 cull_mode: None, 
                 polygon_mode: if wireframe { wgpu::PolygonMode::Line } else { wgpu::PolygonMode::Fill }, 
                 ..Default::default() 
             },
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
-            multisample: Default::default(), multiview: None,
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
+            multisample: Default::default(), multiview_mask: None, cache: None,
         })
     }
 
@@ -1014,7 +1032,14 @@ if controller.show_collisions {
 
 
 
-        let out = match self.surface.get_current_texture() { Ok(o) => o, _ => return };
+        let out = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(o) | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            _ => return,
+        };
         let view = out.texture.create_view(&wgpu::TextureViewDescriptor::default());
         
         self.update_rt_window(player.position, planet);
@@ -1027,7 +1052,7 @@ if controller.show_collisions {
         
         // basic LookAt
         let center = player.position;
-        let mut sun_view = glam::Mat4::look_at_rh(
+        let mut sun_view = glam::camera::rh::view::look_at_mat4(
             center + (sun_dir * shadow_dist), 
             center, 
             glam::Vec3::Y
@@ -1051,7 +1076,7 @@ if controller.show_collisions {
         sun_view = snap_mat * sun_view;
 
         // projection
-        let sun_proj = glam::Mat4::orthographic_rh(
+        let sun_proj = glam::camera::rh::proj::directx::orthographic(
             -proj_size, proj_size, 
             -proj_size, proj_size, 
             shadow_dist - 150.0, shadow_dist + 150.0
@@ -1093,7 +1118,7 @@ if controller.show_collisions {
             view_proj: mvp.to_cols_array(),
             light_view_proj: light_view_proj.to_cols_array(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
         };
         self.queue.write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
 
@@ -1159,6 +1184,7 @@ if controller.show_collisions {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             shadow_pass.set_pipeline(&self.pipeline_shadow);
@@ -1194,10 +1220,11 @@ if controller.show_collisions {
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("RT Shadow Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })],
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                multiview_mask: None,
                 });
                 pass.set_pipeline(&self.rt_blur.rt_pipeline);
                 pass.set_bind_group(0, &self.global_bind, &[]);
@@ -1226,6 +1253,7 @@ if controller.show_collisions {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 
             label: None, color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                depth_slice: None, 
                 view: &view, 
                 resolve_target: None, 
                 ops: wgpu::Operations { 
@@ -1236,7 +1264,7 @@ if controller.show_collisions {
                 } 
             })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                timestamp_writes: None, occlusion_query_set: None,
+                timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
             });
             
             if controller.is_wireframe { pass.set_pipeline(&self.pipeline_wire); } 
@@ -1348,43 +1376,47 @@ if controller.show_collisions {
                     if y < 0.0 { break; } 
                     
                     let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
-                    buffer.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
-                    buffer.set_text(&mut self.font_system, line_text, Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(
+                    buffer.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
+                    buffer.set_text(line_text, &Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(
                         (color[0] * 255.0) as u8, 
                         (color[1] * 255.0) as u8, 
                         (color[2] * 255.0) as u8
-                    )), Shaping::Advanced);
+                    )), Shaping::Advanced, None);
+                    buffer.shape_until_scroll(&mut self.font_system, false);
                     text_buffers.push((buffer, y));
                 }
 
                 let input_y = console_pixel_height - 20.0;
                 let mut input_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
-                input_buf.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
+                input_buf.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
                 let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
                 let cursor = if (time / 500) % 2 == 0 { "_" } else { " " };
-                input_buf.set_text(&mut self.font_system, &format!("> {}{}", console.input_buffer, cursor), Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(255, 255, 0)), Shaping::Advanced);
+                input_buf.set_text(&format!("> {}{}", console.input_buffer, cursor), &Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(255, 255, 0)), Shaping::Advanced, None);
+                input_buf.shape_until_scroll(&mut self.font_system, false);
                 text_buffers.push((input_buf, input_y));
             }
 
             // 2. FPS Text
             let mut fps_buffer = Buffer::new(&mut self.font_system, Metrics::new(20.0, 24.0));
-            fps_buffer.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
+            fps_buffer.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
             fps_buffer.set_text(
-                &mut self.font_system, 
                 &format!("FPS: {}", self.current_fps), 
-                Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(0, 255, 0)), 
-                Shaping::Advanced
+                &Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(0, 255, 0)), 
+                Shaping::Advanced,
+                None
             );
+            fps_buffer.shape_until_scroll(&mut self.font_system, false);
 
 
             let mut block_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
-            block_buf.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
+            block_buf.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
             block_buf.set_text(
-                &mut self.font_system,
                 &format!("Block: {}", controller.selected_block.name()),
-                Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(220, 220, 220)),
-                Shaping::Advanced
+                &Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(220, 220, 220)),
+                Shaping::Advanced,
+                None
             );
+            block_buf.shape_until_scroll(&mut self.font_system, false);
 
           
             let mut debug_buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 18.0));
@@ -1399,13 +1431,14 @@ if controller.show_collisions {
                     self.load_queue.len()
                 );
 
-                debug_buf.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
+                debug_buf.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
                 debug_buf.set_text(
-                    &mut self.font_system, 
                     &info, 
-                    Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(200, 200, 200)), 
-                    Shaping::Advanced
+                    &Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(200, 200, 200)), 
+                    Shaping::Advanced,
+                    None
                 );
+                debug_buf.shape_until_scroll(&mut self.font_system, false);
             }
            
             // create text areas
@@ -1421,6 +1454,7 @@ if controller.show_collisions {
                         bottom: self.config.height as i32,
                     },
                     default_color: glyphon::Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
                 }
             }).collect();
 
@@ -1435,6 +1469,7 @@ if controller.show_collisions {
                     bottom: self.config.height as i32,
                 },
                 default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
             });
 
             text_areas.push(TextArea {
@@ -1448,6 +1483,7 @@ if controller.show_collisions {
                     bottom: self.config.height as i32,
                 },
                 default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
             });
 
             if player.debug_mode {
@@ -1458,15 +1494,17 @@ if controller.show_collisions {
                     scale: 1.0,
                     bounds: TextBounds { left: 0, top: 0, right: self.config.width as i32, bottom: self.config.height as i32 },
                     default_color: glyphon::Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
                 });
             }
 
+            self.text_viewport.update(&self.queue, Resolution { width: self.config.width, height: self.config.height });
             self.text_renderer.prepare(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
                 &mut self.text_atlas,
-                Resolution { width: self.config.width, height: self.config.height },
+                &self.text_viewport,
                 text_areas,
                 &mut self.swash_cache
             ).unwrap();
@@ -1474,6 +1512,7 @@ if controller.show_collisions {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Text Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1484,13 +1523,14 @@ if controller.show_collisions {
                 depth_stencil_attachment: None, 
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             
-            self.text_renderer.render(&self.text_atlas, &mut pass).unwrap();
+            self.text_renderer.render(&self.text_atlas, &self.text_viewport, &mut pass).unwrap();
         }
 
         self.queue.submit(std::iter::once(enc.finish()));
-        out.present();
+        self.queue.present(out);
         self.text_atlas.trim();
     }
 }

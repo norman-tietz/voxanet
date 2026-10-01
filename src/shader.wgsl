@@ -47,6 +47,11 @@ const SUN_COLOR       = vec3<f32>(1.6, 1.5, 1.3);    // High intensity warm sun
 const SKY_COLOR       = vec3<f32>(0.15, 0.3, 0.6);   // Deep blue ambient sky
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
+const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
+    vec3<f32>(0.8225, 0.0332, 0.0171),
+    vec3<f32>(0.1774, 0.9669, 0.0724),
+    vec3<f32>(0.0000, 0.0000, 0.9108),
+);
 const SHADOW_DEPTH_RANGE = 300.0;                    // far - near of the light projection in renderer.rs
 
 // --- VERTEX SHADER ---
@@ -471,6 +476,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     
     // Gamma Correction (Linear -> sRGB)
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
+
+    // when the surface is tagged Display P3 (sun_dir.w = 1, see renderer.rs) macOS colour-manages it;
+    // convert the sRGB primaries to P3 (both share the sRGB transfer curve the Srgb format applies)
+    if (global.sun_dir.w > 0.5) {
+        final_color = clamp(SRGB_TO_P3 * final_color, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
 
     return vec4<f32>(final_color, 1.0);
 }

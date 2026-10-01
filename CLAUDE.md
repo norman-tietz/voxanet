@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-voxanet is a single-binary Rust voxel engine that renders an explorable spherical planet with wgpu (0.19) / winit (0.29). There is no library crate, no test suite, and no CI config.
+voxanet is a single-binary Rust voxel engine that renders an explorable spherical planet with wgpu (30) / winit (0.30), glyphon for text, glam for math. There is no library crate, no test suite, and no CI config.
 
 ## Commands
 
@@ -41,7 +41,7 @@ A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the
 `MeshGen` (`src/gen.rs`) builds voxel chunk meshes (with AO and skirts), LOD meshes, and debug geometry (player cylinder, crosshair, collision boxes). `Vertex` is `bytemuck::Pod` and uploads directly. All shading (cascaded/texel-snapped shadows, 5×5 PCF, exp² fog, ACES, dithered transparency) is in `src/shader.wgsl`, loaded with `include_str!`. CPU-side uniform structs (`GlobalUniform`, `LocalUniform`) must match its layout.
 
 ### Gameplay loop (`src/main.rs`)
-The winit closure runs per event: `controller.update_player` (physics), raycast to cursor, `renderer.update_cursor`, `renderer.update_view`, then input dispatch. `Physics` (`src/physics.rs`) is a custom kinematic solver. Up is `normalize(position)`, orientation uses `Quat::from_rotation_arc`, and collision samples `exists()` with a 5% edge "shave" margin. `Console` (`src/cmd.rs`) captures keyboard input while open.
+`App` implements winit's `ApplicationHandler`; the window and `Game` (renderer, controller, player, planet, console) are created in `resumed`. `Game::tick` runs before every window/device event and on `about_to_wait`: `controller.update_player` (physics), raycast to cursor, `renderer.update_cursor`, `renderer.update_view`; then the event is dispatched. On macOS the surface is tagged Display P3 and `fs_main` converts its output from sRGB to P3 primaries (flag in `sun_dir.w`), otherwise colours show oversaturated. `Physics` (`src/physics.rs`) is a custom kinematic solver. Up is `normalize(position)`, orientation uses `Quat::from_rotation_arc`, and collision samples `exists()` with a 5% edge "shave" margin. `Console` (`src/cmd.rs`) captures keyboard input while open.
 
 Known quirks (don't "fix" these silently, mention them): `update_player` and the raycast run twice per event when the console is closed, and `src/lighting.rs` is not declared as a module, so it is dead code that isn't compiled.
 

@@ -191,7 +191,7 @@ pub fn get_matrix(&self, player: &Player, width: f32, height: f32) -> Mat4 {
         let fov_degrees: f32 = if self.first_person { 80.0 } else { 45.0 };
 
         // far plane increased to 20,000 for massive zoom out
-        let proj = Mat4::perspective_rh(fov_degrees.to_radians(), width / height, 0.1, 20000.0);
+        let proj = glam::camera::rh::proj::directx::perspective(fov_degrees.to_radians(), width / height, 0.1, 20000.0);
         
         let view = if self.first_person {
             player.get_view_matrix()
@@ -204,7 +204,7 @@ pub fn get_matrix(&self, player: &Player, width: f32, height: f32) -> Mat4 {
          
             let player_forward = player.rotation * Vec3::NEG_Z;
             
-            Mat4::look_at_rh(cam_pos, target, player_forward)
+            glam::camera::rh::view::look_at_mat4(cam_pos, target, player_forward)
         };
         
         proj * view

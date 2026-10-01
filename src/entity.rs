@@ -142,6 +142,6 @@ impl Player {
         
         let forward = final_rot * Vec3::NEG_Z; 
         
-        Mat4::look_at_rh(cam_pos, cam_pos + forward, up)
+        glam::camera::rh::view::look_at_mat4(cam_pos, cam_pos + forward, up)
     }
 }

@@ -53,13 +53,13 @@ impl RtBlur {
         let rt_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RT Shadow Pipeline"),
             layout: Some(scene_layout),
-            vertex: wgpu::VertexState { module: scene_shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] }] },
-            fragment: Some(wgpu::FragmentState { module: scene_shader, entry_point: "fs_rt", targets: &[Some(FORMAT.into())] }),
+            vertex: wgpu::VertexState { module: scene_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })] },
+            fragment: Some(wgpu::FragmentState { module: scene_shader, entry_point: Some("fs_rt"), compilation_options: Default::default(), targets: &[Some(FORMAT.into())] }),
             // same rasterisation as the main fill pipeline, so both passes see the same front surface
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None, cache: None,
         });
 
         let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blur"), source: wgpu::ShaderSource::Wgsl(include_str!("blur.wgsl").into()) });
@@ -80,16 +80,16 @@ impl RtBlur {
                 },
             ],
         });
-        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&blur_layout], push_constant_ranges: &[] });
+        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&blur_layout)], immediate_size: 0 });
         let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RT Blur Pipeline"),
             layout: Some(&blur_pipeline_layout),
-            vertex: wgpu::VertexState { module: &blur_shader, entry_point: "vs_full", buffers: &[] },
-            fragment: Some(wgpu::FragmentState { module: &blur_shader, entry_point: "fs_blur", targets: &[Some(FORMAT.into())] }),
+            vertex: wgpu::VertexState { module: &blur_shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &blur_shader, entry_point: Some("fs_blur"), compilation_options: Default::default(), targets: &[Some(FORMAT.into())] }),
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None, cache: None,
         });
 
         let params = |dir: [f32; 2]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -155,10 +155,11 @@ impl RtBlur {
         for (dst, bind) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)] {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("RT Blur Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: dst, resolve_target: None, ops: Self::clear_ops() })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: dst, resolve_target: None, ops: Self::clear_ops() })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.blur_pipeline);
             pass.set_bind_group(0, bind, &[]);
