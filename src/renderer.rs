@@ -44,7 +44,9 @@ pub struct LocalUniform {
 }
 
 // a voxel chunk's meshes from a worker thread: key, terrain vertices/indices, water vertices/indices
-type ChunkGeometry = (ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
+// mesh worker results, tagged with the reload generation they were started in (Renderer::generation)
+type ChunkGeometry = (u64, ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
+type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>);
 
 // --- RENDERER STRUCT ---
 
@@ -120,8 +122,11 @@ pub struct Renderer {
     mesh_rx: Receiver<ChunkGeometry>,
     pending_chunks: HashSet<ChunkKey>, 
 
-    lod_tx: Sender<(LodKey, Vec<Vertex>, Vec<u32>)>,
-    lod_rx: Receiver<(LodKey, Vec<Vertex>, Vec<u32>)>,
+    lod_tx: Sender<LodGeometry>,
+    lod_rx: Receiver<LodGeometry>,
+    // bumped by force_reload_all: workers still meshing the old planet (e.g. before a resize) send results
+    // that must be dropped, or a mesh of the old resolution would be kept for good (a hole into the planet)
+    generation: u64,
     pending_lods: HashSet<LodKey>,
 
     start_time: std::time::Instant, // clock of the water animation (GlobalUniform.screen.w)
@@ -458,6 +463,7 @@ let size = window.inner_size();
             pending_chunks: HashSet::new(),
             lod_tx,
             lod_rx,
+            generation: 0,
             pending_lods: HashSet::new(),
             
             start_time: std::time::Instant::now(),
@@ -548,7 +554,8 @@ let size = window.inner_size();
         let res = planet.resolution;        
         let player_id = CoordSystem::pos_to_id(player_pos, res);
         let mut upload_count = 0;
-        while let Ok((key, v, i)) = self.lod_rx.try_recv() {
+        while let Ok((generation, key, v, i)) = self.lod_rx.try_recv() {
+            if generation != self.generation { continue; } // meshed for a previous planet
             self.pending_lods.remove(&key);
             self.upload_lod_buffer(key, v, i);
             upload_count += 1;
@@ -604,10 +611,11 @@ let size = window.inner_size();
                 if spawn_count >= 8 { break; }
                 self.pending_lods.insert(key);
                 let tx = self.lod_tx.clone();
+                let generation = self.generation;
                 let p = planet.clone();
                 std::thread::spawn(move || {
                     let (v, i) = MeshGen::generate_lod_mesh(key, &p);
-                    let _ = tx.send((key, v, i));
+                    let _ = tx.send((generation, key, v, i));
                 });
                 spawn_count += 1;
             }
@@ -751,7 +759,8 @@ let size = window.inner_size();
     }
     fn process_load_queue(&mut self, _player_pos: Vec3, planet: &PlanetData) {
         let mut upload_budget = 4; 
-        while let Ok((key, v, i, wv, wi)) = self.mesh_rx.try_recv() {
+        while let Ok((generation, key, v, i, wv, wi)) = self.mesh_rx.try_recv() {
+            if generation != self.generation { continue; } // meshed for a previous planet
             self.pending_chunks.remove(&key);
             if !v.is_empty() {
                 self.upload_chunk_buffers(key, v, i, wv, wi);
@@ -773,10 +782,11 @@ let size = window.inner_size();
                 self.pending_chunks.insert(key);
                 let planet_clone = planet.clone();
                 let tx = self.mesh_tx.clone();
+                let generation = self.generation;
                 std::thread::spawn(move || {
                     let (v, i) = MeshGen::build_chunk(key, &planet_clone);
                     let (wv, wi) = MeshGen::build_water(key, &planet_clone);
-                    let _ = tx.send((key, v, i, wv, wi));
+                    let _ = tx.send((generation, key, v, i, wv, wi));
                 });
             } else {
                 break;
@@ -785,6 +795,7 @@ let size = window.inner_size();
     }
 
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
+        self.generation += 1; // results still in flight belong to the old planet
         self.chunks.clear();
         self.lod_chunks.clear();
         self.load_queue.clear();
