@@ -24,6 +24,7 @@ const SUN_COLOR       = vec3<f32>(1.6, 1.5, 1.3);    // High intensity warm sun
 const SKY_COLOR       = vec3<f32>(0.15, 0.3, 0.6);   // Deep blue ambient sky
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
+const SHADOW_DEPTH_RANGE = 300.0;                    // far - near of the light projection in renderer.rs
 
 // --- VERTEX SHADER ---
 
@@ -89,10 +90,10 @@ fn fetch_shadow_accurate(shadow_pos: vec3<f32>, NdotL: f32) -> f32 {
         return 1.0;
     }
 
-    // 2. Slope-Scaled Bias
+    // 2. Slope-Scaled Bias, given in world units and converted to light depth.
     // Steeper angles need more bias to prevent acne.
-    // Base bias matches the texel size of a 4096 map covering ~120 units.
-    let bias = max(0.0005 * (1.0 - NdotL), 0.0001);
+    let bias_world = mix(0.01, 0.04, 1.0 - NdotL);
+    let bias = bias_world / SHADOW_DEPTH_RANGE;
     let current_depth = shadow_pos.z - bias;
 
     let tex_dim = vec2<f32>(textureDimensions(t_shadow));
@@ -187,7 +188,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let NdotL = max(dot(N, L), 0.0);
     
     // Shadow Map
-    let shadow_raw = fetch_shadow_accurate(in.shadow_pos, NdotL);
+    // faces turned away from the sun are in their own shadow; skipping the lookup there avoids acne
+    let shadow_raw = select(fetch_shadow_accurate(in.shadow_pos, NdotL), 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 

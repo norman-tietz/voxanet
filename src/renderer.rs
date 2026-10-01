@@ -354,7 +354,7 @@ let size = window.inner_size();
             layout: Some(&layout),
             vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] }]},
             fragment: None, 
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: Some(wgpu::Face::Front), ..Default::default() }, 
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() }, 
             depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 } }),
             multisample: Default::default(), multiview: None,
         });
@@ -639,14 +639,17 @@ let size = window.inner_size();
 
         self.load_queue.sort_by(|a, b| {
             let get_center = |k: &ChunkKey| -> glam::Vec3 {
-                let u = k.u_idx * CHUNK_SIZE + CHUNK_SIZE / 2;
-                let v = k.v_idx * CHUNK_SIZE + CHUNK_SIZE / 2;
-                let h = planet.resolution / 2; 
-                CoordSystem::get_vertex_pos(k.face, u, v, h, planet.resolution)
+                // centre of the chunk's actual extent: the last chunk on a face can be partial, and a
+                // u/v past the face edge makes cube_to_sphere return NaN
+                let res = planet.resolution;
+                let (u0, v0) = (k.u_idx * CHUNK_SIZE, k.v_idx * CHUNK_SIZE);
+                let u = (u0 + (u0 + CHUNK_SIZE).min(res)) / 2;
+                let v = (v0 + (v0 + CHUNK_SIZE).min(res)) / 2;
+                CoordSystem::get_vertex_pos(k.face, u, v, res / 2, res)
             };
             let da = get_center(a).distance_squared(player_pos);
             let db = get_center(b).distance_squared(player_pos);
-            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+            db.total_cmp(&da)
         });
 
         self.process_load_queue(player_pos, planet);
@@ -991,6 +994,7 @@ if controller.show_collisions {
         
         // -- sun matrix --
         let sun_dir = glam::Vec3::new(0.5, 0.8, 0.4).normalize();
+        // the light's depth range (shadow_dist +- 150) must match SHADOW_DEPTH_RANGE in shader.wgsl
         let shadow_dist = 200.0; // distance of light source from center
         let proj_size = 60.0;   // SIZE OF SHADOW AREA (Smaller = Sharper Shadows)
         
@@ -1023,7 +1027,7 @@ if controller.show_collisions {
         let sun_proj = glam::Mat4::orthographic_rh(
             -proj_size, proj_size, 
             -proj_size, proj_size, 
-            -200.0, 500.0 
+            shadow_dist - 150.0, shadow_dist + 150.0
         );
         
         let light_view_proj = sun_proj * sun_view;
