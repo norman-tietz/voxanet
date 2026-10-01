@@ -21,7 +21,7 @@ There are no tests (`cargo test` builds but runs nothing).
 
 ### Data model: heightmap + sparse edit diffs
 The planet is not stored as a voxel array. `PlanetData` (`src/common.rs`) holds:
-- `terrain: PlanetTerrain` (`src/noise.rs`): a precomputed per-column height map indexed by `(face, u, v)`, generated once per resolution (in parallel with rayon). `TerrainShape` builds it from continent noise (ocean vs land around a sea level at layer `res/2`), hills, and ridged mountain noise inside low-frequency mountain zones; overall relief scales with `3·sqrt(res/2)`.
+- `terrain: PlanetTerrain` (`src/noise.rs`): a precomputed per-column height map indexed by `(face, u, v)`, generated once per resolution (in parallel with rayon). `TerrainShape` builds it from continent noise (ocean vs land around a sea level at layer `res/2`), hills, and ridged mountain noise inside low-frequency mountain zones; overall relief scales with `3·sqrt(res/2)`, capped at 20% of the radius (layers stay ~1 unit thick, so small planets need proportionally less relief).
 - `chunks: HashMap<ChunkKey, ChunkMods>`: only the player's edits per 32×32 column chunk (`CHUNK_SIZE`): `placed: HashMap<BlockId, BlockType>` and `mined: HashSet<BlockId>`.
 
 `PlanetData::exists(id)` is the single source of truth for solidity: placed → true, mined → false, otherwise `layer <= height`. Meshing, physics, and raycasting all go through it. Layers below 6 are an unbreakable core (`remove_block`).

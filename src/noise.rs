@@ -5,7 +5,8 @@ use std::sync::Arc;
 // --- TERRAIN SHAPE ---
 // Heights are layers relative to sea level (layer res/2). Continents and mountain ranges are sized
 // relative to the planet; hills keep roughly the same size in blocks at any resolution. The overall
-// relief grows with the square root of the radius so small planets don't turn into spikes.
+// relief grows with the square root of the radius, capped at 20% of the radius: layers are about one
+// unit thick at any size, so on small planets a fixed number of layers would be huge spikes and pits.
 
 struct TerrainShape {
     relief: f32,      // highest mountains above sea level, in layers
@@ -18,7 +19,7 @@ impl TerrainShape {
     fn new(resolution: u32) -> Self {
         let radius = resolution as f32 / 2.0;
         Self {
-            relief: 3.0 * radius.sqrt(),
+            relief: (3.0 * radius.sqrt()).min(0.2 * radius),
             hill_freq: (radius / 35.0).max(2.0),
             ridge_freq: (radius / 120.0).max(2.5),
             range_freq: (radius / 400.0).max(1.5),
@@ -80,7 +81,7 @@ impl PlanetTerrain {
             let v = row as u32 % resolution;
             for (u, h) in out.iter_mut().enumerate() {
                 let dir = CoordSystem::get_direction(face, u as u32, v, resolution);
-                *h = (sea_level as f32 + shape.height(&generator, dir)).max(1.0) as u16;
+                *h = (sea_level as f32 + shape.height(&generator, dir)).round().max(1.0) as u16;
             }
         });
 

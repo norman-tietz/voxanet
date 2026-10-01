@@ -41,7 +41,8 @@ impl BlockType {
     }
 }
 
-const BEACH: f32 = 1.5;      // layers above sea level that are still sand
+const BEACH: f32 = 0.06;     // fraction of the peak height above sea level that is still sand ...
+const MAX_BEACH: f32 = 1.5;  // ... but at most this many layers
 // fractions of the height from sea level up to the highest peak
 const ROCK_LINE: f32 = 0.45; // bare stone above
 const SNOW_LINE: f32 = 0.62; // snow above
@@ -78,6 +79,7 @@ pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockT
     let j = jitter(face, u, v);
     let above_sea = h as f32 - sea;
     let rel = above_sea / peak + j * 0.04; // borders wander by about 4% of the relief
+    let beach = (BEACH * peak).min(MAX_BEACH);
 
     let neighbours = [
         terrain.get_height(face, u.saturating_sub(1), v),
@@ -91,7 +93,7 @@ pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockT
         BlockType::Snow
     } else if steep || rel >= ROCK_LINE {
         BlockType::Stone
-    } else if above_sea <= BEACH + j {
+    } else if above_sea <= beach * (1.0 + 0.5 * j) {
         BlockType::Sand
     } else {
         BlockType::Grass
