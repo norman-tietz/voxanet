@@ -15,6 +15,66 @@ This project is a high-performance voxel engine built from scratch in **Rust**, 
 *   **Dynamic LOD System:** Implements a recursive Quadtree-based Level of Detail system that renders high-fidelity voxels near the player while optimizing geometry at the horizon.
 *   **Custom Physics Engine:** A specialized physics solver designed for spherical gravity, handling collision detection and character orientation on a curved surface.
 
+## Getting Started
+
+Requires a recent stable Rust toolchain and a GPU supported by wgpu (Metal, Vulkan, DX12 or OpenGL).
+
+```sh
+cargo run --release
+```
+
+Use `--release`, because terrain generation and meshing are much slower in debug builds.
+
+## Controls
+
+The app starts in first-person mode with the mouse cursor locked to the window.
+
+### Movement & Camera
+
+| Input | Action |
+|-------|--------|
+| `W` `A` `S` `D` | Move |
+| Mouse | Look around (first person) |
+| `Space` | Jump |
+| `Left Ctrl` (hold) | Sprint (2× speed on foot, 10× while flying) |
+| `F` | Toggle fly mode (first person only; fly in the direction you look) |
+| `K` | Toggle first/third person (third person also releases the mouse cursor) |
+| Mouse wheel | Zoom the camera in/out (third person only) |
+
+### Building
+
+| Input | Action |
+|-------|--------|
+| Left mouse button | Mine the targeted block (the bottom core layers cannot be mined) |
+| Right mouse button | Place a block on the targeted face |
+| Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
+
+### World
+
+| Input | Action |
+|-------|--------|
+| `]` | Grow the planet (resolution ×1.2) and regenerate terrain |
+| `[` | Shrink the planet (resolution ÷1.2) and regenerate terrain |
+
+### Console
+
+Press `` ` `` (backtick) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`.
+
+| Command | Description |
+|---------|-------------|
+| `help` | List available commands |
+| `/debug_mode set true\|false` | Enable or disable the debug keys below |
+| `/move_speed get` / `/move_speed set <value>` | Read or change walking speed |
+| `/jump_force get` / `/jump_force set <value>` | Read or change jump strength |
+
+### Debug Keys (require `/debug_mode set true`)
+
+| Input | Action |
+|-------|--------|
+| `P` | Toggle wireframe rendering |
+| `O` | Toggle collision box visualization |
+| `'` | Freeze/unfreeze frustum culling (to inspect culling from outside) |
+
 ## Deep Dive for Those Interested
 
 ### 1. Core Architecture & Memory Management (System Design)
