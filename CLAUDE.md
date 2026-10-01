@@ -22,9 +22,11 @@ There are no tests (`cargo test` builds but runs nothing).
 ### Data model: heightmap + sparse edit diffs
 The planet is not stored as a voxel array. `PlanetData` (`src/common.rs`) holds:
 - `terrain: PlanetTerrain` (`src/noise.rs`): a precomputed per-column height map indexed by `(face, u, v)`, generated once per resolution.
-- `chunks: HashMap<ChunkKey, ChunkMods>`: only the player's edits, as `placed`/`mined` `HashSet<BlockId>` per 32×32 column chunk (`CHUNK_SIZE`).
+- `chunks: HashMap<ChunkKey, ChunkMods>`: only the player's edits per 32×32 column chunk (`CHUNK_SIZE`): `placed: HashMap<BlockId, BlockType>` and `mined: HashSet<BlockId>`.
 
 `PlanetData::exists(id)` is the single source of truth for solidity: placed → true, mined → false, otherwise `layer <= height`. Meshing, physics, and raycasting all go through it. Layers below 6 are an unbreakable core (`remove_block`).
+
+Block types live in `src/material.rs`. Natural blocks have no stored type: `material::natural_type` derives it from the column's height within the planet's height range (`PlanetTerrain::height_range`), the slope to neighbouring columns and smooth per-column jitter (sand low, stone steep/high, snow highest, dirt then stone below the surface). `PlanetData::block_type(id)` combines that with edits; voxel and LOD meshes both use it, so they agree.
 
 ### Coordinates (`src/gen.rs`, `CoordSystem`)
 A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the voxel count per face edge. Cube→sphere uses the Nowell mapping (`cube_to_sphere`), and `cubize_point` is its inverse. Layers are radially **exponential**, not linear: `get_layer_radius(layer, res) = (res/2) * exp(K*(layer/(res/2) - 1))` with `K = 0.85`, so voxels keep a roughly cubic shape at every depth. Convert between world positions and blocks only through `CoordSystem` (`pos_to_id`, `get_local_coords`, `get_block_center`, `get_vertex_pos`). Never hand-roll the math.
@@ -44,7 +46,7 @@ The winit closure runs per event: `controller.update_player` (physics), raycast 
 Known quirks (don't "fix" these silently, mention them): `update_player` and the raycast run twice per event when the console is closed, and `src/lighting.rs` is not declared as a module, so it is dead code that isn't compiled.
 
 ## Runtime controls (useful for manual verification)
-- WASD / Space / Left Ctrl (sprint); mouse look. LMB mines, RMB places.
+- WASD / Space / Left Ctrl (sprint); mouse look. LMB mines, RMB places; `1`–`5` choose the placed block type.
 - `K` toggles first/third person. `F` toggles fly (first person only).
 - `]` / `[` grows/shrinks planet resolution by ×1.2 (min 8, max 16384) and regenerates terrain.
 - `` ` `` opens the console: `help`, `/debug_mode set true`, `/move_speed get|set <v>`, `/jump_force get|set <v>`.

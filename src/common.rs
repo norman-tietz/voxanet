@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use bytemuck::{Pod, Zeroable};
 use crate::noise::PlanetTerrain;
+use crate::material::{self, BlockType};
 
 // --- CONSTANTS ---
 pub const CHUNK_SIZE: u32 = 32;
@@ -57,14 +58,14 @@ pub struct LodKey {
 #[derive(Clone)] 
 pub struct ChunkMods {
     pub mined: HashSet<BlockId>,
-    pub placed: HashSet<BlockId>,
+    pub placed: HashMap<BlockId, BlockType>,
 }
 
 
 
 impl ChunkMods {
     pub fn new() -> Self {
-        Self { mined: HashSet::new(), placed: HashSet::new() }
+        Self { mined: HashSet::new(), placed: HashMap::new() }
     }
 }
 
@@ -118,14 +119,17 @@ pub fn resize(&mut self, increase: bool) {
         }
     }
 
-    pub fn add_block(&mut self, id: BlockId) {
+    pub fn add_block(&mut self, id: BlockId, ty: BlockType) {
+        let natural = self.natural_type(id);
         let key = Self::get_chunk_key(id);
         let mods = self.chunks.entry(key).or_insert_with(ChunkMods::new);
-        
-        if mods.mined.contains(&id) {
-            mods.mined.remove(&id);
+
+        mods.mined.remove(&id);
+        // putting back what was mined there just restores the terrain
+        if natural == Some(ty) {
+            mods.placed.remove(&id);
         } else {
-            mods.placed.insert(id);
+            mods.placed.insert(id, ty);
         }
     }
 
@@ -135,12 +139,12 @@ pub fn remove_block(&mut self, id: BlockId) {
             return; 
         }
         
+        let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v);
         let key = Self::get_chunk_key(id);
         let mods = self.chunks.entry(key).or_insert_with(ChunkMods::new);
 
-        if mods.placed.contains(&id) {
-            mods.placed.remove(&id);
-        } else {
+        mods.placed.remove(&id);
+        if terrain_below {
             mods.mined.insert(id);
         }
     }
@@ -148,7 +152,7 @@ pub fn remove_block(&mut self, id: BlockId) {
     pub fn exists(&self, id: BlockId) -> bool {
         let key = Self::get_chunk_key(id);
         if let Some(mods) = self.chunks.get(&key) {
-            if mods.placed.contains(&id) { return true; }
+            if mods.placed.contains_key(&id) { return true; }
             if mods.mined.contains(&id) { return false; }
         }
         
@@ -156,6 +160,21 @@ pub fn remove_block(&mut self, id: BlockId) {
         // instead of a flat floor, we check the pre-calculated noise map
         let height = self.terrain.get_height(id.face, id.u, id.v);
         id.layer <= height
+    }
+
+    // the type of an existing block, None for air
+    pub fn block_type(&self, id: BlockId) -> Option<BlockType> {
+        if let Some(mods) = self.chunks.get(&Self::get_chunk_key(id)) {
+            if let Some(&ty) = mods.placed.get(&id) { return Some(ty); }
+            if mods.mined.contains(&id) { return None; }
+        }
+        self.natural_type(id)
+    }
+
+    // the terrain's own block at this position, ignoring edits
+    fn natural_type(&self, id: BlockId) -> Option<BlockType> {
+        if id.layer > self.terrain.get_height(id.face, id.u, id.v) { return None; }
+        Some(material::natural_type(&self.terrain, self.has_core, id.face, id.u, id.v, id.layer))
     }
 
     

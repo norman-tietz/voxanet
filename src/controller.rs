@@ -4,6 +4,7 @@ use glam::{Vec3, Mat4, Vec2};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{PhysicalKey, KeyCode};
 use crate::common::*;
+use crate::material::BlockType;
 use crate::gen::CoordSystem;
 use crate::entity::Player;
 use crate::physics::Physics;
@@ -30,6 +31,7 @@ pub struct Controller {
     
     
     keys: [bool; 5], // W, A, S, D, Space
+    pub selected_block: BlockType, // what right-click places
 }
 
 impl Controller {
@@ -49,6 +51,7 @@ impl Controller {
             sprint: false,
             first_person: true,
             keys: [false; 5],
+            selected_block: BlockType::Dirt,
         }
     }
 
@@ -132,6 +135,12 @@ impl Controller {
                     PhysicalKey::Code(KeyCode::Space) => self.keys[4] = pressed,
                    
                     PhysicalKey::Code(KeyCode::ControlLeft) => self.sprint = pressed, 
+
+                    PhysicalKey::Code(code @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5)) if pressed => {
+                        let i = match code { KeyCode::Digit1 => 0, KeyCode::Digit2 => 1, KeyCode::Digit3 => 2, KeyCode::Digit4 => 3, _ => 4 };
+                        self.selected_block = BlockType::PLACEABLE[i];
+                        return true;
+                    }
                     
                     PhysicalKey::Code(KeyCode::KeyP) if pressed => { 
                       

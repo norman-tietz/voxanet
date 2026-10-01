@@ -1445,6 +1445,15 @@ if controller.show_collisions {
             );
 
 
+            let mut block_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+            block_buf.set_size(&mut self.font_system, self.config.width as f32, self.config.height as f32);
+            block_buf.set_text(
+                &mut self.font_system,
+                &format!("Block: {}", controller.selected_block.name()),
+                Attrs::new().family(Family::Monospace).color(glyphon::Color::rgb(220, 220, 220)),
+                Shaping::Advanced
+            );
+
           
             let mut debug_buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 18.0));
             
@@ -1487,6 +1496,19 @@ if controller.show_collisions {
                 buffer: &fps_buffer,
                 left: self.config.width as f32 - 120.0, 
                 top: 10.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0, top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+            });
+
+            text_areas.push(TextArea {
+                buffer: &block_buf,
+                left: self.config.width as f32 - 120.0,
+                top: 36.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0, top: 0,

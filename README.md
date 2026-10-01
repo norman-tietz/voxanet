@@ -47,6 +47,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 |-------|--------|
 | Left mouse button | Mine the targeted block (the bottom core layers cannot be mined) |
 | Right mouse button | Place a block on the targeted face |
+| `1` `2` `3` `4` `5` | Choose the block type to place: grass, dirt, sand, stone, snow (shown below the FPS counter) |
 | Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
 
 ### World

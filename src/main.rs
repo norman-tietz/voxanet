@@ -11,6 +11,7 @@ mod lod_animation;
 mod cmd;
 mod rt_shadow;
 mod rt_blur;
+mod material;
 mod system_diagnostics; 
 
 
@@ -165,7 +166,7 @@ fn main() {
                              if is_right { 
                                  let place_info = controller.raycast(&player, &planet, renderer.config.width as f32, renderer.config.height as f32, true);
                                  if let Some((place_id, _)) = place_info {
-                                     planet.add_block(place_id);
+                                     planet.add_block(place_id, controller.selected_block);
                                      renderer.refresh_neighbors(place_id, &planet);
                                  }
                              } else { 

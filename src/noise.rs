@@ -43,6 +43,7 @@ pub struct PlanetTerrain {
     // Flattened height map
     heights: Arc<Vec<u16>>, 
     resolution: u32,
+    height_range: (u32, u32), // lowest and highest column
 }
 
 impl PlanetTerrain {
@@ -65,8 +66,17 @@ impl PlanetTerrain {
             }
         }
 
+        let height_range = (
+            heights.iter().copied().min().unwrap_or(0) as u32,
+            heights.iter().copied().max().unwrap_or(0) as u32,
+        );
+
         // Wrap in Arc for cheap cloning
-        Self { heights: Arc::new(heights), resolution } 
+        Self { heights: Arc::new(heights), resolution, height_range } 
+    }
+
+    pub fn height_range(&self) -> (u32, u32) {
+        self.height_range
     }
 
     #[inline(always)]
@@ -91,6 +101,7 @@ impl Clone for PlanetTerrain {
         Self {
             heights: self.heights.clone(),
             resolution: self.resolution,
+            height_range: self.height_range,
         }
     }
 }

@@ -110,7 +110,7 @@ fn fill_face(planet: &PlanetData, face: u8, origin_u: i32, origin_v: i32, size: 
     }
     // placed blocks can stick out above the terrain
     for mods in planet.chunks.values() {
-        for id in &mods.placed {
+        for id in mods.placed.keys() {
             if id.face == face { max_h = max_h.max(id.layer); }
         }
     }
@@ -144,7 +144,7 @@ fn fill_face(planet: &PlanetData, face: u8, origin_u: i32, origin_v: i32, size: 
         if solid { face_bits[idx] |= 1 << (l % 32); } else { face_bits[idx] &= !(1 << (l % 32)); }
     };
     for mods in planet.chunks.values() {
-        for id in &mods.placed { set(id, true); }
+        for id in mods.placed.keys() { set(id, true); }
         for id in &mods.mined { set(id, false); }
     }
 
@@ -158,7 +158,7 @@ fn fill_face(planet: &PlanetData, face: u8, origin_u: i32, origin_v: i32, size: 
         }
     }
     for mods in planet.chunks.values() {
-        for id in &mods.placed {
+        for id in mods.placed.keys() {
             let (lu, lv) = (id.u as i32 - origin_u, id.v as i32 - origin_v);
             if id.face != face || lu < 0 || lv < 0 || lu >= size_i || lv >= size_i { continue; }
             let t = &mut tile_max[(lv as u32 / TILE * tiles + lu as u32 / TILE) as usize];

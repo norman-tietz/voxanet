@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use glam::Vec3;
 use crate::common::*;
+use crate::material::BlockType;
 
 pub struct CoordSystem;
 
@@ -324,7 +325,7 @@ impl MeshGen {
 
         // current Chunk Modifications
         if let Some(mods) = data.chunks.get(&key) {
-            for &id in &mods.placed { candidates.insert(id); }
+            for &id in mods.placed.keys() { candidates.insert(id); }
             Self::add_mined_candidates(mods, &mut candidates, res);
         }
 
@@ -500,21 +501,14 @@ impl MeshGen {
                 // --- COLORING ---
                 let slope = normal.dot(pos.normalize()).abs();
                 
-                // recalculate h locally for core check
+                // same material as the voxel surface here
                 let offset_u = (ux * key.size) / grid_res;
                 let offset_v = (vy * key.size) / grid_res;
-                let h = data.terrain.get_height(key.face, (key.x + offset_u).min(data.resolution), (key.y + offset_v).min(data.resolution));
-                
-                let is_core = data.has_core && h < 6;
-                let is_steep = slope < 0.85; 
-
-                let color = if is_core { 
-                    [0.2, 0.22, 0.25] 
-                } else if is_steep { 
-                    [0.1 * 0.75, 0.8 * 0.75, 0.1 * 0.75] // Dark Green (Matches Voxel Sides)
-                } else { 
-                    [0.1, 0.8, 0.1]    // Green (Top)
-                };
+                let (su, sv) = ((key.x + offset_u).min(data.resolution - 1), (key.y + offset_v).min(data.resolution - 1));
+                let h = data.terrain.get_height(key.face, su, sv);
+                let surface = crate::material::natural_type(&data.terrain, data.has_core, key.face, su, sv, h);
+                let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
+                let color = surface.color().map(|c| c * shade);
 
                 verts.push(Vertex { pos: pos.to_array(), color, normal: normal.to_array() });
             }
@@ -635,16 +629,7 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
         if id.layer >= natural_h { light_val = 1.0; }
 
      
-        let is_core = data.has_core && id.layer < 6;
-        let is_grass = id.layer == natural_h;
-        
-        let mut base_color = if is_core { 
-            [0.2, 0.2, 0.2] // rock
-        } else if is_grass { 
-            [0.1, 0.7, 0.1] // grass
-        } else { 
-            [0.6, 0.4, 0.2] // dirt
-        };
+        let mut base_color = data.block_type(id).unwrap_or(BlockType::Dirt).color();
 
         // apply Skylight
         base_color[0] *= light_val;
