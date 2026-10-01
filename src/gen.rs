@@ -112,7 +112,8 @@ impl CoordSystem {
         let layer_f = s * (1.0 + (dist / s).ln() / Self::K);
         let layer = layer_f.floor() as i32;
         
-        if layer < 0 || layer >= res as i32 { return None; }
+        // no upper limit: small planets' terrain can rise above layer `res`
+        if layer < 0 { return None; }
         
         // local Layer Coordinate (0.0 to 1.0)
         let f_layer = (layer_f - layer as f64) as f32;
@@ -227,7 +228,6 @@ pub fn pos_to_id(pos: Vec3, res: u32) -> Option<BlockId> {
 
         if layer < 0 { return None; }
         let layer = layer as u32;
-        if layer >= res { return None; }
 
         // map sphere point back to unit cube surface
         // normalize 'pos' first to project it onto the unit sphere required for the math
@@ -656,6 +656,7 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
         let i_bl = p(0,0,0); let i_br = p(1,0,0); let i_tl = p(0,1,0); let i_tr = p(1,1,0);
         let o_bl = p(0,0,1); let o_br = p(1,0,1); let o_tl = p(0,1,1); let o_tr = p(1,1,1);
 
+        let block_center = (i_bl + o_tr) * 0.5;
         let apply = |ao: f32| -> [f32; 3] { [base_color[0] * ao, base_color[1] * ao, base_color[2] * ao] };
 
    
@@ -666,21 +667,26 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
             let ao_br = Self::calculate_ao(n(1, 0),  n(0, -1), n(1, -1));
             let ao_tr = Self::calculate_ao(n(1, 0),  n(0, 1),  n(1, 1));
             let ao_tl = Self::calculate_ao(n(-1, 0), n(0, 1),  n(-1, 1));
-            Self::quad(verts, inds, idx, [o_bl, o_br, o_tr, o_tl], [apply(ao_bl), apply(ao_br), apply(ao_tr), apply(ao_tl)], true); 
+            // quad() splits along vertex 0-2; split along the darker diagonal so the AO gradient stays symmetric
+            if ao_bl + ao_tr > ao_br + ao_tl {
+                Self::quad(verts, inds, idx, [o_br, o_tr, o_tl, o_bl], [apply(ao_br), apply(ao_tr), apply(ao_tl), apply(ao_bl)], true, block_center);
+            } else {
+                Self::quad(verts, inds, idx, [o_bl, o_br, o_tr, o_tl], [apply(ao_bl), apply(ao_br), apply(ao_tr), apply(ao_tl)], true, block_center);
+            }
         }
 
         if !has_btm {
             let c = apply(0.4); 
-            Self::quad(verts, inds, idx, [i_tl, i_tr, i_br, i_bl], [c,c,c,c], true); 
+            Self::quad(verts, inds, idx, [i_tl, i_tr, i_br, i_bl], [c,c,c,c], true, block_center); 
         }
 
         let side_c = apply(0.8); 
         let colors = [side_c, side_c, side_c, side_c];
 
-        if !has_front { Self::quad(verts, inds, idx, [i_bl, i_br, o_br, o_bl], colors, false); }
-        if !has_back  { Self::quad(verts, inds, idx, [o_tl, o_tr, i_tr, i_tl], colors, false); }
-        if !has_left  { Self::quad(verts, inds, idx, [i_tl, i_bl, o_bl, o_tl], colors, false); }
-        if !has_right { Self::quad(verts, inds, idx, [i_br, i_tr, o_tr, o_br], colors, false); }
+        if !has_front { Self::quad(verts, inds, idx, [i_bl, i_br, o_br, o_bl], colors, false, block_center); }
+        if !has_back  { Self::quad(verts, inds, idx, [o_tl, o_tr, i_tr, i_tl], colors, false, block_center); }
+        if !has_left  { Self::quad(verts, inds, idx, [i_tl, i_bl, o_bl, o_tl], colors, false, block_center); }
+        if !has_right { Self::quad(verts, inds, idx, [i_br, i_tr, o_tr, o_br], colors, false, block_center); }
     }
     pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
@@ -792,13 +798,17 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
 
 
 
-    fn quad(verts: &mut Vec<Vertex>, inds: &mut Vec<u32>, idx: &mut u32, pos: [Vec3; 4], colors: [[f32; 3]; 4], force_radial: bool) {
+    // the normal is flipped to point away from block_center: the (u, v, layer) basis is left-handed on
+    // some cube faces, so the winding alone doesn't tell which side is outside
+    fn quad(verts: &mut Vec<Vertex>, inds: &mut Vec<u32>, idx: &mut u32, pos: [Vec3; 4], colors: [[f32; 3]; 4], force_radial: bool, block_center: Vec3) {
         let normal = if force_radial {
             let center = (pos[0] + pos[1] + pos[2] + pos[3]) * 0.25;
             center.normalize().to_array()
         } else {
             (pos[1] - pos[0]).cross(pos[2] - pos[0]).normalize().to_array()
         };
+        let quad_center = (pos[0] + pos[1] + pos[2] + pos[3]) * 0.25;
+        let normal = if Vec3::from_array(normal).dot(quad_center - block_center) < 0.0 { (-Vec3::from_array(normal)).to_array() } else { normal };
 
        
         for i in 0..4 {

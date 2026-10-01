@@ -141,9 +141,7 @@ pub fn remove_block(&mut self, id: BlockId) {
         if mods.placed.contains(&id) {
             mods.placed.remove(&id);
         } else {
-            if id.layer < self.resolution {
-                mods.mined.insert(id);
-            }
+            mods.mined.insert(id);
         }
     }
     
