@@ -575,33 +575,21 @@ let size = window.inner_size();
             );
         }
 
-        let missing_voxels: Vec<ChunkKey> = required_voxels.iter()
+        // a mesh that is no longer required (voxel chunk or LOD node) stays until every required mesh
+        // overlapping its area has loaded, so splits, merges and voxel <-> LOD hand-overs never leave a hole
+        let missing: Vec<(u8, u32, u32, u32)> = required_voxels.iter()
             .filter(|k| !self.chunks.contains_key(k))
-            .cloned()
+            .map(|k| (k.face, k.u_idx * CHUNK_SIZE, k.v_idx * CHUNK_SIZE, CHUNK_SIZE))
+            .chain(required_lods.iter().filter(|k| !self.lod_chunks.contains_key(k)).map(|k| (k.face, k.x, k.y, k.size)))
             .collect();
+        let uncovered = |face: u8, x: u32, y: u32, size: u32| missing.iter()
+            .any(|&(f, mx, my, ms)| f == face && x < mx + ms && mx < x + size && y < my + ms && my < y + size);
 
         let current_lods: Vec<LodKey> = self.lod_chunks.keys().cloned().collect();
-        
         for k in current_lods {
-            if required_lods.contains(&k) { continue; }
-            
-            let mut children_missing = false;
-            for v_key in &missing_voxels {
-                if v_key.face != k.face { continue; }
-                let v_x = v_key.u_idx * CHUNK_SIZE as u32;
-                let v_y = v_key.v_idx * CHUNK_SIZE as u32;
-                let v_s = CHUNK_SIZE as u32;
-                let overlap = k.x < v_x + v_s && k.x + k.size > v_x &&
-                              k.y < v_y + v_s && k.y + k.size > v_y;
-                if overlap { children_missing = true; break; }
-            }
-
-            if children_missing {
-                required_lods.insert(k);
-            } else {
-                if let Some(mesh) = self.lod_chunks.remove(&k) {
-                    self.animator.retire(AnyKey::Lod(k), mesh);
-                }
+            if required_lods.contains(&k) || uncovered(k.face, k.x, k.y, k.size) { continue; }
+            if let Some(mesh) = self.lod_chunks.remove(&k) {
+                self.animator.retire(AnyKey::Lod(k), mesh);
             }
         }
 
@@ -623,7 +611,7 @@ let size = window.inner_size();
 
         let current_voxels: Vec<ChunkKey> = self.chunks.keys().cloned().collect();
         for k in current_voxels {
-            if !required_voxels.contains(&k) {
+            if !required_voxels.contains(&k) && !uncovered(k.face, k.u_idx * CHUNK_SIZE, k.v_idx * CHUNK_SIZE, CHUNK_SIZE) {
                 if let Some(mesh) = self.chunks.remove(&k) {
                     self.animator.retire(AnyKey::Voxel(k), mesh);
                 }
