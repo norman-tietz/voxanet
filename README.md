@@ -9,7 +9,7 @@
 
 This project is a high-performance voxel engine built from scratch in **Rust**, capable of generating fully explorable, spherical planets in real-time.
 
-*   **Oceans:** Water fills every part of the terrain below sea level. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
+*   **Oceans:** Water fills every part of the terrain below sea level. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint. You can swim on the surface and dive below it; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
 *   **Custom Rendering Engine:** Powered by **wgpu**, featuring soft sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
@@ -43,6 +43,16 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `F` | Toggle fly mode (first person only; fly in the direction you look) |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | Mouse wheel | Zoom the camera in/out (third person only) |
+
+### Swimming
+
+In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface.
+
+| Input | Action |
+|-------|--------|
+| `W` `A` `S` `D` | Swim; `W` follows the look direction, so look down to dive and up to surface |
+| `Space` (hold) | Swim up; at the surface, hop out (e.g. onto a ledge) |
+| `Left Ctrl` (hold) | Dive |
 
 ### Building
 

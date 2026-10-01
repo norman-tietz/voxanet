@@ -193,6 +193,15 @@ pub fn remove_block(&mut self, id: BlockId) {
         Self::get_chunk_key(id)
     }
 
+    // how far `pos` lies below the sea surface (negative above it), or None outside the ocean: a column's
+    // natural terrain must be below sea level, like the rendered water (MeshGen::build_water)
+    pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
+        let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
+        let sea = self.terrain.sea_level();
+        if self.terrain.get_height(id.face, id.u, id.v) >= sea { return None; }
+        Some(crate::gen::CoordSystem::get_layer_radius(sea + 1, self.resolution) - pos.length())
+    }
+
     // the type of an existing block, None for air
     pub fn block_type(&self, id: BlockId) -> Option<BlockType> {
         if let Some(mods) = self.chunks.get(&Self::get_chunk_key(id)) {
