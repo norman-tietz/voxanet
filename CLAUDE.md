@@ -38,7 +38,7 @@ A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the
 - An LOD mesh is kept alive until all overlapping voxel chunks have loaded, which prevents holes. Removed meshes go to `LodAnimator` (`src/lod_animation.rs`) to fade out, and new ones fade in.
 - After a block edit, `refresh_neighbors` must be called so the affected chunks get remeshed. After `planet.resize`, call `force_reload_all`.
 
-`MeshGen` (`src/gen.rs`) builds voxel chunk meshes (with AO and skirts), LOD meshes, and debug geometry (player cylinder, guide sphere, crosshair, collision boxes). `Vertex` is `bytemuck::Pod` and uploads directly. All shading (cascaded/texel-snapped shadows, 5×5 PCF, exp² fog, ACES, dithered transparency) is in `src/shader.wgsl`, loaded with `include_str!`. CPU-side uniform structs (`GlobalUniform`, `LocalUniform`) must match its layout.
+`MeshGen` (`src/gen.rs`) builds voxel chunk meshes (with AO and skirts), LOD meshes, and debug geometry (player cylinder, crosshair, collision boxes). `Vertex` is `bytemuck::Pod` and uploads directly. All shading (cascaded/texel-snapped shadows, 5×5 PCF, exp² fog, ACES, dithered transparency) is in `src/shader.wgsl`, loaded with `include_str!`. CPU-side uniform structs (`GlobalUniform`, `LocalUniform`) must match its layout.
 
 ### Gameplay loop (`src/main.rs`)
 The winit closure runs per event: `controller.update_player` (physics), raycast to cursor, `renderer.update_cursor`, `renderer.update_view`, then input dispatch. `Physics` (`src/physics.rs`) is a custom kinematic solver. Up is `normalize(position)`, orientation uses `Quat::from_rotation_arc`, and collision samples `exists()` with a 5% edge "shave" margin. `Console` (`src/cmd.rs`) captures keyboard input while open.

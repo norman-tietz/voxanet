@@ -698,46 +698,6 @@ fn add_voxel(id: BlockId, data: &PlanetData, verts: &mut Vec<Vertex>, inds: &mut
 
 
     
-    pub fn generate_sphere_guide(radius: f32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
-        let mut verts = Vec::new();
-        let mut inds = Vec::new();
-        let color = [1.0, 1.0, 1.0]; 
-
-        for y in 0..=segments {
-            for x in 0..=segments {
-                let x_segment = x as f32 / segments as f32;
-                let y_segment = y as f32 / segments as f32;
-                let x_pos = (x_segment * std::f32::consts::TAU).cos() * (y_segment * std::f32::consts::PI).sin();
-                let y_pos = (y_segment * std::f32::consts::PI).cos();
-                let z_pos = (x_segment * std::f32::consts::TAU).sin() * (y_segment * std::f32::consts::PI).sin();
-
-                verts.push(Vertex {
-                    pos: [x_pos * radius, y_pos * radius, z_pos * radius],
-                    color,
-                    normal: [x_pos, y_pos, z_pos],
-                });
-            }
-        }
-
-        for y in 0..segments {
-            for x in 0..segments {
-                let i = (y * (segments + 1)) + x;
-                inds.push(i);
-                inds.push(i + segments + 1);
-                inds.push(i + segments + 2);
-                
-                inds.push(i + segments + 2);
-                inds.push(i + 1);
-                inds.push(i);
-            }
-        }
-
-        (verts, inds)
-    }
-
-
-
-// generates a simple 2D crosshair for the center of the screen
     pub fn generate_crosshair() -> (Vec<Vertex>, Vec<u32>) {
         let s = 0.02; // size relative to screen (2%)
         let color = [1.0, 1.0, 1.0]; 

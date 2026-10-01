@@ -12,8 +12,6 @@ use crate::physics::Physics;
 pub struct Controller {
     
     pub cam_dist: f32,
-    pub cam_yaw: f32,
-    pub cam_pitch: f32,
     
     // input State
     pub mouse_pos: Vec2,
@@ -38,8 +36,6 @@ impl Controller {
     pub fn new() -> Self {
         Self {
             cam_dist: 200.0, 
-            cam_yaw: 0.0,
-            cam_pitch: 0.5,
             mouse_pos: Vec2::ZERO,
             mouse_delta: (0.0, 0.0),
             is_orbiting: false,

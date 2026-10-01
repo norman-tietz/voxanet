@@ -47,14 +47,12 @@ pub struct Renderer<'a> {
     // --- TEXT ENGINE ---
     font_system: FontSystem,
     swash_cache: SwashCache,
-    text_viewport: wgpu::TextureView, 
     text_atlas: TextAtlas,
     text_renderer: GlyphRenderer,
     
     // --- SHADOWS ---
-    shadow_texture: wgpu::Texture,
+    _shadow_texture: wgpu::Texture, // owns the shadow map behind shadow_view
     shadow_view: wgpu::TextureView,
-    shadow_sampler: wgpu::Sampler,
     pipeline_shadow: wgpu::RenderPipeline,
     shadow_global_buf: wgpu::Buffer,      
     shadow_global_bind: wgpu::BindGroup,
@@ -80,14 +78,11 @@ pub struct Renderer<'a> {
     global_buf: wgpu::Buffer,
     global_bind: wgpu::BindGroup,
     
-    local_buf_identity: wgpu::Buffer,
     local_bind_identity: wgpu::BindGroup,
     
     local_buf_player: wgpu::Buffer,
     local_bind_player: wgpu::BindGroup,
 
-    local_buf_guide: wgpu::Buffer,
-    local_bind_guide: wgpu::BindGroup,
 
     depth: wgpu::TextureView,
     global_bind_identity: wgpu::BindGroup, // For UI to access dummy shadows
@@ -97,9 +92,6 @@ pub struct Renderer<'a> {
     player_i_buf: wgpu::Buffer,
     player_inds: u32,
 
-    guide_v_buf: wgpu::Buffer,
-    guide_i_buf: wgpu::Buffer,
-    guide_inds: u32,
 
     cross_v_buf: wgpu::Buffer,
     cross_i_buf: wgpu::Buffer,
@@ -190,7 +182,6 @@ let size = window.inner_size();
         let swash_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
         let text_renderer = GlyphRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
-        let text_viewport = surface.get_current_texture().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let shadow_size = 4096; 
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -381,18 +372,6 @@ let size = window.inner_size();
             label: None 
         });
 
-        // planet guide uniform
-        let local_buf_guide = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { 
-            label: Some("Guide Uniform"), 
-            contents: bytemuck::cast_slice(&[default_local]), 
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, 
-        });
-        let local_bind_guide = device.create_bind_group(&wgpu::BindGroupDescriptor { 
-            layout: &local_layout, 
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: local_buf_guide.as_entire_binding() }], 
-            label: None 
-        });
-
         // --- PIPELINES ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()) });
         // group 2: the blurred ray-marched shadow term, read by fs_main
@@ -444,10 +423,6 @@ let size = window.inner_size();
         let (pv, pi) = MeshGen::generate_cylinder(0.4, 1.8, 16);
         let player_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&pv), usage: wgpu::BufferUsages::VERTEX });
         let player_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&pi), usage: wgpu::BufferUsages::INDEX });
-
-        let (gv, gi) = MeshGen::generate_sphere_guide(1.0, 64);
-        let guide_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&gv), usage: wgpu::BufferUsages::VERTEX });
-        let guide_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&gi), usage: wgpu::BufferUsages::INDEX });
 
         let (cv, ci) = MeshGen::generate_crosshair();
         let cross_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&cv), usage: wgpu::BufferUsages::VERTEX });
@@ -508,19 +483,16 @@ let size = window.inner_size();
             chunks: HashMap::new(), 
             lod_chunks: HashMap::new(),
             global_buf, global_bind, 
-            local_buf_identity, local_bind_identity,
+            local_bind_identity,
             local_buf_player, local_bind_player,
-            local_buf_guide, local_bind_guide,
             depth,
 
-            shadow_texture,
+            _shadow_texture: shadow_texture,
             font_system,
             swash_cache,
             text_atlas,
             text_renderer,
-            text_viewport,
             shadow_view,
-            shadow_sampler,
             pipeline_shadow,
             shadow_global_buf,
             shadow_global_bind,
@@ -531,7 +503,6 @@ let size = window.inner_size();
             console_v_buf,
             console_i_buf,
             console_inds: 0,
-            guide_v_buf, guide_i_buf, guide_inds: gi.len() as u32,
             cross_v_buf, cross_i_buf, cross_inds: ci.len() as u32,
             global_bind_identity,
             cursor_v_buf, cursor_i_buf, cursor_inds: 0,
@@ -795,13 +766,7 @@ let size = window.inner_size();
             label: None,
         });
 
-        // calculate bounds
-        let (center, radius) = self.calculate_bounds(key.face, key.x, key.y, key.size, 100); // 100 is placeholder, see fix below
-
-        // we need actual planet resolution here
-        // since we dont pass planet to this func, we approximate or pass it
-        // for now, just calculate it using the vertices provided to be precise.
-
+        // bounds from the actual vertices
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
         for vert in &v {
@@ -851,16 +816,6 @@ let size = window.inner_size();
                 break;
             }
         }
-    }
-
-    pub fn rebuild_all(&mut self, _planet: &PlanetData) {
-        self.chunks.clear();
-        self.lod_chunks.clear(); 
-        self.load_queue.clear();
-        self.pending_chunks.clear();
-        self.pending_lods.clear(); 
-        self.player_chunk_pos = None; 
-        self.animator.dying_chunks.clear();
     }
 
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
@@ -920,23 +875,6 @@ let size = window.inner_size();
             faces, window.bits.len() * 4 / 1024, start.elapsed().as_secs_f32() * 1000.0);
         self.rt_center = Some(id);
         self.rt_dirty = false;
-    }
-
-    fn calculate_bounds(&self, face: u8, u_start: u32, v_start: u32, size: u32, planet_res: u32) -> (Vec3, f32) {
-        // calculate center
-        let u_center = u_start + size / 2;
-        let v_center = v_start + size / 2;
-        let h_mid = planet_res / 2; // approx surface height
-        
-        let center_pos = CoordSystem::get_vertex_pos(face, u_center, v_center, h_mid, planet_res);
-
-        // use the corner + a buffer to be safe against height variations (mountains)
-        let corner_pos = CoordSystem::get_vertex_pos(face, u_start, v_start, h_mid, planet_res);
-        
-        // add 32.0 buffer for terrain height variation
-        let radius = center_pos.distance(corner_pos) + 32.0; 
-
-        (center_pos, radius)
     }
 
 
@@ -1101,7 +1039,7 @@ if controller.show_collisions {
         let shadow_map_size = 4096.0;
         let texel_size = (2.0 * proj_size) / shadow_map_size;
         
-        let mut shadow_origin = sun_view.transform_point3(center);
+        let shadow_origin = sun_view.transform_point3(center);
         let snapped_x = (shadow_origin.x / texel_size).round() * texel_size;
         let snapped_y = (shadow_origin.y / texel_size).round() * texel_size;
         
@@ -1170,11 +1108,6 @@ if controller.show_collisions {
 
         let model_mat = player.get_model_matrix();
         self.queue.write_buffer(&self.local_buf_player, 0, bytemuck::cast_slice(model_mat.as_ref()));
-
-        let r = planet.resolution as f32 / 2.0;
-
-        let guide_mat = glam::Mat4::from_scale(glam::Vec3::splat(r));
-        self.queue.write_buffer(&self.local_buf_guide, 0, bytemuck::cast_slice(guide_mat.as_ref()));
 
         let now = std::time::Instant::now();
         let dying_status = self.animator.update_dying(now);

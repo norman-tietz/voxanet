@@ -11,8 +11,6 @@ pub enum AnyKey {
 pub struct FadeState {
     pub mesh: ChunkMesh,
     pub start_time: Instant,
-    pub start_alpha: f32, 
-    pub target_alpha: f32, 
     pub duration: f32,
 }
 
@@ -50,8 +48,6 @@ impl LodAnimator {
         self.dying_chunks.insert(key, FadeState {
             mesh,
             start_time: Instant::now(),
-            start_alpha: 1.0, 
-            target_alpha: 0.0,
             duration: self.fade_duration,
         });
         self.spawning_chunks.remove(&key);

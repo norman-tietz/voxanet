@@ -190,9 +190,9 @@ impl NoiseGenerator {
         let y = pos.y.floor();
         let z = pos.z.floor();
         
-        let X = x as i32 & 255;
-        let Y = y as i32 & 255;
-        let Z = z as i32 & 255;
+        let xi = x as i32 & 255;
+        let yi = y as i32 & 255;
+        let zi = z as i32 & 255;
 
         let x = pos.x - x;
         let y = pos.y - y;
@@ -202,21 +202,21 @@ impl NoiseGenerator {
         let v = fade(y);
         let w = fade(z);
 
-        let A = self.perm[X as usize] as usize + Y as usize;
-        let AA = self.perm[A] as usize + Z as usize;
-        let AB = self.perm[A + 1] as usize + Z as usize;
-        let B = self.perm[X as usize + 1] as usize + Y as usize;
-        let BA = self.perm[B] as usize + Z as usize;
-        let BB = self.perm[B + 1] as usize + Z as usize;
+        let a = self.perm[xi as usize] as usize + yi as usize;
+        let aa = self.perm[a] as usize + zi as usize;
+        let ab = self.perm[a + 1] as usize + zi as usize;
+        let b = self.perm[xi as usize + 1] as usize + yi as usize;
+        let ba = self.perm[b] as usize + zi as usize;
+        let bb = self.perm[b + 1] as usize + zi as usize;
 
-        lerp(w, lerp(v, lerp(u, grad(self.perm[AA], x, y, z),
-                                grad(self.perm[BA], x - 1.0, y, z)),
-                        lerp(u, grad(self.perm[AB], x, y - 1.0, z),
-                                grad(self.perm[BB], x - 1.0, y - 1.0, z))),
-                lerp(v, lerp(u, grad(self.perm[AA + 1], x, y, z - 1.0),
-                                grad(self.perm[BA + 1], x - 1.0, y, z - 1.0)),
-                        lerp(u, grad(self.perm[AB + 1], x, y - 1.0, z - 1.0),
-                                grad(self.perm[BB + 1], x - 1.0, y - 1.0, z - 1.0))))
+        lerp(w, lerp(v, lerp(u, grad(self.perm[aa], x, y, z),
+                                grad(self.perm[ba], x - 1.0, y, z)),
+                        lerp(u, grad(self.perm[ab], x, y - 1.0, z),
+                                grad(self.perm[bb], x - 1.0, y - 1.0, z))),
+                lerp(v, lerp(u, grad(self.perm[aa + 1], x, y, z - 1.0),
+                                grad(self.perm[ba + 1], x - 1.0, y, z - 1.0)),
+                        lerp(u, grad(self.perm[ab + 1], x, y - 1.0, z - 1.0),
+                                grad(self.perm[bb + 1], x - 1.0, y - 1.0, z - 1.0))))
     }
 }
 

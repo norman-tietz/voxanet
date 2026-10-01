@@ -194,7 +194,7 @@ pub fn is_solid(pos: Vec3, planet: &PlanetData) -> bool {
 
         // --- AUTO STEP-UP ---
         if grounded && final_horz_vel.length() < horz_vel.length() * 0.5 && horz_vel.length() > 0.001 {
-            for step_height in [0.3, 0.6] {
+            for step_height in [Self::STEP_HEIGHT * 0.5, Self::STEP_HEIGHT] {
                 let step_test = curr_pos + up * step_height;
                 
                 let step_forward = step_test + horz_vel.normalize() * Self::PLAYER_RADIUS * 1.5;
