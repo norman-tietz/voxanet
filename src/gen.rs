@@ -262,14 +262,16 @@ pub struct MeshGen;
 
 impl MeshGen {
 
-    fn add_mined_candidates(mods: &ChunkMods, candidates: &mut HashSet<BlockId>, res: u32) {
+    // blocks a mined block exposes, including its neighbours across a cube-face edge
+    fn add_mined_candidates(mods: &ChunkMods, candidates: &mut HashSet<BlockId>, data: &PlanetData) {
         for &id in &mods.mined {
             candidates.insert(BlockId { layer: id.layer + 1, ..id });
             if id.layer > 0 { candidates.insert(BlockId { layer: id.layer - 1, ..id }); }
-            if id.u > 0 { candidates.insert(BlockId { u: id.u - 1, ..id }); }
-            if id.u < res - 1 { candidates.insert(BlockId { u: id.u + 1, ..id }); }
-            if id.v > 0 { candidates.insert(BlockId { v: id.v - 1, ..id }); }
-            if id.v < res - 1 { candidates.insert(BlockId { v: id.v + 1, ..id }); }
+            for (du, dv) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if let Some((face, u, v)) = data.neighbor_column(id.face, id.u, id.v, du, dv) {
+                    candidates.insert(BlockId { face, u, v, layer: id.layer });
+                }
+            }
         }
     }
 
@@ -315,26 +317,37 @@ impl MeshGen {
         // current Chunk Modifications
         if let Some(mods) = data.chunks.get(&key) {
             for &id in mods.placed.keys() { candidates.insert(id); }
-            Self::add_mined_candidates(mods, &mut candidates, res);
+            Self::add_mined_candidates(mods, &mut candidates, data);
         }
 
-        // neighbor Chunks Modifications 
-        let neighbor_keys = [
+        // neighbor Chunks Modifications, including chunks of the neighbouring face along a face edge
+        let mut neighbor_keys: HashSet<ChunkKey> = [
             ChunkKey { u_idx: key.u_idx.wrapping_sub(1), ..key },
             ChunkKey { u_idx: key.u_idx + 1, ..key },
             ChunkKey { v_idx: key.v_idx.wrapping_sub(1), ..key },
             ChunkKey { v_idx: key.v_idx + 1, ..key },
-        ];
+        ].into_iter().collect();
+        let on_edge = |c: u32| c == 0 || c == res - 1;
+        for u in u_start..u_end {
+            for v in v_start..v_end {
+                if !on_edge(u) && !on_edge(v) { continue; }
+                for (du, dv) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    if let Some((face, nu, nv)) = data.neighbor_column(key.face, u, v, du, dv) {
+                        if face != key.face { neighbor_keys.insert(PlanetData::chunk_key(BlockId { face, u: nu, v: nv, layer: 0 })); }
+                    }
+                }
+            }
+        }
 
         for n_key in neighbor_keys {
             if let Some(mods) = data.chunks.get(&n_key) {
-                Self::add_mined_candidates(mods, &mut candidates, res);
+                Self::add_mined_candidates(mods, &mut candidates, data);
             }
         }
 
         // generate Mesh
         for id in candidates {
-            if id.u >= u_start && id.u < u_end && id.v >= v_start && id.v < v_end {
+            if id.face == key.face && id.u >= u_start && id.u < u_end && id.v >= v_start && id.v < v_end {
                 if data.exists(id) {
                     Self::add_voxel(id, data, &mut verts, &mut inds, &mut idx);
                 }

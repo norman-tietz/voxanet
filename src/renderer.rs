@@ -876,15 +876,14 @@ let size = window.inner_size();
 
     pub fn refresh_neighbors(&mut self, id: BlockId, planet: &PlanetData) {
         self.rt_dirty = true;
-        let u_c = id.u / CHUNK_SIZE;
-        let v_c = id.v / CHUNK_SIZE;
-        let keys = vec![
-            ChunkKey { face: id.face, u_idx: u_c, v_idx: v_c },
-            ChunkKey { face: id.face, u_idx: u_c.saturating_sub(1), v_idx: v_c },
-            ChunkKey { face: id.face, u_idx: u_c + 1, v_idx: v_c },
-            ChunkKey { face: id.face, u_idx: u_c, v_idx: v_c.saturating_sub(1) },
-            ChunkKey { face: id.face, u_idx: u_c, v_idx: v_c + 1 },
-        ];
+        // the block's own chunk and the chunks of its four neighbours, which may lie on another cube face
+        let mut keys = vec![PlanetData::chunk_key(id)];
+        for (du, dv) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            if let Some((face, u, v)) = planet.neighbor_column(id.face, id.u, id.v, du, dv) {
+                let key = PlanetData::chunk_key(BlockId { face, u, v, layer: 0 });
+                if !keys.contains(&key) { keys.push(key); }
+            }
+        }
         for key in keys {
             if self.chunks.contains_key(&key) {
                 let (v, i) = MeshGen::build_chunk(key, planet);

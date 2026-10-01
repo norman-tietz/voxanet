@@ -162,21 +162,26 @@ pub fn remove_block(&mut self, id: BlockId) {
         id.layer <= height
     }
 
-    // height of the column next to (face, u, v) in direction (du, dv); across a cube-face edge that is
-    // a column of the neighbouring face, found by continuing the line from the inner neighbour outward
-    pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
+    // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
+    // is a column of the neighbouring face, found by continuing the line from the inner neighbour outward
+    pub fn neighbor_column(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> Option<(u8, u32, u32)> {
         let res = self.resolution;
         let (nu, nv) = (u as i32 + du, v as i32 + dv);
         if nu >= 0 && nv >= 0 && nu < res as i32 && nv < res as i32 {
-            return self.terrain.get_height(face, nu as u32, nv as u32);
+            return Some((face, nu as u32, nv as u32));
         }
         let mid = res / 2;
         let here = crate::gen::CoordSystem::get_block_center(face, u, v, mid, res);
         let inner = crate::gen::CoordSystem::get_block_center(face, (u as i32 - du) as u32, (v as i32 - dv) as u32, mid, res);
-        match crate::gen::CoordSystem::pos_to_id(here * 2.0 - inner, res) {
-            Some(id) => self.terrain.get_height(id.face, id.u, id.v),
-            None => 0,
-        }
+        crate::gen::CoordSystem::pos_to_id(here * 2.0 - inner, res).map(|id| (id.face, id.u, id.v))
+    }
+
+    pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
+        self.neighbor_column(face, u, v, du, dv).map_or(0, |(f, nu, nv)| self.terrain.get_height(f, nu, nv))
+    }
+
+    pub fn chunk_key(id: BlockId) -> ChunkKey {
+        Self::get_chunk_key(id)
     }
 
     // the type of an existing block, None for air
