@@ -162,6 +162,23 @@ pub fn remove_block(&mut self, id: BlockId) {
         id.layer <= height
     }
 
+    // height of the column next to (face, u, v) in direction (du, dv); across a cube-face edge that is
+    // a column of the neighbouring face, found by continuing the line from the inner neighbour outward
+    pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
+        let res = self.resolution;
+        let (nu, nv) = (u as i32 + du, v as i32 + dv);
+        if nu >= 0 && nv >= 0 && nu < res as i32 && nv < res as i32 {
+            return self.terrain.get_height(face, nu as u32, nv as u32);
+        }
+        let mid = res / 2;
+        let here = crate::gen::CoordSystem::get_block_center(face, u, v, mid, res);
+        let inner = crate::gen::CoordSystem::get_block_center(face, (u as i32 - du) as u32, (v as i32 - dv) as u32, mid, res);
+        match crate::gen::CoordSystem::pos_to_id(here * 2.0 - inner, res) {
+            Some(id) => self.terrain.get_height(id.face, id.u, id.v),
+            None => 0,
+        }
+    }
+
     // the type of an existing block, None for air
     pub fn block_type(&self, id: BlockId) -> Option<BlockType> {
         if let Some(mods) = self.chunks.get(&Self::get_chunk_key(id)) {

@@ -290,33 +290,22 @@ impl MeshGen {
         // need to check neighbors to see how far down the cliff goes.
         // if a neighbor is lower than us, we must generate the blocks between our height and theirs.
         
-        // safely get height from the terrain map
-        let get_h = |f, u, v| -> u32 {
-             if u >= res || v >= res { return 0; } 
-             // using 0 here means "very deep", so we might generate extra mesh at face edges, which is safer than holes.
-             data.terrain.get_height(f, u, v)
-        };
-
         for u in u_start..u_end {
             for v in v_start..v_end {
-                let h = get_h(key.face, u, v);
+                let h = data.terrain.get_height(key.face, u, v);
                 if h == 0 { continue; }
 
                 // always add the top surface block
                 candidates.insert(BlockId { face: key.face, layer: h, u, v });
 
-                // check immediate neighbors to find the lowest exposed point
-                let mut min_h = h;
-                
-                if u > 0 { min_h = min_h.min(get_h(key.face, u - 1, v)); }
-                if u < res - 1 { min_h = min_h.min(get_h(key.face, u + 1, v)); }
-                if v > 0 { min_h = min_h.min(get_h(key.face, u, v - 1)); }
-                if v < res - 1 { min_h = min_h.min(get_h(key.face, u, v + 1)); }
+                // check immediate neighbors to find the lowest exposed point; at a cube-face edge the
+                // neighbour is a column of the next face, whose wall would otherwise be missing
+                let min_h = [(-1, 0), (1, 0), (0, -1), (0, 1)].iter()
+                    .map(|&(du, dv)| data.neighbor_height(key.face, u, v, du, dv))
+                    .fold(h, u32::min);
 
                 if min_h < h {
-                    let bottom = min_h.max(h.saturating_sub(20)); 
-                    
-                    for l in (bottom + 1)..h {
+                    for l in (min_h + 1)..h {
                          candidates.insert(BlockId { face: key.face, layer: l, u, v });
                     }
                 }
