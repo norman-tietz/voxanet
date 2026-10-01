@@ -9,6 +9,9 @@ use crate::gen::CoordSystem;
 use crate::entity::Player;
 use crate::physics::Physics;
 
+// keyboard turning speed (Q/E), radians per second
+const TURN_SPEED: f32 = 2.0;
+
 pub struct Controller {
     
     pub cam_dist: f32,
@@ -28,7 +31,7 @@ pub struct Controller {
     pub first_person: bool,
     
     
-    keys: [bool; 5], // W, A, S, D, Space
+    keys: [bool; 7], // W, A, S, D, Space, Q, E
     pub selected_block: BlockType, // what right-click places
 }
 
@@ -46,7 +49,7 @@ impl Controller {
             freeze_culling: false,
             sprint: false,
             first_person: true,
-            keys: [false; 5],
+            keys: [false; 7],
             selected_block: BlockType::Dirt,
         }
     }
@@ -64,11 +67,16 @@ impl Controller {
         if self.keys[3] { input.x += 1.0; } // D
         let jump = self.keys[4]; // space
 
+        // Q/E turn left/right in both views; in third person they are the only way to turn
+        let mut turn = 0.0;
+        if self.keys[5] { turn += TURN_SPEED * dt; } // Q
+        if self.keys[6] { turn -= TURN_SPEED * dt; } // E
+
         let rotation_delta = if self.first_person { self.mouse_delta } else { (0.0, 0.0) };
 
         
 
-        player.update(dt, planet, input, jump, rotation_delta, self.fly_mode, self.sprint);
+        player.update(dt, planet, input, jump, rotation_delta, turn, self.fly_mode, self.sprint);
 
         
         // reset delta after use
@@ -129,6 +137,8 @@ impl Controller {
                     PhysicalKey::Code(KeyCode::KeyS) => self.keys[2] = pressed,
                     PhysicalKey::Code(KeyCode::KeyD) => self.keys[3] = pressed,
                     PhysicalKey::Code(KeyCode::Space) => self.keys[4] = pressed,
+                    PhysicalKey::Code(KeyCode::KeyQ) => self.keys[5] = pressed,
+                    PhysicalKey::Code(KeyCode::KeyE) => self.keys[6] = pressed,
                    
                     PhysicalKey::Code(KeyCode::ControlLeft) => self.sprint = pressed, 
 

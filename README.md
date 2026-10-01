@@ -35,6 +35,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 |-------|--------|
 | `W` `A` `S` `D` | Move |
 | Mouse | Look around (first person) |
+| `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, 10× while flying) |
 | `F` | Toggle fly mode (first person only; fly in the direction you look) |

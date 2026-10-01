@@ -40,12 +40,13 @@ impl Player {
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
 
-    pub fn update(&mut self, dt: f32, planet: &PlanetData, input: Vec3, jump: bool, mouse_delta: (f32, f32), flying: bool, sprint: bool) {
+    // turn: keyboard yaw in radians for this step, positive turns left
+    pub fn update(&mut self, dt: f32, planet: &PlanetData, input: Vec3, jump: bool, mouse_delta: (f32, f32), turn: f32, flying: bool, sprint: bool) {
         let up = Physics::get_up_vector(self.position);
         
         // --- ROTATION (YAW) ---
-        if mouse_delta.0.abs() > 0.001 {
-            let yaw_delta = -mouse_delta.0 * self.mouse_sens;
+        let yaw_delta = -mouse_delta.0 * self.mouse_sens + turn;
+        if yaw_delta.abs() > 1e-6 {
             let yaw_rot = Quat::from_axis_angle(up, yaw_delta);
             self.rotation = yaw_rot * self.rotation;
         }

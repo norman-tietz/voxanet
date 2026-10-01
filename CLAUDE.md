@@ -50,10 +50,10 @@ A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the
 ### Gameplay loop (`src/main.rs`)
 `App` implements winit's `ApplicationHandler`; the window and `Game` (renderer, controller, player, planet, console) are created in `resumed`. `Game::tick` runs before every window/device event and on `about_to_wait`: `controller.update_player` (physics), raycast to cursor, `renderer.update_cursor`, `renderer.update_view`; then the event is dispatched. On macOS the surface is tagged Display P3 and `fs_main` converts its output from sRGB to P3 primaries (flag in `sun_dir.w`), otherwise colours show oversaturated. `Physics` (`src/physics.rs`) is a custom kinematic solver. Up is `normalize(position)`, orientation uses `Quat::from_rotation_arc`, and collision samples `exists()` with a 5% edge "shave" margin. `Console` (`src/cmd.rs`) captures keyboard input while open.
 
-Known quirks (don't "fix" these silently, mention them): `update_player` and the raycast run twice per event when the console is closed, and `src/lighting.rs` is not declared as a module, so it is dead code that isn't compiled.
+Known quirk (don't "fix" it silently, mention it): `src/lighting.rs` is not declared as a module, so it is dead code that isn't compiled. `update_player` runs exactly once per tick; movement and turning speeds are per second (Q/E turn at `TURN_SPEED` in `controller.rs`).
 
 ## Runtime controls (useful for manual verification)
-- WASD / Space / Left Ctrl (sprint); mouse look. LMB mines, RMB places; `1`–`5` choose the placed block type.
+- WASD / Space / Left Ctrl (sprint); mouse look (first person); `Q`/`E` turn left/right in both views. LMB mines, RMB places; `1`–`5` choose the placed block type.
 - `K` toggles first/third person. `F` toggles fly (first person only).
 - `]` / `[` grows/shrinks planet resolution by ×1.2 (min 8, max 16384) and regenerates terrain.
 - `` ` `` opens the console: `help`, `/debug_mode set true`, `/move_speed get|set <v>`, `/jump_force get|set <v>`.

@@ -100,7 +100,7 @@ impl Game {
             }
         }
 
-        // physics & player Update
+        // physics & player Update (once per tick: movement and turning speeds are per second)
         controller.update_player(player, planet, dt);
 
         // raycast & cursor Update
@@ -116,19 +116,8 @@ impl Game {
         // UPDATE ANIMATION
         console.update_animation(dt);
 
-        // BLOCK CONTROLS IF CONSOLE OPEN
-        // Only update player/physics if console is NOT hijacking input
-        if !console.is_open {
-             // (Existing Physics & Player Update)
-             controller.update_player(player, planet, dt);
-
-
-             let width = renderer.config.width as f32;
-             let height = renderer.config.height as f32;
-             let ray_result = controller.raycast(player, planet, width, height, false);
-             controller.cursor_id = ray_result.map(|(id, _)| id);
-        } else {
-
+        // the console takes the keyboard (see window_event) and needs a free mouse cursor
+        if console.is_open {
              let _ = renderer.window.set_cursor_grab(CursorGrabMode::None);
              renderer.window.set_cursor_visible(true);
         }
