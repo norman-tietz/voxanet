@@ -68,7 +68,7 @@ A `BlockId` is `{face: 0..6, layer, u, v}` on a cube-sphere. `resolution` is the
 Known quirk (don't "fix" it silently, mention it): `src/lighting.rs` is not declared as a module, so it is dead code that isn't compiled. `update_player` runs exactly once per tick; movement and turning speeds are per second (Q/E turn at `TURN_SPEED` in `controller.rs`).
 
 ## Runtime controls (useful for manual verification)
-- WASD / Space / Left Ctrl (sprint; in water Space swims up, Left Ctrl dives); mouse look (first person); `Q`/`E` turn left/right in both views. LMB mines, RMB places; `1`–`5` choose the placed block type.
+- WASD / Space / Left Ctrl (sprint; in water Space swims up, Left Ctrl dives); mouse look (first person); `Q`/`E` turn left/right in both views. LMB mines, RMB places; `1`–`5` or a middle click on a block (picks its type) choose the placed block type.
 - `K` toggles first/third person. `F` toggles fly (first person only).
 - `]` / `[` grows/shrinks planet resolution by ×1.2 (min 8, max 16384) and regenerates terrain.
 - `` ` `` opens the console: `help`, `/debug_mode set true`, `/move_speed get|set <v>`, `/jump_force get|set <v>`.

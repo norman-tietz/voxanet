@@ -26,6 +26,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{CursorGrabMode, Window, WindowId};
 use winit::keyboard::{Key, PhysicalKey, KeyCode};
 use crate::common::PlanetData;
+use crate::material::BlockType;
 use crate::renderer::Renderer;
 use crate::controller::Controller;
 use crate::entity::Player;
@@ -181,13 +182,18 @@ impl Game {
             WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
                 let is_right = button == MouseButton::Right;
                 if let Some(id) = controller.cursor_id {
-                     if is_right {
+                     if button == MouseButton::Middle {
+                         // pick the targeted block's type for placing (the bedrock core isn't placeable)
+                         if let Some(ty) = planet.block_type(id).filter(|ty| BlockType::PLACEABLE.contains(ty)) {
+                             controller.selected_block = ty;
+                         }
+                     } else if is_right {
                          let place_info = controller.raycast(player, planet, renderer.config.width as f32, renderer.config.height as f32, true);
                          if let Some((place_id, _)) = place_info {
                              planet.add_block(place_id, controller.selected_block);
                              renderer.refresh_neighbors(place_id, planet);
                          }
-                     } else {
+                     } else if button == MouseButton::Left {
                          planet.remove_block(id);
                          renderer.refresh_neighbors(id, planet);
                      }
