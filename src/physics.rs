@@ -103,15 +103,15 @@ pub fn is_solid(pos: Vec3, planet: &PlanetData) -> bool {
         let (right_dir, fwd_dir) = Self::get_grid_axes(up, pos);
         let right = right_dir * Self::PLAYER_RADIUS;
         let fwd = fwd_dir * Self::PLAYER_RADIUS;
+        // the diagonals matter: with only the four axis points, a block corner could reach right up to
+        // the player's centre line and the camera's near plane would clip into the terrain
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        let offsets = [
+            Vec3::ZERO, right, -right, fwd, -fwd,
+            (right + fwd) * diag, (right - fwd) * diag, (-right + fwd) * diag, (-right - fwd) * diag,
+        ];
 
-        for center_p in checks {
-            if Self::is_solid(center_p, planet) { return true; }
-            if Self::is_solid(center_p + right, planet) { return true; }
-            if Self::is_solid(center_p - right, planet) { return true; }
-            if Self::is_solid(center_p + fwd, planet) { return true; }
-            if Self::is_solid(center_p - fwd, planet) { return true; }
-        }
-        false
+        checks.iter().any(|&center_p| offsets.iter().any(|&o| Self::is_solid(center_p + o, planet)))
     }
 
     pub fn solve_movement(start_pos: Vec3, velocity: Vec3, dt: f32, planet: &PlanetData, flying: bool) -> (Vec3, Vec3, bool) {
