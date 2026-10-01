@@ -6,7 +6,7 @@ struct Global {
     ray_dirs: mat4x4<f32>, // camera rays: col0 through the top-left corner, col1/col2 per screen width/height
     camera_pos: vec4<f32>,
     sun_dir: vec4<f32>,
-    screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water)
+    screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -47,6 +47,8 @@ const SKY_COLOR       = vec3<f32>(0.15, 0.3, 0.6);   // Deep blue ambient sky
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
 const WATER_DEEP      = vec3<f32>(0.002, 0.030, 0.090); // linear colour of deep water
 const WATER_SHALLOW   = vec3<f32>(0.020, 0.150, 0.170); // ... and of shallow water (turquoise)
+const FOAM_COLOR      = vec3<f32>(0.80, 0.85, 0.88);  // shore foam (linear albedo)
+const FOAM_DEPTH      = 2.0;                         // vertical water depth below which foam forms
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
 const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
     vec3<f32>(0.8225, 0.0332, 0.0171),
@@ -546,14 +548,40 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 // translucent water surface (MeshGen::build_water), drawn after the lighting over the lit sea floor.
 // Opacity grows with the depth of water along the view ray (G-buffer distance behind the surface).
+// one travelling sine wave in world space (a plane wave crossing the sphere, so there are no seams at cube
+// faces); `steep` is its maximum slope. Returns the height gradient (xyz) and the height (w).
+// Waves fade out with distance, before they shrink below a pixel and alias.
+fn water_wave(p: vec3<f32>, dir: vec3<f32>, len: f32, steep: f32, phase: f32, t: f32, dist: f32) -> vec4<f32> {
+    let k = 6.2832 / len;
+    let w = sqrt(9.81 * k) * 0.5;                          // deep-water dispersion, slowed down
+    let fade = clamp(1.0 - dist / (len * 60.0), 0.0, 1.0);
+    let ph = k * dot(p, normalize(dir)) - w * t + phase;
+    return vec4<f32>(normalize(dir) * (steep * fade * cos(ph)), steep * fade * sin(ph) / k);
+}
+
+fn water_waves(p: vec3<f32>, t: f32, dist: f32) -> vec4<f32> {
+    var s = water_wave(p, vec3<f32>(1.0, 0.2, 0.4), 7.3, 0.07, 0.0, t, dist);
+    s += water_wave(p, vec3<f32>(-0.3, 1.0, 0.6), 5.1, 0.07, 1.3, t, dist);
+    s += water_wave(p, vec3<f32>(0.5, -0.4, 1.0), 3.7, 0.06, 2.9, t, dist);
+    s += water_wave(p, vec3<f32>(-1.0, -0.6, 0.2), 2.3, 0.06, 4.1, t, dist);
+    s += water_wave(p, vec3<f32>(0.2, 0.9, -1.0), 1.6, 0.05, 5.7, t, dist);
+    s += water_wave(p, vec3<f32>(0.9, -1.0, -0.5), 1.1, 0.05, 0.6, t, dist);
+    return s;
+}
+
 @fragment
 fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
-    let N = normalize(in.world_pos); // calm sea: the surface faces straight up
+    let up = normalize(in.world_pos);
+    let t = global.screen.w;
     let L = normalize(global.sun_dir.xyz);
     let to_cam = global.camera_pos.xyz - in.world_pos;
     let water_dist = length(to_cam);
     let V = to_cam / water_dist;
     let underwater = length(global.camera_pos.xyz) < global.screen.z;
+
+    // ripples: tilt the normal by the waves' slope along the surface (the mesh itself stays flat)
+    let waves = water_waves(in.world_pos, t, water_dist);
+    let N = normalize(up - (waves.xyz - dot(waves.xyz, up) * up));
 
     let floor_dist = textureLoad(d_dist, vec2<i32>(in.clip_pos.xy), 0).r;
     var depth = 30.0;
@@ -562,7 +590,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
 
     // the sea floor's shadow (no shadow texel belongs to the surface itself)
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos));
-    let NdotL = max(dot(N, L), 0.0);
+    let NdotL = max(dot(up, L), 0.0);
     let body = mix(WATER_SHALLOW, WATER_DEEP, 1.0 - exp(-depth * 0.15));
     var color = body * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
 
@@ -572,6 +600,25 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
     color += SUN_COLOR * spec * 3.0;
     alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
+
+    // shore foam: a solid line where the water meets land, plus bands that run in toward the shore,
+    // broken up by the waves. `depth` is along the view ray; the vertical depth decides the shore.
+    if (floor_dist > 0.0) {
+        let vdepth = depth * max(dot(up, V), 0.1);
+        let shore = 1.0 - smoothstep(0.0, FOAM_DEPTH, vdepth);
+        let bands = 0.5 + 0.5 * sin(vdepth * 6.0 + t * 1.6);
+        // drifting patches, so foam also varies across the (blocky) shallows of one depth
+        let q = in.world_pos + waves.xyz * 2.0;
+        let patches = 0.5 + 0.5 * sin(dot(q, vec3<f32>(0.9, 0.3, -0.5)) * 1.1 + t * 0.7)
+                                * sin(dot(q, vec3<f32>(-0.2, 0.8, 0.7)) * 1.4 - t * 0.5);
+        let band_fade = clamp(1.0 - water_dist / 150.0, 0.0, 1.0); // thin bands alias far away
+        let edge = 1.0 - smoothstep(0.05, 0.3, vdepth);
+        let froth = shore * (0.55 * bands + 0.45 * patches) + shore * 0.3;
+        let foam = max(edge, smoothstep(0.45, 0.8, froth) * band_fade) * 0.9;
+        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
+        color = mix(color, foam_col, foam);
+        alpha = max(alpha, foam);
+    }
     if (underwater) {
         color = WATER_DEEP * SKY_COLOR * 4.0; // looking up at the surface from below
         alpha = 0.6;

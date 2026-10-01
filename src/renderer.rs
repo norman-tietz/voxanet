@@ -33,7 +33,7 @@ pub struct GlobalUniform {
     pub ray_dirs: [f32; 16],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],   
-    pub screen: [f32; 4], // width, height in pixels
+    pub screen: [f32; 4], // width, height in pixels, sea surface radius, time in seconds (water animation)
 }
 
 #[repr(C)]
@@ -123,6 +123,8 @@ pub struct Renderer {
     lod_tx: Sender<(LodKey, Vec<Vertex>, Vec<u32>)>,
     lod_rx: Receiver<(LodKey, Vec<Vertex>, Vec<u32>)>,
     pending_lods: HashSet<LodKey>,
+
+    start_time: std::time::Instant, // clock of the water animation (GlobalUniform.screen.w)
 
     // --- FPS ---
     last_fps_time: std::time::Instant,
@@ -458,6 +460,7 @@ let size = window.inner_size();
             lod_rx,
             pending_lods: HashSet::new(),
             
+            start_time: std::time::Instant::now(),
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
             current_fps: 0,
@@ -1054,7 +1057,8 @@ if controller.show_collisions {
             view_proj: mvp.to_cols_array(),
             ray_dirs: Self::ray_dirs(mvp, cam_pos),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            screen: [self.config.width as f32, self.config.height as f32, CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution), 0.0],
+            screen: [self.config.width as f32, self.config.height as f32, CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution),
+                     self.start_time.elapsed().as_secs_f32() % 3600.0], // wrapped: keeps f32 wave phases precise
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
         };
         self.queue.write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
