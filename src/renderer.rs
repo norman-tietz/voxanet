@@ -15,6 +15,7 @@ use glam::Vec3;
 use crate::lod_animation::{LodAnimator, AnyKey};
 use crate::rt_shadow::{RtParams, ShadowWindow};
 use crate::rt_blur::RtBlur;
+use crate::gpu_timer::{self, GpuTimer};
 use bytemuck::{Pod, Zeroable};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -126,6 +127,7 @@ pub struct Renderer {
     rt_center: Option<BlockId>,
     rt_dirty: bool,
     rt_blur: RtBlur,
+    gpu_timer: Option<GpuTimer>, // None without timestamp queries
 }
 
 impl Renderer {
@@ -152,6 +154,7 @@ impl Renderer {
         if adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
             features |= wgpu::Features::POLYGON_MODE_LINE;
         }
+        features |= GpuTimer::required_features(&adapter);
 
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: None, required_features: features, required_limits: limits,
@@ -392,6 +395,7 @@ let size = window.inner_size();
             label: Some("Identity Bind Group"), 
         });
 
+        let gpu_timer = GpuTimer::new(&device, &queue);
         let (mesh_tx, mesh_rx) = channel(); 
         let (lod_tx, lod_rx) = channel();
 
@@ -441,6 +445,7 @@ let size = window.inner_size();
             rt_center: None,
             rt_dirty: true,
             rt_blur,
+            gpu_timer,
         }
     }
 
@@ -927,6 +932,8 @@ if controller.show_collisions {
 
 
 
+        if let Some(timer) = &mut self.gpu_timer { timer.poll(&self.device); }
+
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o) | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -1029,7 +1036,7 @@ if controller.show_collisions {
                     label: Some("RT Shadow Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: &self.rt_blur.target, resolve_target: None, ops: RtBlur::clear_ops() })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.rt_blur.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                    timestamp_writes: None,
+                    timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::SHADOWS, true, true)),
                     occlusion_query_set: None,
                 multiview_mask: None,
                 });
@@ -1052,7 +1059,7 @@ if controller.show_collisions {
                     pass.draw_indexed(0..self.player_inds, 0, 0..1);
                 }
             }
-            self.rt_blur.blur(&mut enc);
+            self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
         }
 
         // --- PASS 2: MAIN RENDER ---
@@ -1071,7 +1078,7 @@ if controller.show_collisions {
                 } 
             })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-                timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::MAIN, true, true)), occlusion_query_set: None, multiview_mask: None,
             });
             
             if controller.is_wireframe { pass.set_pipeline(&self.pipeline_wire); } 
@@ -1231,11 +1238,12 @@ if controller.show_collisions {
             if player.debug_mode {
                 let status = if controller.freeze_culling { "FROZEN" } else { "ACTIVE" };
                 let info = format!(
-                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}", 
+                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\n{}", 
                     status,
                     rendered_chunks, self.chunks.len(),
                     rendered_lods, self.lod_chunks.len(),
-                    self.load_queue.len()
+                    self.load_queue.len(),
+                    self.gpu_timer.as_ref().map_or("GPU timing unavailable".to_string(), |t| t.summary())
                 );
 
                 debug_buf.set_size(Some(self.config.width as f32), Some(self.config.height as f32));
@@ -1297,7 +1305,7 @@ if controller.show_collisions {
                 text_areas.push(TextArea {
                     buffer: &debug_buf,
                     left: self.config.width as f32 - 180.0,
-                    top: 40.0,
+                    top: 62.0, // below the FPS and block lines
                     scale: 1.0,
                     bounds: TextBounds { left: 0, top: 0, right: self.config.width as i32, bottom: self.config.height as i32 },
                     default_color: glyphon::Color::rgb(255, 255, 255),
@@ -1328,7 +1336,7 @@ if controller.show_collisions {
                     },
                 })],
                 depth_stencil_attachment: None, 
-                timestamp_writes: None,
+                timestamp_writes: self.gpu_timer.as_ref().and_then(|t| t.writes(gpu_timer::TEXT, true, true)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1336,7 +1344,9 @@ if controller.show_collisions {
             self.text_renderer.render(&self.text_atlas, &self.text_viewport, &mut pass).unwrap();
         }
 
+        if let Some(timer) = &mut self.gpu_timer { timer.resolve(&mut enc); }
         self.queue.submit(std::iter::once(enc.finish()));
+        if let Some(timer) = &mut self.gpu_timer { timer.after_submit(); }
         self.queue.present(out);
         self.text_atlas.trim();
     }

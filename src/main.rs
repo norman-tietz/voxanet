@@ -11,6 +11,7 @@ mod lod_animation;
 mod cmd;
 mod rt_shadow;
 mod rt_blur;
+mod gpu_timer;
 mod material;
 mod system_diagnostics;
 

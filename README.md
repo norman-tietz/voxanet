@@ -77,6 +77,8 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `O` | Toggle collision box visualization |
 | `'` | Freeze/unfreeze frustum culling (to inspect culling from outside) |
 
+In debug mode the overlay in the top right also shows chunk/LOD counts and the **GPU time per frame**, split into shadows (ray marching), blur, main pass and text, averaged over one second (on GPUs with timestamp queries).
+
 ## Deep Dive for Those Interested
 
 ### 1. Core Architecture & Memory Management (System Design)

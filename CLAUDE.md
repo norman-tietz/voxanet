@@ -57,4 +57,4 @@ Known quirk (don't "fix" it silently, mention it): `src/lighting.rs` is not decl
 - `K` toggles first/third person. `F` toggles fly (first person only).
 - `]` / `[` grows/shrinks planet resolution by ×1.2 (min 8, max 16384) and regenerates terrain.
 - `` ` `` opens the console: `help`, `/debug_mode set true`, `/move_speed get|set <v>`, `/jump_force get|set <v>`.
-- When debug mode is on: `P` wireframe, `O` collision boxes, `'` freezes frustum culling.
+- When debug mode is on: `P` wireframe, `O` collision boxes, `'` freezes frustum culling. The overlay shows GPU time per part (`src/gpu_timer.rs`, timestamp queries). Apple GPUs overlap passes, so each part is measured from the previous part's end to its own end; use this overlay rather than FPS when profiling.

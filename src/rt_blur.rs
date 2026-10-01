@@ -6,6 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use crate::common::Vertex;
+use crate::gpu_timer::{self, GpuTimer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const PENUMBRA_WIDTH: f32 = 0.3; // world units
@@ -151,13 +152,14 @@ impl RtBlur {
         wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store }
     }
 
-    pub fn blur(&self, enc: &mut wgpu::CommandEncoder) {
-        for (dst, bind) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)] {
+    // timer: the horizontal pass writes the blur's begin timestamp, the vertical pass its end
+    pub fn blur(&self, enc: &mut wgpu::CommandEncoder, timer: Option<&GpuTimer>) {
+        for (i, (dst, bind)) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)].into_iter().enumerate() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("RT Blur Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: dst, resolve_target: None, ops: Self::clear_ops() })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: timer.and_then(|t| t.writes(gpu_timer::BLUR, i == 0, i == 1)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
