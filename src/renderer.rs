@@ -24,7 +24,6 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GlobalUniform {
     pub view_proj: [f32; 16],
-    pub light_view_proj: [f32; 16],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],   
 }
@@ -52,12 +51,6 @@ pub struct Renderer {
     text_viewport: Viewport,
     text_renderer: GlyphRenderer,
     
-    // --- SHADOWS ---
-    _shadow_texture: wgpu::Texture, // owns the shadow map behind shadow_view
-    shadow_view: wgpu::TextureView,
-    pipeline_shadow: wgpu::RenderPipeline,
-    shadow_global_buf: wgpu::Buffer,      
-    shadow_global_bind: wgpu::BindGroup,
 
     // --- UI ---
     pipeline_ui: wgpu::RenderPipeline, 
@@ -87,7 +80,7 @@ pub struct Renderer {
 
 
     depth: wgpu::TextureView,
-    global_bind_identity: wgpu::BindGroup, // For UI to access dummy shadows
+    global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
 
     // --- MESHES ---
     player_v_buf: wgpu::Buffer,
@@ -127,8 +120,7 @@ pub struct Renderer {
     current_fps: u32,
     output_p3: bool, // surface tagged Display P3, fs_main converts to P3 primaries
 
-    // --- RAY-MARCHED SHADOWS (prototype, enabled with VOXANET_RT_SHADOWS=1) ---
-    rt_enabled: bool,
+    // --- RAY-MARCHED SHADOWS ---
     rt_params_buf: wgpu::Buffer,
     rt_bits_buf: wgpu::Buffer,
     rt_center: Option<BlockId>,
@@ -199,31 +191,6 @@ let size = window.inner_size();
         let mut text_atlas = TextAtlas::new(&device, &queue, &glyph_cache, config.format);
         let text_renderer = GlyphRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let shadow_size = 4096; 
-        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow Map"),
-            size: wgpu::Extent3d { width: shadow_size, height: shadow_size, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
-        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Shadow Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            compare: Some(wgpu::CompareFunction::LessEqual), 
-            ..Default::default()
-        });
-
         let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
 
@@ -233,30 +200,16 @@ let size = window.inner_size();
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, 
                     count: None 
                 },
-                // 1: shadow Texture
+                // 1: ray-marched shadow window params
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    count: None,
-                },
-                // 2: shadow Sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                // 3: ray-marched shadow window params
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
-                // 4: ray-marched shadow window solid/air bits
+                // 2: ray-marched shadow window solid/air bits
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
@@ -278,13 +231,12 @@ let size = window.inner_size();
         // --- BUFFERS ---
         let global_buf = device.create_buffer(&wgpu::BufferDescriptor { 
             label: Some("Global Uniform"), 
-            size: 160, 
+            size: std::mem::size_of::<GlobalUniform>() as u64, 
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, 
             mapped_at_creation: false 
         });
 
-        // ray-marched shadows; bind groups that must not ray march (shadow pass, UI) get rt_off_buf
-        let rt_enabled = std::env::var("VOXANET_RT_SHADOWS").is_ok();
+        // ray-marched shadows; the UI bind group gets rt_off_buf so it doesn't read the shadow term
         let rt_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RT Shadow Params"),
             size: std::mem::size_of::<RtParams>() as u64,
@@ -307,47 +259,10 @@ let size = window.inner_size();
             layout: &global_layout, 
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: global_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: rt_params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: rt_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: rt_bits_buf.as_entire_binding() },
             ], 
             label: None 
-        });
-
-        // --- SHADOW PASS RESOURCES ---
-        // shadow uniform buffer
-        let shadow_global_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Shadow Global Uniform"),
-            size: 160,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // dummy depth tex (1x1)
-        let dummy_depth_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Dummy Depth"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING, 
-            view_formats: &[],
-        });
-        let dummy_depth_view = dummy_depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // shadow pass bind group
-        let shadow_global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shadow Pass Bind Group"),
-            layout: &global_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: shadow_global_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dummy_depth_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: rt_off_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
-            ],
         });
 
         let identity_mat = glam::Mat4::IDENTITY;
@@ -394,16 +309,6 @@ let size = window.inner_size();
         let rt_sample_layout = RtBlur::sample_layout(&device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&local_layout), Some(&rt_sample_layout)], immediate_size: 0 });
         let rt_blur = RtBlur::new(&device, rt_sample_layout, &layout, &shader, config.width, config.height);
-
-        let pipeline_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow Pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as _, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 }] })]},
-            fragment: None, 
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() }, 
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 } }),
-            multisample: Default::default(), multiview_mask: None, cache: None,
-        });
 
         let pipeline_fill = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, false);
         let pipeline_wire = Self::create_pipeline(&device, &config, &layout, &shader, wgpu::PrimitiveTopology::TriangleList, true);
@@ -467,7 +372,6 @@ let size = window.inner_size();
         // global identity
         let identity_global_data = GlobalUniform {
             view_proj: identity_mat.to_cols_array(),
-            light_view_proj: identity_mat.to_cols_array(),
             cam_pos: [0.0, 0.0, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
         };
@@ -482,10 +386,8 @@ let size = window.inner_size();
             layout: &global_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: global_buf_identity.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: rt_off_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: rt_bits_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: rt_off_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: rt_bits_buf.as_entire_binding() },
             ],
             label: Some("Identity Bind Group"), 
         });
@@ -503,16 +405,11 @@ let size = window.inner_size();
             local_buf_player, local_bind_player,
             depth,
 
-            _shadow_texture: shadow_texture,
             font_system,
             swash_cache,
             text_atlas,
             text_viewport,
             text_renderer,
-            shadow_view,
-            pipeline_shadow,
-            shadow_global_buf,
-            shadow_global_bind,
             collision_v_buf, collision_i_buf, collision_inds: 0,
             frozen_frustum: None,
             player_v_buf, player_i_buf, player_inds: pi.len() as u32,
@@ -539,7 +436,6 @@ let size = window.inner_size();
             current_fps: 0,
             output_p3,
 
-            rt_enabled,
             rt_params_buf,
             rt_bits_buf,
             rt_center: None,
@@ -871,7 +767,6 @@ let size = window.inner_size();
 
 
     fn update_rt_window(&mut self, player_pos: Vec3, planet: &PlanetData) {
-        if !self.rt_enabled { return; }
         let Some(id) = CoordSystem::pos_to_id(player_pos, planet.resolution) else { return };
         // small planets are stored completely, so only big ones follow the player
         let whole_planet = planet.resolution <= crate::rt_shadow::WINDOW_SIZE;
@@ -1044,45 +939,8 @@ if controller.show_collisions {
         
         self.update_rt_window(player.position, planet);
 
-        // -- sun matrix --
+        // directional sun, fixed in world space
         let sun_dir = glam::Vec3::new(0.5, 0.8, 0.4).normalize();
-        // the light's depth range (shadow_dist +- 150) must match SHADOW_DEPTH_RANGE in shader.wgsl
-        let shadow_dist = 200.0; // distance of light source from center
-        let proj_size = 60.0;   // SIZE OF SHADOW AREA (Smaller = Sharper Shadows)
-        
-        // basic LookAt
-        let center = player.position;
-        let mut sun_view = glam::camera::rh::view::look_at_mat4(
-            center + (sun_dir * shadow_dist), 
-            center, 
-            glam::Vec3::Y
-        );
-
-        // texel Snapping
-        // project the center position into light space, snap it to a pixel,
-        // and then offset the view matrix by the difference.
-        let shadow_map_size = 4096.0;
-        let texel_size = (2.0 * proj_size) / shadow_map_size;
-        
-        let shadow_origin = sun_view.transform_point3(center);
-        let snapped_x = (shadow_origin.x / texel_size).round() * texel_size;
-        let snapped_y = (shadow_origin.y / texel_size).round() * texel_size;
-        
-        let snap_offset_x = snapped_x - shadow_origin.x;
-        let snap_offset_y = snapped_y - shadow_origin.y;
-        
-        // apply snap to the view matrix
-        let snap_mat = glam::Mat4::from_translation(glam::Vec3::new(snap_offset_x, snap_offset_y, 0.0));
-        sun_view = snap_mat * sun_view;
-
-        // projection
-        let sun_proj = glam::camera::rh::proj::directx::orthographic(
-            -proj_size, proj_size, 
-            -proj_size, proj_size, 
-            shadow_dist - 150.0, shadow_dist + 150.0
-        );
-        
-        let light_view_proj = sun_proj * sun_view;
 
         // -- Camera Matrix --
         let mvp = controller.get_matrix(player, self.config.width as f32, self.config.height as f32);
@@ -1113,23 +971,13 @@ if controller.show_collisions {
         let cam_pos = controller.get_camera_pos(player);
         let frustum = crate::common::Frustum::from_matrix(mvp);
 
-        // 1. update main global uni
+        // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
-            light_view_proj: light_view_proj.to_cols_array(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
         };
         self.queue.write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
-
-        // 2. update shadow global uni (put Light Matrix in view_proj)
-        let shadow_uniform_data = GlobalUniform {
-            view_proj: light_view_proj.to_cols_array(), // Used by Shadow Pass Vertex Shader
-            light_view_proj: light_view_proj.to_cols_array(),
-            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-        };
-        self.queue.write_buffer(&self.shadow_global_buf, 0, bytemuck::cast_slice(&[shadow_uniform_data]));
 
         let model_mat = player.get_model_matrix();
         self.queue.write_buffer(&self.local_buf_player, 0, bytemuck::cast_slice(model_mat.as_ref()));
@@ -1172,49 +1020,8 @@ if controller.show_collisions {
 
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         
-        // --- PASS 1: SHADOW MAP GENERATION ---
+        // --- PASS 1: RAY-MARCHED SHADOWS + BLUR ---
         {
-            let mut shadow_pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
-                color_attachments: &[], 
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            shadow_pass.set_pipeline(&self.pipeline_shadow);
-            shadow_pass.set_bind_group(0, &self.shadow_global_bind, &[]);
-            shadow_pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
-
-            // the ray-marched shadows don't need the shadow map
-            if !self.rt_enabled {
-
-            for mesh in self.chunks.values() {
-                if frustum.intersects_sphere(mesh.center, mesh.radius) {
-                    shadow_pass.set_bind_group(1, &mesh.bind_group, &[]);
-                    shadow_pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
-                    shadow_pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    shadow_pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
-                }
-            }
-            for mesh in self.lod_chunks.values() {
-                if frustum.intersects_sphere(mesh.center, mesh.radius) {
-                shadow_pass.set_bind_group(1, &mesh.bind_group, &[]);
-                shadow_pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
-                shadow_pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                shadow_pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
-                }
-            }
-            }
-        }
-
-        // --- PASS 1b: RAY-MARCHED SHADOWS + BLUR ---
-        if self.rt_enabled {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
             self.rt_blur.set_focal(&self.queue, self.config.height as f32 * 0.5 / (fov.to_radians() * 0.5).tan());
             {

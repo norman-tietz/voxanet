@@ -3,16 +3,13 @@
 // basic shading (IMPROVE THIS LATER)
 struct Global {
     view_proj: mat4x4<f32>,
-    light_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     sun_dir: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
-@group(0) @binding(1) var t_shadow: texture_depth_2d;
-@group(0) @binding(2) var s_shadow: sampler_comparison;
 
-// ray-marched shadows (prototype): per cube face a window of solid/air bits near the player, see rt_shadow.rs
+// ray-marched shadows: per cube face a window of solid/air bits near the player, see rt_shadow.rs
 struct FaceWindow {
     origin_u: i32,
     origin_v: i32,
@@ -30,8 +27,8 @@ struct RtParams {
     max_layer: i32,
     _pad: u32,
 }
-@group(0) @binding(3) var<uniform> rt: RtParams;
-@group(0) @binding(4) var<storage, read> rt_bits: array<u32>;
+@group(0) @binding(1) var<uniform> rt: RtParams;
+@group(0) @binding(2) var<storage, read> rt_bits: array<u32>;
 // blurred shadow term written by fs_rt + blur.wgsl (r = shadow), see rt_blur.rs
 @group(2) @binding(0) var rt_blurred: texture_2d<f32>;
 
@@ -52,7 +49,6 @@ const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Dis
     vec3<f32>(0.1774, 0.9669, 0.0724),
     vec3<f32>(0.0000, 0.0000, 0.9108),
 );
-const SHADOW_DEPTH_RANGE = 300.0;                    // far - near of the light projection in renderer.rs
 
 // --- VERTEX SHADER ---
 
@@ -68,7 +64,6 @@ struct VertexOut {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_pos: vec3<f32>,
     @location(3) view_pos: vec3<f32>,
-    @location(4) shadow_pos: vec3<f32>,
 };
 
 @vertex
@@ -94,66 +89,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.color = in.color;
     out.view_pos = global.camera_pos.xyz;
 
-    // Shadow Calculation Space
-    // We pre-calculate this to save work in the fragment shader
-    // We apply a "Normal Offset" bias here to fix shadow acne on rounded surfaces
-    let normal_offset = out.world_normal * 0.05; 
-    let pos_light = global.light_view_proj * vec4<f32>(out.world_pos + normal_offset, 1.0);
-    
-    // Convert to [0, 1] texture space
-    out.shadow_pos = vec3<f32>(
-        pos_light.x * 0.5 + 0.5,
-        -pos_light.y * 0.5 + 0.5,
-        pos_light.z
-    );
-
     return out;
-}
-
-// --- SHADOW ENGINE (Gaussian PCF) ---
-
-fn fetch_shadow_accurate(shadow_pos: vec3<f32>, NdotL: f32) -> f32 {
-    // 1. Cull outside cascade
-    if (shadow_pos.z > 1.0 || shadow_pos.x < 0.0 || shadow_pos.x > 1.0 || shadow_pos.y < 0.0 || shadow_pos.y > 1.0) {
-        return 1.0;
-    }
-
-    // 2. Slope-Scaled Bias, given in world units and converted to light depth.
-    // Steeper angles need more bias to prevent acne.
-    let bias_world = mix(0.01, 0.04, 1.0 - NdotL);
-    let bias = bias_world / SHADOW_DEPTH_RANGE;
-    let current_depth = shadow_pos.z - bias;
-
-    let tex_dim = vec2<f32>(textureDimensions(t_shadow));
-    let texel_size = 1.0 / tex_dim.x;
-
-    // 3. 5x5 Gaussian Weighted PCF
-    // We sample a grid, but center samples matter more.
-    var shadow_sum = 0.0;
-    var total_weight = 0.0;
-
-    // Gaussian weights for range -2 to +2
-    // [0.05, 0.25, 0.4, 0.25, 0.05] roughly
-    
-    for (var x = -1.0; x <= 1.0; x += 1.0) {
-        for (var y = -1.0; y <= 1.0; y += 1.0) {
-            // Calculate weight based on distance from center (Gaussian-ish)
-            let dist_sq = x*x + y*y;
-            let weight = exp(-dist_sq * 1.5); // Gaussian Falloff
-
-            let val = textureSampleCompare(
-                t_shadow, 
-                s_shadow, 
-                shadow_pos.xy + vec2<f32>(x, y) * texel_size, 
-                current_depth
-            );
-            
-            shadow_sum += val * weight;
-            total_weight += weight;
-        }
-    }
-
-    return shadow_sum / total_weight;
 }
 
 // --- RAY-MARCHED SHADOWS ---
@@ -357,11 +293,12 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
     return 1.0;
 }
 
-fn shadow_factor(in: VertexOut, N: vec3<f32>, L: vec3<f32>, NdotL: f32) -> f32 {
+// blurred ray-marched shadow term at this pixel (1 = lit); the UI bind group has rt.enabled = 0
+fn shadow_factor(in: VertexOut) -> f32 {
     if (rt.enabled == 1u) {
         return textureLoad(rt_blurred, vec2<i32>(in.clip_pos.xy), 0).r;
     }
-    return fetch_shadow_accurate(in.shadow_pos, NdotL);
+    return 1.0;
 }
 
 // sharp ray-marched shadow term + camera distance, blurred afterwards (rt_blur.rs)
@@ -436,9 +373,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // 3. Lighting Math
     let NdotL = max(dot(N, L), 0.0);
     
-    // Shadow Map
-    // faces turned away from the sun are in their own shadow; skipping the lookup there avoids acne
-    let shadow_raw = select(shadow_factor(in, N, L, NdotL), 0.0, NdotL <= 0.0);
+    // Shadow (ray-marched, see rt_shadow() / fs_rt); faces turned away from the sun are in their own shadow
+    let shadow_raw = select(shadow_factor(in), 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 

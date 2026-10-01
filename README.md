@@ -11,7 +11,7 @@ This project is a high-performance voxel engine built from scratch in **Rust**, 
 
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
-*   **Custom Rendering Engine:** Powered by **wgpu**, featuring cascaded shadow maps, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
+*   **Custom Rendering Engine:** Powered by **wgpu**, featuring ray-marched sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
 *   **Dynamic LOD System:** Implements a recursive Quadtree-based Level of Detail system that renders high-fidelity voxels near the player while optimizing geometry at the horizon.
 *   **Custom Physics Engine:** A specialized physics solver designed for spherical gravity, handling collision detection and character orientation on a curved surface.
 
@@ -88,16 +88,13 @@ The engine is built on a **multithreaded ECS-like architecture** designed for hi
 ### 2. Advanced Rendering Pipeline (Graphics Programming)
 The rendering pipeline is constructed using **wgpu (WebGPU)**, featuring a custom WGSL shader pipeline focused on visual fidelity and artifact reduction.
 
-*   **Stable Cascaded Shadow Mapping (Texel Snapping):**
-    To solve the "shadow shimmering" artifact caused by camera movement in directional light sources, I implemented **orthographic texel snapping**. The light's view matrix translation is quantized to align perfectly with the shadow map's texel grid size:
+*   **Ray-Marched Sun Shadows (no shadow map):**
+    Instead of rendering a shadow map, every pixel traces a ray toward the sun through the voxel grid. The terrain around the player is uploaded as a compact grid of solid/air bits (one bit per block, 32 layers per `u32`) for each cube face, and the fragment shader walks it with a **3D DDA** in block coordinates. Shadow edges are therefore exact block edges at any distance, with no texel aliasing, shimmering, or bias tuning.
+    *   The block grid is curved in world space, so the ray is split into short segments and re-linearised per segment; the segment length scales with the planet radius.
+    *   Rays crossing a cube-face edge are split there by bisection and continue on the neighbouring face.
+    *   8x8-column maximum-height tiles let rays skip segments that pass above all terrain.
 
-$$
-x_{snapped} = \left\lfloor \frac{x}{texel\_size} \right\rfloor \cdot texel\_size
-$$
-
-    This ensures that as the camera moves, the shadow map projection matrix only moves in discrete texel increments, keeping shadow edges static relative to world geometry.
-
-*   **PCF (Percentage-Closer Filtering):** Implemented a 5x5 Gaussian-weighted kernel in the fragment shader to produce soft, realistic penumbras.
+*   **Soft Shadow Edges:** The sharp ray-marched shadow term is written to an offscreen texture together with the camera distance and blurred with a separable, **depth-aware** kernel whose radius covers a fixed width in world space. Edges get a soft penumbra at a constant cost per pixel, without bleeding across silhouettes.
 
 *   **Atmospheric Scattering & Tone Mapping:**
     *   Implemented an **Exponential Squared Fog** model ($\displaystyle e^{-(d \cdot \rho)^2}$) to simulate atmospheric depth.
