@@ -13,7 +13,7 @@ use crate::common::{BlockId, PlanetData};
 pub const WINDOW_SIZE: u32 = 256;         // columns per side
 pub const MAX_WORDS_PER_COLUMN: u32 = 16; // 32 layers per word -> at most 512 layers
 const PIT_MARGIN: u32 = 32;               // layers kept below the lowest column so mined pits still count
-pub const TILE: u32 = 16;                 // columns per side of a max-height tile (lets rays skip open air)
+pub const TILE: u32 = 8;                  // columns per side of a max-height tile (lets rays skip open air)
 
 // must match FaceWindow in shader.wgsl
 #[repr(C)]

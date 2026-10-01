@@ -204,7 +204,7 @@ const RT_SOLID: i32 = 1;
 const RT_NO_DATA: i32 = 2;  // outside every window: stop and treat as lit
 const RT_CONTINUE: i32 = 3;
 const RT_CROSSES_FACE: i32 = 4;
-const RT_TILE: i32 = 16; // rt_shadow.rs TILE
+const RT_TILE: i32 = 8;  // rt_shadow.rs TILE
 
 // true if the segment a..b (same face, ray climbing) stays above every tile it passes over
 fn rt_above_tiles(a: BlockPos, b: BlockPos) -> bool {
