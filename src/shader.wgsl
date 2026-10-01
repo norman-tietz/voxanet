@@ -48,7 +48,7 @@ const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounc
 const WATER_DEEP      = vec3<f32>(0.002, 0.030, 0.090); // linear colour of deep water
 const WATER_SHALLOW   = vec3<f32>(0.020, 0.150, 0.170); // ... and of shallow water (turquoise)
 const FOAM_COLOR      = vec3<f32>(0.80, 0.85, 0.88);  // shore foam (linear albedo)
-const CAUSTIC_FOCUS   = 0.15;                        // how strongly the ripples focus sunlight below them
+const CAUSTIC_FOCUS   = 0.4;                         // how strongly the ripples focus sunlight below them
 const CAUSTIC_STEEP   = 0.08;                        // slope of the caustic ripples
 const CAUSTIC_BASE    = 0.7;                         // plain sunlight under water, between the caustic lines
 const CAUSTIC_MAX     = 3.0;                         // brightest caustic, times the plain sunlight
@@ -577,23 +577,32 @@ fn water_waves(p: vec3<f32>, t: f32, dist: f32) -> vec4<f32> {
     return s;
 }
 
-// one short ripple that only drives the caustics (too small to matter for the surface shading; caustic cells
-// of a few tenths of a block): its curvature (Laplacian of the height) at p, negative under crests, which
+// one ripple that only drives the caustics (too small to matter for the surface shading): its curvature
+// (Laplacian of the height within the sea surface, whose normal is `up`) at p, negative under crests, which
 // focus the sunlight below them, positive under troughs, which spread it. Faded out with camera distance.
-fn ripple(p: vec3<f32>, dir: vec3<f32>, len: f32, phase: f32, t: f32, dist: f32) -> f32 {
+// A 3D plane wave crosses the surface at an angle, so it shows a longer wavelength there: k * |dir in plane|.
+fn ripple(p: vec3<f32>, up: vec3<f32>, dir: vec3<f32>, len: f32, phase: f32, t: f32, dist: f32) -> f32 {
     let k = 6.2832 / len;
+    let along = 1.0 - dot(dir, up) * dot(dir, up); // squared share of dir within the surface
     let fade = clamp(1.0 - dist / (len * 150.0), 0.0, 1.0);
-    return -CAUSTIC_STEEP * k * fade * sin(k * dot(p, dir) - sqrt(9.81 * k) * 0.5 * t + phase);
+    return -CAUSTIC_STEEP * k * along * fade * sin(k * dot(p, dir) - sqrt(9.81 * k) * 0.5 * t + phase);
 }
 
-// directions are unit vectors
+// six ripples, unit directions spread evenly over a hemisphere (so the pattern looks alike everywhere on the
+// planet) and wavelengths without common multiples. The lookup point is warped by a slow large-scale
+// distortion first, which bends the caustic lines differently from place to place instead of tiling.
 fn ripple_curvature(p: vec3<f32>, t: f32, dist: f32) -> f32 {
-    var c = ripple(p, vec3<f32>(0.9397, 0.0940, 0.3289), 0.93, 0.0, t, dist);
-    c += ripple(p, vec3<f32>(-0.3651, 0.1826, 0.9129), 0.77, 1.7, t, dist);
-    c += ripple(p, vec3<f32>(0.5345, -0.2673, -0.8018), 0.64, 3.4, t, dist);
-    c += ripple(p, vec3<f32>(-0.7553, 0.4196, -0.5035), 0.53, 5.1, t, dist);
-    c += ripple(p, vec3<f32>(0.2716, -0.7243, 0.6338), 0.47, 6.8, t, dist);
-    c += ripple(p, vec3<f32>(-0.1881, 0.9407, -0.2822), 0.41, 8.5, t, dist);
+    let up = normalize(p);
+    let q = p + vec3<f32>(
+        0.9 * sin(p.z * 0.43 + p.y * 0.17 + 0.07 * t) + 0.5 * sin(p.y * 0.29 - p.x * 0.37 + 2.0),
+        0.9 * sin(p.x * 0.39 - p.z * 0.21 - 0.05 * t) + 0.5 * sin(p.z * 0.31 + p.y * 0.33 + 4.0),
+        0.9 * sin(p.y * 0.41 + p.x * 0.23 + 0.06 * t) + 0.5 * sin(p.x * 0.27 - p.z * 0.35 + 1.0));
+    var c = ripple(q, up, vec3<f32>(0.3997, 0.9167, 0.0000), 1.93, 0.0, t, dist);
+    c += ripple(q, up, vec3<f32>(-0.4877, 0.7500, 0.4468), 1.64, 1.7, t, dist);
+    c += ripple(q, up, vec3<f32>(0.0710, 0.5833, -0.8091), 1.36, 3.4, t, dist);
+    c += ripple(q, up, vec3<f32>(0.5531, 0.4167, 0.7214), 1.16, 5.1, t, dist);
+    c += ripple(q, up, vec3<f32>(-0.9534, 0.2500, -0.1687), 0.95, 6.8, t, dist);
+    c += ripple(q, up, vec3<f32>(0.8408, 0.0833, -0.5349), 0.80, 8.5, t, dist);
     return c;
 }
 
