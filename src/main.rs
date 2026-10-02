@@ -33,16 +33,46 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+// --biome <name> picks the starting planet type (default earth-like); matched case-insensitively
+// against each PlanetType's def().name with spaces/hyphens stripped, so "Earth-like", "earthlike" and
+// "EARTHLIKE" all match. Unrecognized values fall back to earth-like with a warning.
+fn parse_biome_arg() -> crate::biome::PlanetType {
+    let normalize = |s: &str| s.to_lowercase().replace(['-', ' '], "");
+    let Some(requested) = std::env::args().skip_while(|a| a != "--biome").nth(1) else {
+        return crate::biome::PlanetType::EarthLike;
+    };
+    let wanted = normalize(&requested);
+    crate::biome::PlanetType::ALL
+        .into_iter()
+        .find(|t| normalize(t.def().name) == wanted)
+        .unwrap_or_else(|| {
+            let names: Vec<_> = crate::biome::PlanetType::ALL
+                .iter()
+                .map(|t| t.def().name)
+                .collect();
+            eprintln!(
+                "Unknown --biome '{requested}', valid options: {}. Using Earth-like.",
+                names.join(", ")
+            );
+            crate::biome::PlanetType::EarthLike
+        })
+}
+
 fn main() {
     SystemDiagnostics::print_startup_info();
+    let initial_biome = parse_biome_arg();
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App { game: None };
+    let mut app = App {
+        game: None,
+        initial_biome,
+    };
     event_loop.run_app(&mut app).unwrap();
 }
 
 struct App {
     // created in `resumed`, once a window can be opened
     game: Option<Game>,
+    initial_biome: crate::biome::PlanetType, // from --biome, see parse_biome_arg()
 }
 
 struct Game {
@@ -56,25 +86,37 @@ struct Game {
 }
 
 impl Game {
-    fn new(window: Arc<Window>) -> Self {
+    fn new(window: Arc<Window>, initial_biome: crate::biome::PlanetType) -> Self {
         let renderer = pollster::block_on(Renderer::new(window));
         let controller = Controller::new();
         let mut player = Player::new();
-        let planet = PlanetData::new(49); // Keep high resolution
+        let mut planet = PlanetData::new(49); // Keep high resolution
+        planet.switch_planet_type(initial_biome); // no-op if already Earth-like (the default)
 
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
         console.log("Press ` to open console.", [1.0, 1.0, 1.0]);
+        console.log(
+            &format!("Planet type: {}", planet.planet_type.def().name),
+            [1.0, 1.0, 1.0],
+        );
 
-        // initialize player spawn
+        // initialize player spawn: search for dry land along +Y ("North Pole") first, same safety
+        // rule the B key uses, so e.g. --biome volcanic never starts the player inside lava
+        let spawn_dir = planet.safe_spawn_direction(glam::Vec3::Y);
+        let spawn_h = if let Some(id) = crate::gen::CoordSystem::pos_to_id(
+            spawn_dir * (planet.resolution as f32 / 2.0),
+            planet.resolution,
+        ) {
+            crate::gen::CoordSystem::get_layer_radius(
+                planet.effective_height(id.face, id.u, id.v),
+                planet.resolution,
+            ) + 10.0
+        } else {
+            (planet.resolution as f32 / 2.0) + 20.0
+        };
 
-        // we query the height at face 0, u=res/2, v=res/2 (roughly the "North Pole" of face 0)
-        let center = planet.resolution / 2;
-        let ground_level = planet.terrain.get_height(0, center, center);
-        let spawn_h =
-            crate::gen::CoordSystem::get_layer_radius(ground_level, planet.resolution) + 10.0;
-
-        player.spawn(glam::Vec3::new(0.0, spawn_h, 0.0));
+        player.spawn(spawn_dir * spawn_h);
 
         Self {
             renderer,
@@ -300,41 +342,16 @@ impl Game {
                     } else {
                         glam::Vec3::Y
                     };
-                    let probe_dist = new_res as f32 / 2.0;
-                    let sea_level = planet.terrain.sea_level();
-                    let damaging_liquid =
-                        planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
+                    let spawn_dir = planet.safe_spawn_direction(current_dir);
 
-                    // probe a column's natural height along `dir`, None if it falls off the planet
-                    let probe_height = |dir: glam::Vec3| {
-                        crate::gen::CoordSystem::pos_to_id(dir * probe_dist, new_res)
-                            .map(|id| planet.terrain.get_height(id.face, id.u, id.v))
-                    };
-
-                    // the original direction's column can be underwater; on a damaging liquid
-                    // (e.g. Volcanic lava) spawning there is an unescapable death loop (floating
-                    // alone still ticks damage), so search a few other directions for dry land
-                    // before falling back to the original, possibly-wet spawn
-                    let spawn_dir = if damaging_liquid
-                        && probe_height(current_dir).is_some_and(|h| h < sea_level)
-                    {
-                        [
-                            glam::Vec3::X,
-                            glam::Vec3::NEG_X,
-                            glam::Vec3::Y,
-                            glam::Vec3::NEG_Y,
-                            glam::Vec3::Z,
-                            glam::Vec3::NEG_Z,
-                        ]
-                        .into_iter()
-                        .find(|&dir| probe_height(dir).is_some_and(|h| h >= sea_level))
-                        .unwrap_or(current_dir)
-                    } else {
-                        current_dir
-                    };
-
-                    let spawn_radius = if let Some(h) = probe_height(spawn_dir) {
-                        crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
+                    let spawn_radius = if let Some(id) = crate::gen::CoordSystem::pos_to_id(
+                        spawn_dir * (new_res as f32 / 2.0),
+                        new_res,
+                    ) {
+                        crate::gen::CoordSystem::get_layer_radius(
+                            planet.effective_height(id.face, id.u, id.v),
+                            new_res,
+                        ) + 5.0
                     } else {
                         (new_res as f32 / 2.0) + 20.0
                     };
@@ -366,7 +383,7 @@ impl Game {
                         let spawn_radius = if let Some(id) =
                             crate::gen::CoordSystem::pos_to_id(dummy_pos, new_res)
                         {
-                            let h = planet.terrain.get_height(id.face, id.u, id.v);
+                            let h = planet.effective_height(id.face, id.u, id.v);
                             crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
                         } else {
                             (new_res as f32 / 2.0) + 20.0
@@ -400,7 +417,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes().with_title("voxanet"))
                 .unwrap(),
         );
-        self.game = Some(Game::new(window));
+        self.game = Some(Game::new(window, self.initial_biome));
     }
 
     fn window_event(

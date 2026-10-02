@@ -192,6 +192,39 @@ impl PlanetData {
         }
     }
 
+    // picks a spawn direction: `preferred` unless the active liquid is damaging and `preferred`'s
+    // column is underwater (an unescapable death loop, since floating alone still ticks damage), in
+    // which case it searches the six cube-axis directions for one at or above sea level
+    pub fn safe_spawn_direction(&self, preferred: glam::Vec3) -> glam::Vec3 {
+        let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging);
+        if !damaging {
+            return preferred;
+        }
+        let sea_level = self.terrain.sea_level();
+        let probe_height = |dir: glam::Vec3| {
+            crate::gen::CoordSystem::pos_to_id(
+                dir * (self.resolution as f32 / 2.0),
+                self.resolution,
+            )
+            .map(|id| self.terrain.get_height(id.face, id.u, id.v))
+        };
+        if probe_height(preferred).is_some_and(|h| h < sea_level) {
+            [
+                glam::Vec3::X,
+                glam::Vec3::NEG_X,
+                glam::Vec3::Y,
+                glam::Vec3::NEG_Y,
+                glam::Vec3::Z,
+                glam::Vec3::NEG_Z,
+            ]
+            .into_iter()
+            .find(|&dir| probe_height(dir).is_some_and(|h| h >= sea_level))
+            .unwrap_or(preferred)
+        } else {
+            preferred
+        }
+    }
+
     // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
     // is a column of the neighbouring face, found by continuing the line from the inner neighbour outward
     pub fn neighbor_column(
