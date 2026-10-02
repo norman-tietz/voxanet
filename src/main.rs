@@ -58,6 +58,18 @@ fn parse_biome_arg() -> crate::biome::PlanetType {
         })
 }
 
+// the world-space distance from the planet center to just above the ground along `dir`, using the
+// liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
+fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
+    let res = planet.resolution;
+    if let Some(id) = crate::gen::CoordSystem::pos_to_id(dir * (res as f32 / 2.0), res) {
+        crate::gen::CoordSystem::get_layer_radius(planet.effective_height(id.face, id.u, id.v), res)
+            + margin
+    } else {
+        (res as f32 / 2.0) + 20.0
+    }
+}
+
 fn main() {
     SystemDiagnostics::print_startup_info();
     let initial_biome = parse_biome_arg();
@@ -88,10 +100,12 @@ struct Game {
 impl Game {
     fn new(window: Arc<Window>, initial_biome: crate::biome::PlanetType) -> Self {
         let renderer = pollster::block_on(Renderer::new(window));
-        let controller = Controller::new();
+        let mut controller = Controller::new();
         let mut player = Player::new();
         let mut planet = PlanetData::new(49); // Keep high resolution
         planet.switch_planet_type(initial_biome); // no-op if already Earth-like (the default)
+        controller.selected_block =
+            crate::material::placeable(&planet.planet_type.def().palette)[0];
 
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
@@ -104,17 +118,7 @@ impl Game {
         // initialize player spawn: search for dry land along +Y ("North Pole") first, same safety
         // rule the B key uses, so e.g. --biome volcanic never starts the player inside lava
         let spawn_dir = planet.safe_spawn_direction(glam::Vec3::Y);
-        let spawn_h = if let Some(id) = crate::gen::CoordSystem::pos_to_id(
-            spawn_dir * (planet.resolution as f32 / 2.0),
-            planet.resolution,
-        ) {
-            crate::gen::CoordSystem::get_layer_radius(
-                planet.effective_height(id.face, id.u, id.v),
-                planet.resolution,
-            ) + 10.0
-        } else {
-            (planet.resolution as f32 / 2.0) + 20.0
-        };
+        let spawn_h = spawn_radius(&planet, spawn_dir, 10.0);
 
         player.spawn(spawn_dir * spawn_h);
 
@@ -335,28 +339,18 @@ impl Game {
                 }
                 if let PhysicalKey::Code(KeyCode::KeyB) = event.physical_key {
                     planet.switch_planet_type(planet.planet_type.next());
+                    controller.selected_block =
+                        crate::material::placeable(&planet.planet_type.def().palette)[0];
 
-                    let new_res = planet.resolution;
                     let current_dir = if player.position.length() > 0.1 {
                         player.position.normalize()
                     } else {
                         glam::Vec3::Y
                     };
                     let spawn_dir = planet.safe_spawn_direction(current_dir);
+                    let radius = spawn_radius(planet, spawn_dir, 5.0);
 
-                    let spawn_radius = if let Some(id) = crate::gen::CoordSystem::pos_to_id(
-                        spawn_dir * (new_res as f32 / 2.0),
-                        new_res,
-                    ) {
-                        crate::gen::CoordSystem::get_layer_radius(
-                            planet.effective_height(id.face, id.u, id.v),
-                            new_res,
-                        ) + 5.0
-                    } else {
-                        (new_res as f32 / 2.0) + 20.0
-                    };
-
-                    player.spawn(spawn_dir * spawn_radius);
+                    player.spawn(spawn_dir * radius);
 
                     renderer.force_reload_all(planet, player.position);
                     renderer.log_memory(planet);
@@ -371,25 +365,17 @@ impl Game {
                             planet.resize(false);
                         }
 
-                        let new_res = planet.resolution;
                         let current_dir = if player.position.length() > 0.1 {
                             player.position.normalize()
                         } else {
                             glam::Vec3::Y
                         };
-                        let probe_dist = new_res as f32 / 2.0;
-                        let dummy_pos = current_dir * probe_dist;
+                        // same death-loop guard the B key uses: resizing while standing over
+                        // damaging liquid must not respawn the player back inside it
+                        let spawn_dir = planet.safe_spawn_direction(current_dir);
+                        let radius = spawn_radius(planet, spawn_dir, 5.0);
 
-                        let spawn_radius = if let Some(id) =
-                            crate::gen::CoordSystem::pos_to_id(dummy_pos, new_res)
-                        {
-                            let h = planet.effective_height(id.face, id.u, id.v);
-                            crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
-                        } else {
-                            (new_res as f32 / 2.0) + 20.0
-                        };
-
-                        player.position = current_dir * spawn_radius;
+                        player.position = spawn_dir * radius;
                         player.velocity = glam::Vec3::ZERO;
 
                         renderer.force_reload_all(planet, player.position);

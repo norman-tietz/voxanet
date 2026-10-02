@@ -194,7 +194,8 @@ impl PlanetData {
 
     // picks a spawn direction: `preferred` unless the active liquid is damaging and `preferred`'s
     // column is underwater (an unescapable death loop, since floating alone still ticks damage), in
-    // which case it searches the six cube-axis directions for one at or above sea level
+    // which case it searches a dense, evenly-spread set of directions over the whole sphere for one
+    // at or above sea level
     pub fn safe_spawn_direction(&self, preferred: glam::Vec3) -> glam::Vec3 {
         let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging);
         if !damaging {
@@ -208,21 +209,23 @@ impl PlanetData {
             )
             .map(|id| self.terrain.get_height(id.face, id.u, id.v))
         };
-        if probe_height(preferred).is_some_and(|h| h < sea_level) {
-            [
-                glam::Vec3::X,
-                glam::Vec3::NEG_X,
-                glam::Vec3::Y,
-                glam::Vec3::NEG_Y,
-                glam::Vec3::Z,
-                glam::Vec3::NEG_Z,
-            ]
-            .into_iter()
+        if !probe_height(preferred).is_some_and(|h| h < sea_level) {
+            return preferred;
+        }
+        // Fibonacci-sphere sampling: far denser than the 6 cube-axis points this used to check
+        // (which could all land in ocean on a small or heavily-watered planet), still cheap since
+        // each sample is just a height-map lookup
+        const SAMPLES: u32 = 256;
+        (0..SAMPLES)
+            .map(|i| {
+                let phi = (1.0 + 5.0_f32.sqrt()) / 2.0; // golden ratio
+                let t = (i as f32 + 0.5) / SAMPLES as f32;
+                let incl = (1.0 - 2.0 * t).acos();
+                let azim = 2.0 * std::f32::consts::PI * (i as f32) / phi;
+                glam::Vec3::new(incl.sin() * azim.cos(), incl.sin() * azim.sin(), incl.cos())
+            })
             .find(|&dir| probe_height(dir).is_some_and(|h| h >= sea_level))
             .unwrap_or(preferred)
-        } else {
-            preferred
-        }
     }
 
     // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
@@ -254,7 +257,7 @@ impl PlanetData {
 
     pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
         self.neighbor_column(face, u, v, du, dv)
-            .map_or(0, |(f, nu, nv)| self.terrain.get_height(f, nu, nv))
+            .map_or(0, |(f, nu, nv)| self.effective_height(f, nu, nv))
     }
 
     pub fn chunk_key(id: BlockId) -> ChunkKey {
@@ -290,7 +293,11 @@ impl PlanetData {
     fn natural_type(&self, id: BlockId) -> Option<BlockType> {
         let height = self.terrain.get_height(id.face, id.u, id.v);
         let def = self.planet_type.def();
-        let effective_height = self.effective_height(id.face, id.u, id.v);
+        let effective_height = if def.liquid.is_none() {
+            height.max(self.terrain.sea_level())
+        } else {
+            height
+        };
         if id.layer > effective_height {
             return None;
         }

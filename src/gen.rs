@@ -394,7 +394,7 @@ impl MeshGen {
 
         for u in u_start..u_end {
             for v in v_start..v_end {
-                let h = data.terrain.get_height(key.face, u, v);
+                let h = data.effective_height(key.face, u, v);
                 if h == 0 {
                     continue;
                 }
@@ -658,10 +658,13 @@ impl MeshGen {
                 let p =
                     |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, sea + 1, res);
                 let corners = [p(0, 0), p(1, 0), p(1, 1), p(0, 1)];
+                // liquid is Some here (checked above); color is unused by fs_water (which shades
+                // purely from the biome uniform) but should still match the active planet type
+                let color = data.planet_type.def().liquid.unwrap().shallow_color;
                 for c in corners {
                     verts.push(Vertex {
                         pos: c.to_array(),
-                        color: crate::material::WATER_COLOR,
+                        color,
                         normal: c.normalize().to_array(),
                     });
                 }
@@ -678,6 +681,7 @@ impl MeshGen {
     ) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
+        let def = data.planet_type.def();
 
         let grid_res = 64;
         let row_len = grid_res + 1;
@@ -736,7 +740,7 @@ impl MeshGen {
                 let h = data.terrain.get_height(key.face, su, sv);
                 let surface = crate::material::natural_type(
                     &data.terrain,
-                    &data.planet_type.def().palette,
+                    &def.palette,
                     data.has_core,
                     key.face,
                     su,
@@ -745,14 +749,14 @@ impl MeshGen {
                 );
                 let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
                 let color = if h < data.terrain.sea_level() {
-                    match data.planet_type.def().liquid {
-                        // distant water: the planet type's own shallow liquid color, not the
-                        // Earth-specific hardcoded WATER_COLOR
+                    match def.liquid {
+                        // distant water: the planet type's own shallow liquid color, not a
+                        // hardcoded Earth-specific one
                         Some(liquid) => liquid.shallow_color,
                         // liquid-less planet (e.g. Ice): the LOD surface here is really the
                         // filled-in beach material (PlanetData::exists's liquid-less solidity rule),
                         // not water, so color it as such instead
-                        None => data.planet_type.def().palette.beach.color(),
+                        None => def.palette.beach.color(),
                     }
                 } else {
                     surface.color().map(|c| c * shade)

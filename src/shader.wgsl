@@ -845,7 +845,8 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
 
     // shore foam: a solid line where the water meets land, plus bands that run in toward the shore,
     // broken up by the waves. `depth` is along the view ray; the vertical depth decides the shore.
-    if (floor_dist > 0.0) {
+    // Skipped for glowing liquids (lava doesn't froth like water at the shoreline either).
+    if (!glowing && floor_dist > 0.0) {
         let vdepth = depth * max(dot(up, V), 0.1);
         let shore = 1.0 - smoothstep(0.0, FOAM_DEPTH, vdepth);
         let bands = 0.5 + 0.5 * sin(vdepth * 6.0 + t * 1.6);
@@ -862,7 +863,11 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         alpha = max(alpha, foam);
     }
     if (underwater) {
-        color = biome.liquid_deep.rgb * biome.sky_zenith.rgb * 4.0; // looking up at the surface from below
+        if (glowing) {
+            color = body * 2.5; // submerged in lava: same hot emissive look as the surface, not a sky refraction
+        } else {
+            color = biome.liquid_deep.rgb * biome.sky_zenith.rgb * 4.0; // looking up at the surface from below
+        }
         alpha = 0.6;
     }
     return vec4<f32>(post_process(fog(color, in.world_pos)), alpha * local.params.x);

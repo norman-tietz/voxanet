@@ -113,6 +113,9 @@ impl Player {
         if self.health <= 0.0 {
             let spawn_point = self.spawn_point;
             self.spawn(spawn_point);
+            // position/rotation/velocity were just reset: `up` and `depth` above were computed at
+            // the pre-respawn location and must not drive this tick's swim/movement logic
+            return;
         }
 
         if !flying && depth > SWIM_DEPTH {
