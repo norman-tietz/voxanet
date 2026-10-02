@@ -10,6 +10,7 @@ mod galaxy;
 mod gen;
 mod gpu_timer;
 mod hw_rt;
+mod icosphere;
 mod lod_animation;
 mod material;
 mod noise;
