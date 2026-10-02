@@ -28,6 +28,10 @@ cargo run --release
 
 Use `--release`, because terrain generation and meshing are much slower in debug builds.
 
+If you're contributing, run `git config core.hooksPath .githooks` once to enable the pre-commit
+hook: it formats staged Rust files with `rustfmt` and prints `cargo clippy` output (advisory only,
+it won't block a commit).
+
 ## Controls
 
 The app starts in first-person mode with the mouse cursor locked to the window.

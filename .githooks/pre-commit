@@ -1,0 +1,34 @@
+#!/bin/sh
+# Pre-commit hook: auto-fixes formatting on staged Rust files, then runs clippy as advisory
+# feedback (printed, never blocks the commit — the codebase has pre-existing warnings and
+# clippy's suggestions aren't always "simple", so they stay a human decision).
+#
+# One-time setup per clone:
+#   git config core.hooksPath .githooks
+
+set -e
+
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+if [ -z "$staged_rs" ]; then
+    exit 0
+fi
+
+# hide unstaged changes first, so formatting only ever touches what's actually being committed
+# (rustfmt rewrites the whole file on disk, which would otherwise pull unstaged hunks into this commit)
+stashed=0
+if ! git diff --quiet -- $staged_rs; then
+    git stash push --keep-index --quiet --message "pre-commit: unstaged changes"
+    stashed=1
+fi
+restore_stash() {
+    if [ "$stashed" = "1" ]; then
+        git stash pop --quiet
+    fi
+}
+trap restore_stash EXIT
+
+echo "$staged_rs" | xargs rustfmt
+echo "$staged_rs" | xargs git add
+
+echo "clippy (advisory, not blocking commits):"
+cargo clippy --quiet 2>&1 | sed 's/^/  /' || true

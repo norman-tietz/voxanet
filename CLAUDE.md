@@ -17,6 +17,8 @@ cargo clippy
 
 There are no tests (`cargo test` builds but runs nothing).
 
+One-time per clone: `git config core.hooksPath .githooks` enables the pre-commit hook (`.githooks/pre-commit`), which `rustfmt`s staged `.rs` files and re-stages them, then runs `cargo clippy` as advisory output (printed, never blocks the commit — the tree has pre-existing warnings and clippy's suggestions aren't always safe to apply blindly). Line endings are LF-normalized via `.gitattributes`; `rustfmt.toml` just pins `edition = "2021"` so standalone `rustfmt` (not `cargo fmt`) picks it up. Nothing here has been run across the whole codebase yet — `cargo fmt` on every file would be a ~10,900-line diff against the existing hand-tuned dense style (very long single-line struct/pipeline literals throughout), so formatting is applied incrementally, only to files a commit actually touches.
+
 ## Architecture
 
 ### Data model: heightmap + sparse edit diffs
