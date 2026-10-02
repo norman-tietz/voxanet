@@ -1,5 +1,6 @@
 // engine main.rs
 
+mod biome;
 mod cmd;
 mod common;
 mod controller;

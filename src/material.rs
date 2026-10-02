@@ -12,6 +12,11 @@ pub enum BlockType {
     Stone,
     Snow,
     Bedrock,
+    Ash,
+    Basalt,
+    Obsidian,
+    Ember,
+    Ice,
 }
 
 impl BlockType {
@@ -32,6 +37,11 @@ impl BlockType {
             BlockType::Stone => [0.5, 0.5, 0.52],
             BlockType::Snow => [0.95, 0.96, 1.0],
             BlockType::Bedrock => [0.2, 0.2, 0.2],
+            BlockType::Ash => [0.35, 0.33, 0.3],
+            BlockType::Basalt => [0.18, 0.17, 0.19],
+            BlockType::Obsidian => [0.07, 0.06, 0.09],
+            BlockType::Ember => [0.5, 0.22, 0.08],
+            BlockType::Ice => [0.75, 0.88, 0.95],
         }
     }
 
@@ -43,6 +53,19 @@ impl BlockType {
             BlockType::Stone => "Stone",
             BlockType::Snow => "Snow",
             BlockType::Bedrock => "Bedrock",
+            BlockType::Ash => "Ash",
+            BlockType::Basalt => "Basalt",
+            BlockType::Obsidian => "Obsidian",
+            BlockType::Ember => "Ember",
+            BlockType::Ice => "Ice",
+        }
+    }
+
+    // walk acceleration/friction multiplier (entity.rs); 1.0 is normal ground, lower is slippery
+    pub fn friction_scale(self) -> f32 {
+        match self {
+            BlockType::Ice => 0.15,
+            _ => 1.0,
         }
     }
 }
@@ -133,5 +156,45 @@ pub fn natural_type(
         (d, BlockType::Grass) if d <= SOIL_DEPTH => BlockType::Dirt,
         (d, BlockType::Sand) if d <= SOIL_DEPTH => BlockType::Sand,
         _ => BlockType::Stone,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_biome_block_types_have_names_and_colors() {
+        for ty in [
+            BlockType::Ash,
+            BlockType::Basalt,
+            BlockType::Obsidian,
+            BlockType::Ember,
+            BlockType::Ice,
+        ] {
+            assert!(!ty.name().is_empty());
+            let [r, g, b] = ty.color();
+            assert!(
+                (0.0..=2.0).contains(&r) && (0.0..=2.0).contains(&g) && (0.0..=2.0).contains(&b)
+            );
+        }
+    }
+
+    #[test]
+    fn ice_is_slippery_everything_else_is_not() {
+        assert!(BlockType::Ice.friction_scale() < 0.5);
+        for ty in [
+            BlockType::Grass,
+            BlockType::Dirt,
+            BlockType::Sand,
+            BlockType::Stone,
+            BlockType::Snow,
+            BlockType::Ash,
+            BlockType::Basalt,
+            BlockType::Obsidian,
+            BlockType::Ember,
+        ] {
+            assert_eq!(ty.friction_scale(), 1.0);
+        }
     }
 }
