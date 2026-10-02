@@ -745,7 +745,15 @@ impl MeshGen {
                 );
                 let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
                 let color = if h < data.terrain.sea_level() {
-                    crate::material::WATER_COLOR
+                    match data.planet_type.def().liquid {
+                        // distant water: the planet type's own shallow liquid color, not the
+                        // Earth-specific hardcoded WATER_COLOR
+                        Some(liquid) => liquid.shallow_color,
+                        // liquid-less planet (e.g. Ice): the LOD surface here is really the
+                        // filled-in beach material (PlanetData::exists's liquid-less solidity rule),
+                        // not water, so color it as such instead
+                        None => data.planet_type.def().palette.beach.color(),
+                    }
                 } else {
                     surface.color().map(|c| c * shade)
                 };
