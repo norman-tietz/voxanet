@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text files, regardless of the committer's OS.
+# This repo previously had a mix of LF and CRLF across source files, which made unrelated
+# line-ending flips show up as huge diffs whenever a file was edited with a tool that
+# normalizes on save.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
