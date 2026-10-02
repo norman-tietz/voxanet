@@ -301,20 +301,49 @@ impl Game {
                         glam::Vec3::Y
                     };
                     let probe_dist = new_res as f32 / 2.0;
-                    let dummy_pos = current_dir * probe_dist;
+                    let sea_level = planet.terrain.sea_level();
+                    let damaging_liquid =
+                        planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
 
-                    let spawn_radius =
-                        if let Some(id) = crate::gen::CoordSystem::pos_to_id(dummy_pos, new_res) {
-                            let h = planet.terrain.get_height(id.face, id.u, id.v);
-                            crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
-                        } else {
-                            (new_res as f32 / 2.0) + 20.0
-                        };
+                    // probe a column's natural height along `dir`, None if it falls off the planet
+                    let probe_height = |dir: glam::Vec3| {
+                        crate::gen::CoordSystem::pos_to_id(dir * probe_dist, new_res)
+                            .map(|id| planet.terrain.get_height(id.face, id.u, id.v))
+                    };
 
-                    player.spawn(current_dir * spawn_radius);
+                    // the original direction's column can be underwater; on a damaging liquid
+                    // (e.g. Volcanic lava) spawning there is an unescapable death loop (floating
+                    // alone still ticks damage), so search a few other directions for dry land
+                    // before falling back to the original, possibly-wet spawn
+                    let spawn_dir = if damaging_liquid
+                        && probe_height(current_dir).is_some_and(|h| h < sea_level)
+                    {
+                        [
+                            glam::Vec3::X,
+                            glam::Vec3::NEG_X,
+                            glam::Vec3::Y,
+                            glam::Vec3::NEG_Y,
+                            glam::Vec3::Z,
+                            glam::Vec3::NEG_Z,
+                        ]
+                        .into_iter()
+                        .find(|&dir| probe_height(dir).is_some_and(|h| h >= sea_level))
+                        .unwrap_or(current_dir)
+                    } else {
+                        current_dir
+                    };
+
+                    let spawn_radius = if let Some(h) = probe_height(spawn_dir) {
+                        crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
+                    } else {
+                        (new_res as f32 / 2.0) + 20.0
+                    };
+
+                    player.spawn(spawn_dir * spawn_radius);
 
                     renderer.force_reload_all(planet, player.position);
                     renderer.log_memory(planet);
+                    println!("Switched to planet type: {}", planet.planet_type.def().name);
                     renderer.window.request_redraw();
                 }
                 if let Key::Character(ref s) = event.logical_key {
