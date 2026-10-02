@@ -55,9 +55,10 @@ impl Controller {
         }
     }
 
-    pub fn update_player(&mut self, player: &mut Player, planet: &PlanetData, dt: f32) {
-        // read inputs regardless of the view mode.
-
+    // gathers raw per-tick input, independent of which physics mode consumes it (planet-surface
+    // Player::update or galaxy_mode's GalaxyFlight::update); resets mouse_delta as a side effect,
+    // exactly as update_player did before this was extracted, so planet-mode behavior is unchanged
+    pub fn raw_input(&mut self) -> (Vec3, bool, bool, bool, (f32, f32)) {
         let mut input = Vec3::ZERO;
         if self.keys[0] {
             input.z -= 1.0;
@@ -73,6 +74,19 @@ impl Controller {
         } // D
         let jump = self.keys[4]; // space
 
+        let rotation_delta = if self.first_person && !self.mouse_released {
+            self.mouse_delta
+        } else {
+            (0.0, 0.0)
+        };
+        self.mouse_delta = (0.0, 0.0);
+
+        (input, jump, self.move_down, self.sprint, rotation_delta)
+    }
+
+    pub fn update_player(&mut self, player: &mut Player, planet: &PlanetData, dt: f32) {
+        let (input, jump, down, sprint, rotation_delta) = self.raw_input();
+
         // Q/E turn left/right in both views; in third person they are the only way to turn
         let mut turn = 0.0;
         if self.keys[5] {
@@ -82,26 +96,17 @@ impl Controller {
             turn -= TURN_SPEED * dt;
         } // E
 
-        let rotation_delta = if self.first_person && !self.mouse_released {
-            self.mouse_delta
-        } else {
-            (0.0, 0.0)
-        };
-
         player.update(
             dt,
             planet,
             input,
             jump,
-            self.move_down,
+            down,
             rotation_delta,
             turn,
             self.fly_mode,
-            self.sprint,
+            sprint,
         );
-
-        // reset delta after use
-        self.mouse_delta = (0.0, 0.0);
     }
 
     pub fn get_camera_pos(&self, player: &Player) -> Vec3 {

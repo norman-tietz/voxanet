@@ -90,6 +90,11 @@ struct App {
     initial_biome: crate::biome::PlanetType, // from --biome, see parse_biome_arg()
 }
 
+enum GameMode {
+    Planet,
+    Galaxy { return_point: glam::Vec3 },
+}
+
 struct Game {
     renderer: Renderer,
     controller: Controller,
@@ -98,6 +103,10 @@ struct Game {
     console: Console,
     last_time: Instant,
     current_cursor_locked: bool,
+    mode: GameMode,
+    galaxy: crate::galaxy::Galaxy,
+    galaxy_flight: crate::galaxy::GalaxyFlight,
+    galaxy_start_time: Instant,
 }
 
 impl Game {
@@ -133,6 +142,10 @@ impl Game {
             console,
             last_time: Instant::now(),
             current_cursor_locked: false,
+            mode: GameMode::Planet,
+            galaxy: crate::galaxy::Galaxy::generate(1),
+            galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
+            galaxy_start_time: Instant::now(),
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -146,6 +159,10 @@ impl Game {
             console,
             last_time,
             current_cursor_locked,
+            mode,
+            galaxy: _,
+            galaxy_flight,
+            galaxy_start_time: _,
         } = self;
 
         let now = Instant::now();
@@ -167,16 +184,24 @@ impl Game {
         }
 
         // physics & player Update (once per tick: movement and turning speeds are per second)
-        controller.update_player(player, planet, dt);
+        match mode {
+            GameMode::Planet => {
+                controller.update_player(player, planet, dt);
 
-        // raycast & cursor Update
-        let width = renderer.config.width as f32;
-        let height = renderer.config.height as f32;
-        let ray_result = controller.raycast(player, planet, width, height, false);
-        controller.cursor_id = ray_result.map(|(id, _)| id);
+                // raycast & cursor Update
+                let width = renderer.config.width as f32;
+                let height = renderer.config.height as f32;
+                let ray_result = controller.raycast(player, planet, width, height, false);
+                controller.cursor_id = ray_result.map(|(id, _)| id);
 
-        renderer.update_cursor(planet, controller.cursor_id);
-        renderer.update_view(player.position, planet);
+                renderer.update_cursor(planet, controller.cursor_id);
+                renderer.update_view(player.position, planet);
+            }
+            GameMode::Galaxy { .. } => {
+                let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
+                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint);
+            }
+        }
 
         // UPDATE ANIMATION
         console.update_animation(dt);
@@ -187,6 +212,28 @@ impl Game {
         if let Some(fp) = console.view_request.take() {
             controller.first_person = fp;
             controller.cam_dist = if fp { 40.0 } else { 100.0 };
+        }
+        if let Some(enter) = console.galaxy_request.take() {
+            match (&*mode, enter) {
+                (GameMode::Planet, true) => {
+                    *mode = GameMode::Galaxy {
+                        return_point: player.position,
+                    };
+                    *galaxy_flight =
+                        crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
+                    console.log(
+                        "Entered galaxy mode. /galaxy exit to return.",
+                        [1.0, 1.0, 1.0],
+                    );
+                }
+                (GameMode::Galaxy { return_point }, false) => {
+                    player.position = *return_point;
+                    player.velocity = glam::Vec3::ZERO;
+                    *mode = GameMode::Planet;
+                    console.log("Returned to the planet.", [1.0, 1.0, 1.0]);
+                }
+                _ => {} // already in the requested mode; no-op
+            }
         }
         // dev convenience: polled instead of a console command so screenshots can be scripted without
         // needing window focus or keyboard injection
@@ -388,9 +435,13 @@ impl Game {
                 }
             }
 
-            WindowEvent::RedrawRequested => {
-                renderer.render(controller, player, planet, console);
-            }
+            WindowEvent::RedrawRequested => match &self.mode {
+                GameMode::Planet => renderer.render(controller, player, planet, console),
+                GameMode::Galaxy { .. } => {
+                    let t = self.galaxy_start_time.elapsed().as_secs_f64();
+                    renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t);
+                }
+            },
             _ => {}
         }
     }

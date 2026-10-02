@@ -8,6 +8,7 @@ pub struct Console {
     pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
+    pub galaxy_request: Option<bool>, // set by /galaxy, applied by the game loop; true = enter, false = exit
 
     history_capacity: usize,
 }
@@ -22,6 +23,7 @@ impl Console {
             hw_shadows_request: None,
             screenshot_request: None,
             view_request: None,
+            galaxy_request: None,
             history_capacity: 50,
         }
     }
@@ -124,6 +126,12 @@ impl Console {
                 _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
             },
 
+            "/galaxy" => match parts.get(1).copied() {
+                Some("enter") => self.galaxy_request = Some(true),
+                Some("exit") => self.galaxy_request = Some(false),
+                _ => self.log("Usage: /galaxy enter|exit", [1.0, 0.5, 0.0]),
+            },
+
             "/screenshot" => match parts.get(1) {
                 Some(path) => {
                     self.screenshot_request = Some(path.to_string());
@@ -146,6 +154,7 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
+                self.log("  /galaxy enter|exit", [0.8, 0.8, 0.8]);
             }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
