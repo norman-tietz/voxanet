@@ -2373,6 +2373,18 @@ impl Renderer {
             t,
             screen,
         );
+        if let Some(path) = self.screenshot_request.take() {
+            crate::screenshot::capture(
+                &self.device,
+                &self.queue,
+                &out.texture,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+                &path,
+            );
+            self.screenshot_flash = Some(std::time::Instant::now());
+        }
         self.queue.present(out);
     }
 }
