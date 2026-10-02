@@ -642,6 +642,9 @@ impl MeshGen {
     // the water surface of a chunk: one quad at sea level over every column whose natural terrain is below it
     // (the top of layer sea level, flush with sea-level beaches). Edits don't change the water.
     pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        if data.planet_type.def().liquid.is_none() {
+            return (Vec::new(), Vec::new());
+        }
         let (mut verts, mut inds, mut idx) = (Vec::new(), Vec::new(), 0u32);
         let res = data.resolution;
         let sea = data.terrain.sea_level();
@@ -1131,5 +1134,54 @@ impl MeshGen {
         inds.push(*idx + 3);
         inds.push(*idx);
         *idx += 4;
+    }
+}
+
+#[cfg(test)]
+mod biome_tests {
+    use super::*;
+    use crate::biome::PlanetType;
+    use crate::common::PlanetData;
+
+    // deterministically finds a chunk that actually has an underwater column, rather than
+    // guessing a chunk key and hoping — otherwise this test could pass for the wrong reason
+    // (an all-land chunk legitimately has no water mesh on *any* planet type)
+    fn chunk_with_ocean(planet: &PlanetData) -> crate::common::ChunkKey {
+        let sea = planet.terrain.sea_level();
+        for face in 0..6u8 {
+            for u in 0..planet.resolution {
+                for v in 0..planet.resolution {
+                    if planet.terrain.get_height(face, u, v) < sea {
+                        return PlanetData::chunk_key(crate::common::BlockId {
+                            face,
+                            u,
+                            v,
+                            layer: 0,
+                        });
+                    }
+                }
+            }
+        }
+        panic!("test planet has no ocean at all");
+    }
+
+    #[test]
+    fn earth_like_ocean_chunk_has_a_water_mesh() {
+        let planet = PlanetData::new(32);
+        let key = chunk_with_ocean(&planet);
+        let (verts, _inds) = MeshGen::build_water(key, &planet);
+        assert!(
+            !verts.is_empty(),
+            "sanity check: Earth-like should mesh water here"
+        );
+    }
+
+    #[test]
+    fn ice_planets_generate_no_water_mesh() {
+        let mut planet = PlanetData::new(32);
+        let key = chunk_with_ocean(&planet); // same chunk that has water on Earth-like
+        planet.switch_planet_type(PlanetType::Ice);
+        let (verts, inds) = MeshGen::build_water(key, &planet);
+        assert!(verts.is_empty() && inds.is_empty());
     }
 }
