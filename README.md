@@ -67,7 +67,7 @@ In water deeper than about half a block you swim at half the walking speed; you 
 |-------|--------|
 | Left mouse button | Mine the targeted block (the bottom core layers cannot be mined) |
 | Right mouse button | Place a block on the targeted face |
-| `1` `2` `3` `4` `5` | Choose the block type to place: grass, dirt, sand, stone, snow (shown below the FPS counter) |
+| `1` `2` `3` `4` `5` | Choose the block type to place (shown below the FPS counter); the five materials depend on the active planet type — see **Planet Types** above |
 | Middle mouse button (wheel click) | Pick the targeted block's type as the block type to place |
 | Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
 

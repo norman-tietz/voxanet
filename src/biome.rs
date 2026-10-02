@@ -2,8 +2,10 @@
 // The whole planet's type: Earth-like (today's planet), Volcanic (lava, damaging, glowing),
 // Ice (no liquid at all, walkable and slippery). Switched at runtime (main.rs, `B` key),
 // regenerating edits but reusing the same terrain shape in every case — only which
-// material/liquid/atmosphere fills that shape changes. See the design spec for the full
-// rationale: docs/superpowers/specs/2026-10-02-planet-types-design.md
+// material/liquid/atmosphere fills that shape changes. Phase 1 deliberately keeps terrain
+// shape (noise, continents, mountains) identical across types and only swaps what fills it;
+// more types (Desert/Toxic/Ocean) can be added later as pure data in the `def()` table below.
+// (Internal design note, not part of this repo: 2026-10-02-planet-types-design.md.)
 
 use crate::material::BlockType;
 
