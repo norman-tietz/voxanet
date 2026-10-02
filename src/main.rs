@@ -7,6 +7,7 @@ mod controller;
 mod deferred;
 mod entity;
 mod galaxy;
+mod galaxy_render;
 mod gen;
 mod gpu_timer;
 mod hw_rt;

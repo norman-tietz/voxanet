@@ -134,6 +134,7 @@ pub struct Renderer {
     local_bind_player: wgpu::BindGroup,
 
     deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
+    galaxy: crate::galaxy_render::GalaxyRenderer,
     global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
 
     // --- MESHES ---
@@ -532,6 +533,7 @@ impl Renderer {
             config.width,
             config.height,
         );
+        let galaxy = crate::galaxy_render::GalaxyRenderer::new(&device, &config);
 
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -746,6 +748,7 @@ impl Renderer {
             flash_bind,
             screenshot_flash: None,
             deferred,
+            galaxy,
 
             font_system,
             swash_cache,
@@ -2339,5 +2342,37 @@ impl Renderer {
         }
         self.queue.present(out);
         self.text_atlas.trim();
+    }
+
+    pub fn render_galaxy(
+        &mut self,
+        flight: &crate::galaxy::GalaxyFlight,
+        galaxy: &crate::galaxy::Galaxy,
+        t: f64,
+    ) {
+        let out = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(o)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            _ => return,
+        };
+        let view = out
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let screen = (self.config.width as f32, self.config.height as f32);
+        self.galaxy.render(
+            &self.device,
+            &self.queue,
+            &view,
+            &self.deferred.depth,
+            flight,
+            galaxy,
+            t,
+            screen,
+        );
+        self.queue.present(out);
     }
 }
