@@ -46,6 +46,45 @@ pub struct LocalUniform {
     pub params: [f32; 4], // x = opacity
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BiomeUniform {
+    pub liquid_shallow: [f32; 4], // w: 0.0 = reflective, 1.0 = glowing
+    pub liquid_deep: [f32; 4],    // unused (all zero) when the planet type has no liquid
+    pub sky_zenith: [f32; 4],
+    pub sky_horizon: [f32; 4],
+    pub cloud_light: [f32; 4],
+    pub cloud_dark: [f32; 4],
+    pub space_color: [f32; 4],
+}
+
+impl BiomeUniform {
+    pub fn from_def(def: &crate::biome::PlanetTypeDef) -> Self {
+        let (shallow, deep, behavior) = match def.liquid {
+            Some(l) => (
+                l.shallow_color,
+                l.deep_color,
+                if matches!(l.behavior, crate::biome::LiquidBehavior::Glowing) {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+            None => ([0.0; 3], [0.0; 3], 0.0),
+        };
+        let v4 = |c: [f32; 3], w: f32| [c[0], c[1], c[2], w];
+        Self {
+            liquid_shallow: v4(shallow, behavior),
+            liquid_deep: v4(deep, 0.0),
+            sky_zenith: v4(def.atmosphere.sky_zenith, 0.0),
+            sky_horizon: v4(def.atmosphere.sky_horizon_warm, 0.0),
+            cloud_light: v4(def.atmosphere.cloud_light, 0.0),
+            cloud_dark: v4(def.atmosphere.cloud_dark, 0.0),
+            space_color: v4(def.atmosphere.space_color, 0.0),
+        }
+    }
+}
+
 // a voxel chunk's meshes from a worker thread: key, terrain vertices/indices, water vertices/indices
 // mesh worker results, tagged with the reload generation they were started in (Renderer::generation)
 type ChunkGeometry = (u64, ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
@@ -86,6 +125,7 @@ pub struct Renderer {
     // --- UNIFORMS ---
     global_buf: wgpu::Buffer,
     global_bind: wgpu::BindGroup,
+    biome_buf: wgpu::Buffer,
 
     local_bind_identity: wgpu::BindGroup,
 
@@ -287,6 +327,17 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 3: biome (liquid colors/behavior, atmosphere colors) — written once per frame
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
             label: Some("global_layout"),
         });
@@ -332,6 +383,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let biome_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Biome Uniform"),
+            size: std::mem::size_of::<BiomeUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &global_layout,
             entries: &[
@@ -346,6 +404,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: rt_bits_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: biome_buf.as_entire_binding(),
                 },
             ],
             label: None,
@@ -639,6 +701,10 @@ impl Renderer {
                     binding: 2,
                     resource: rt_bits_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: biome_buf.as_entire_binding(),
+                },
             ],
             label: Some("Identity Bind Group"),
         });
@@ -669,6 +735,7 @@ impl Renderer {
             lod_chunks: HashMap::new(),
             global_buf,
             global_bind,
+            biome_buf,
             local_bind_identity,
             local_buf_player,
             local_bind_player,
@@ -1660,6 +1727,10 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
+
+        let biome_data = BiomeUniform::from_def(&planet.planet_type.def());
+        self.queue
+            .write_buffer(&self.biome_buf, 0, bytemuck::cast_slice(&[biome_data]));
 
         let model_mat = player.get_model_matrix();
         self.queue.write_buffer(
