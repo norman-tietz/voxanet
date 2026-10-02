@@ -129,10 +129,11 @@ fn fill_face(
     bits: &mut Vec<u32>,
 ) -> FaceWindow {
     let size_i = size as i32;
+    // effective_height (not the raw terrain height): PlanetData::exists()'s single source of
+    // solidity truth treats liquid-less planets (e.g. Ice) as solid up to sea level, and the
+    // shadow window must agree or sun rays pass straight through the filled-in ice ocean
     let column = |lu: i32, lv: i32| {
-        planet
-            .terrain
-            .get_height(face, (origin_u + lu) as u32, (origin_v + lv) as u32)
+        planet.effective_height(face, (origin_u + lu) as u32, (origin_v + lv) as u32)
     };
 
     // layer range the bits have to cover

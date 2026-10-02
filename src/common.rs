@@ -177,12 +177,19 @@ impl PlanetData {
         }
 
         // instead of a flat floor, we check the pre-calculated noise map
-        let height = self.terrain.get_height(id.face, id.u, id.v);
+        id.layer <= self.effective_height(id.face, id.u, id.v)
+    }
+
+    // the height `exists()`/mesh generation should treat as solid: on a liquid-less planet (no
+    // ocean mesh to fill the gap visually), terrain is solid all the way up to sea level instead
+    // of just its natural height
+    pub fn effective_height(&self, face: u8, u: u32, v: u32) -> u32 {
+        let height = self.terrain.get_height(face, u, v);
         if self.planet_type.def().liquid.is_none() {
-            let sea = self.terrain.sea_level();
-            return id.layer <= height.max(sea);
+            height.max(self.terrain.sea_level())
+        } else {
+            height
         }
-        id.layer <= height
     }
 
     // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
@@ -250,11 +257,7 @@ impl PlanetData {
     fn natural_type(&self, id: BlockId) -> Option<BlockType> {
         let height = self.terrain.get_height(id.face, id.u, id.v);
         let def = self.planet_type.def();
-        let effective_height = if def.liquid.is_none() {
-            height.max(self.terrain.sea_level())
-        } else {
-            height
-        };
+        let effective_height = self.effective_height(id.face, id.u, id.v);
         if id.layer > effective_height {
             return None;
         }
@@ -426,5 +429,45 @@ mod tests {
         let h = planet.terrain.get_height(face, u, v);
         let pos = crate::gen::CoordSystem::get_vertex_pos(face, u, v, h, planet.resolution);
         assert!(planet.ground_block(pos).is_some());
+    }
+
+    // regression test for the friction probe fix (entity.rs's walk branch): the feet rest just
+    // above the ground, so `ground_block` must be probed slightly below the feet position, not at
+    // it, to reliably see the solid block instead of the air above it
+    #[test]
+    fn ground_block_just_above_an_ice_ocean_column_resolves_to_ice_when_probed_below() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet.switch_planet_type(PlanetType::Ice);
+        let (face, u, v) = first_underwater_column(&planet);
+        let sea = planet.terrain.sea_level();
+
+        // a world position just above the effective (sea-level-filled) ice surface, the way a
+        // standing player's feet would rest
+        let pos = crate::gen::CoordSystem::get_vertex_pos(face, u, v, sea + 1, planet.resolution);
+        let up = pos.normalize();
+
+        assert_eq!(
+            planet.ground_block(pos - up * 0.1),
+            Some(crate::material::BlockType::Ice)
+        );
+    }
+
+    // regression test for the `effective_height` refactor (Critical 4): a liquid-less planet's
+    // effective height must be clamped up to sea level over an underwater column, while a planet
+    // with a liquid keeps reporting the raw (lower) natural height for the very same column
+    #[test]
+    fn effective_height_clamps_to_sea_level_only_on_liquid_less_planets() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let (face, u, v) = first_underwater_column(&planet);
+        let raw_height = planet.terrain.get_height(face, u, v);
+        let sea = planet.terrain.sea_level();
+        assert!(raw_height < sea, "sanity check: column must be underwater");
+
+        // Earth-like (has liquid): effective height is the raw, un-clamped height
+        assert_eq!(planet.effective_height(face, u, v), raw_height);
+
+        // Ice (no liquid): effective height is clamped up to sea level
+        planet.switch_planet_type(PlanetType::Ice);
+        assert_eq!(planet.effective_height(face, u, v), sea);
     }
 }
