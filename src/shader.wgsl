@@ -4,7 +4,7 @@
 struct Global {
     view_proj: mat4x4<f32>,
     ray_dirs: mat4x4<f32>, // camera rays: col0 through the top-left corner, col1/col2 per screen width/height
-    camera_pos: vec4<f32>,
+    camera_pos: vec4<f32>, // w: planet radius (rt.resolution is 0 in hardware shadow mode, see hw_rt.rs)
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
 }
@@ -59,6 +59,21 @@ const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Dis
     vec3<f32>(0.1774, 0.9669, 0.0724),
     vec3<f32>(0.0000, 0.0000, 0.9108),
 );
+const SPACE_COLOR     = vec3<f32>(0.010, 0.015, 0.030); // deep space beyond the atmosphere
+
+// cloud shell: a thin band of coverage noise at CLOUD_ALT * planet radius, well above the terrain
+// (which caps at 1.2x the radius, see CLAUDE.md). Shaped as a direction-space FBM so it has no seams
+// at cube faces, the same reason ripple_curvature works on world positions instead of a 2D texture.
+const CLOUD_ALT           = 1.32;  // cloud shell radius, as a multiple of the planet radius
+const CLOUD_THICKNESS     = 0.05;  // shell thickness, as a fraction of the planet radius
+const CLOUD_SCALE         = 3.2;   // noise frequency over the unit sphere direction
+const CLOUD_COVERAGE      = 0.52;  // threshold: higher = less sky covered
+const CLOUD_SOFTNESS      = 0.28;  // smoothstep band around the threshold (soft cloud edges)
+const CLOUD_WIND_SPEED    = 0.012; // drift speed of the noise field
+const CLOUD_SHADOW_STRENGTH = 0.6; // max fraction of sunlight a thick cloud blocks
+const CLOUD_LIGHT  = vec3<f32>(0.92, 0.94, 0.98); // sunlit cloud colour
+const CLOUD_DARK   = vec3<f32>(0.16, 0.18, 0.24); // shadowed underside
+const CLOUD_SILVER = 1.5;          // backlit edge glow strength, looking toward the sun
 
 // --- VERTEX SHADER ---
 
@@ -411,6 +426,128 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
     return clamp((v * (a * v + b)) / (v * (c * v + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// --- ATMOSPHERE & CLOUDS ---
+// A thin cloud shell wraps the planet at CLOUD_ALT * planet radius, shaded procedurally (no mesh): every
+// call site solves for where a ray crosses that shell, then shades it. This is what makes clouds show up
+// consistently whether you're looking up from the ground, at the horizon, reflected in water, or down at
+// the whole planet from orbit, without a separate geometry pass.
+
+fn hash31(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// trilinear value noise, in [0, 1]
+fn value_noise3(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let x00 = mix(hash31(i), hash31(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(hash31(i + vec3<f32>(0.0, 1.0, 0.0)), hash31(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(hash31(i + vec3<f32>(0.0, 0.0, 1.0)), hash31(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(hash31(i + vec3<f32>(0.0, 1.0, 1.0)), hash31(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// cumulus-like coverage at a direction on the cloud shell: a domain-warped FBM (the warp is what keeps
+// it from reading as a single tiling noise field, the same trick ripple_curvature uses for caustics)
+fn fbm_clouds(dir: vec3<f32>, t: f32) -> f32 {
+    let wind = vec3<f32>(t * CLOUD_WIND_SPEED, 0.0, t * CLOUD_WIND_SPEED * 0.6);
+    let warp = vec3<f32>(
+        value_noise3(dir * 0.8 + wind * 0.5 + vec3<f32>(5.2, 1.3, 0.0)) - 0.5,
+        0.0,
+        value_noise3(dir * 0.8 + wind * 0.5 + vec3<f32>(3.4, 0.0, 9.6)) - 0.5,
+    );
+    let p = dir * CLOUD_SCALE + warp * 1.1 + wind;
+
+    var f = 0.0;
+    var amp = 0.55;
+    var freq = 1.0;
+    for (var i = 0; i < 3; i++) {
+        f += amp * value_noise3(p * freq);
+        freq *= 2.07; // off power-of-two so octaves don't align periodically
+        amp *= 0.5;
+    }
+    return f;
+}
+
+fn cloud_coverage(dir: vec3<f32>, t: f32) -> f32 {
+    return smoothstep(CLOUD_COVERAGE, CLOUD_COVERAGE + CLOUD_SOFTNESS, fbm_clouds(dir, t));
+}
+
+// single-octave, unwarped: cheap enough to sample once per shaded pixel for cloud shadows
+fn cloud_coverage_fast(dir: vec3<f32>, t: f32) -> f32 {
+    let wind = vec3<f32>(t * CLOUD_WIND_SPEED, 0.0, t * CLOUD_WIND_SPEED * 0.6);
+    let n = value_noise3(dir * CLOUD_SCALE + wind);
+    return smoothstep(CLOUD_COVERAGE, CLOUD_COVERAGE + CLOUD_SOFTNESS, n);
+}
+
+// nearest intersection in front of `origin` with a sphere of `radius` centred on the planet; < 0 if it misses
+fn sphere_hit(origin: vec3<f32>, dir: vec3<f32>, radius: f32) -> f32 {
+    let b = dot(origin, dir);
+    let c = dot(origin, origin) - radius * radius;
+    let disc = b * b - c;
+    if (disc < 0.0) { return -1.0; }
+    let s = sqrt(disc);
+    let t_in = -b - s;
+    let t_out = -b + s;
+    if (t_out < 0.0) { return -1.0; }
+    return select(t_out, t_in, t_in > 0.0);
+}
+
+// how much direct sunlight at `world_pos` survives the cloud shell on the way to the sun
+fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32) -> f32 {
+    let cloud_r = global.camera_pos.w * CLOUD_ALT;
+    let hit_t = sphere_hit(world_pos, L, cloud_r);
+    if (hit_t < 0.0) { return 1.0; }
+    let coverage = cloud_coverage_fast(normalize(world_pos + L * hit_t), t);
+    return 1.0 - coverage * CLOUD_SHADOW_STRENGTH;
+}
+
+// cloud colour and coverage at `hit` (a point already known to be on the shell). Raymarches a short span
+// around it along the view ray instead of taking one sample: at a grazing/horizon angle that span covers
+// far more of the shell's thickness, so clouds naturally thicken and brighten near the horizon.
+fn cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4<f32> {
+    let up = normalize(hit);
+    let thickness = global.camera_pos.w * CLOUD_THICKNESS;
+    let radial = max(abs(dot(ray_dir, up)), 0.05);
+    let span = min(thickness / radial, thickness * 10.0);
+
+    var density = 0.0;
+    for (var i = 0; i < 4; i++) {
+        let s = (f32(i) + 0.5) / 4.0 - 0.5;
+        density += cloud_coverage(normalize(hit + ray_dir * (s * span)), t);
+    }
+    density *= 0.25;
+
+    let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
+    let lit = mix(CLOUD_DARK, CLOUD_LIGHT, ndotl) * SUN_COLOR * 0.55;
+    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * CLOUD_LIGHT;
+    return vec4<f32>(lit + silver, clamp(density, 0.0, 1.0));
+}
+
+// clouds along an arbitrary ray (camera view ray, or a water reflection ray); empty if it misses the shell
+fn clouds(origin: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4<f32> {
+    let cloud_r = global.camera_pos.w * CLOUD_ALT;
+    let hit_t = sphere_hit(origin, ray_dir, cloud_r);
+    if (hit_t < 0.0) { return vec4<f32>(0.0); }
+    return cloud_shade(origin + ray_dir * hit_t, ray_dir, t, L);
+}
+
+// atmosphere seen beyond the clouds: a stylised gradient from deep space into a blue dome that warms
+// toward the sun, plus a glow where the view ray grazes the planet's limb (seen from orbit/third person)
+fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+    let planet_r = global.camera_pos.w;
+    let atmo_r = planet_r * CLOUD_ALT * 1.2;
+    let s_star = max(-dot(cam_pos, ray_dir), 0.0);
+    let closest = length(cam_pos + ray_dir * s_star);
+    let limb = clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
+    let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
+    let dome = mix(SKY_COLOR * 0.7, SKY_COLOR * 1.6 + SUN_COLOR * 0.4, sun_glow);
+    return mix(SPACE_COLOR, dome, limb);
+}
+
 // --- FRAGMENT SHADER ---
 
 // lighting, fog, tone mapping and output colour space of one surface point (vertex colour `color`,
@@ -435,8 +572,8 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
-    // A. Direct Sun Light, focused into caustics below the sea surface (sunlit parts only)
-    var direct_light = SUN_COLOR * NdotL * shadow;
+    // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below the sea surface
+    var direct_light = SUN_COLOR * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
     let sea_depth = global.screen.z - length(world_pos);
     if (global.screen.z > 0.0 && sea_depth > 0.0 && shadow_raw > 0.0) {
         direct_light *= mix(1.0, caustics(world_pos, L, sea_depth), shadow_raw);
@@ -456,11 +593,12 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
     let final_color = albedo * (direct_light + ambient_light + rim_light);
-    return finish(final_color, world_pos);
+    return fog(final_color, world_pos);
 }
 
-// fog, underwater tint, tone mapping and output colour space of a linear HDR colour at world_pos
-fn finish(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+// fog and underwater tint of a linear HDR colour at world_pos; stays in linear space (no tone mapping)
+// so callers can still composite clouds on top before post_process() runs once at the very end
+fn fog(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     var final_color = lit;
 
     // 4. Fog (Atmospheric Scattering)
@@ -471,17 +609,24 @@ fn finish(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
         final_color = mix(final_color * vec3<f32>(0.4, 0.75, 0.9), WATER_DEEP * 2.0, 1.0 - exp(-dist * 0.12));
     }
     // Fog density tuned for the scale defined in gen.rs
-    let fog_density = 0.0015; 
+    let fog_density = 0.0015;
     let fog_factor = 1.0 - exp(-(dist * fog_density) * (dist * fog_density * 0.5)); // Exp2 fog
-    
-    // Horizon Fog Color blends into Sky
-    let fog_col = mix(SKY_COLOR * 0.8, vec3<f32>(0.7, 0.8, 0.9), 0.2); 
+
+    // Horizon fog blends into the same sky the camera would see in that direction, so there's no seam
+    // between distant terrain and open sky
+    let L = normalize(global.sun_dir.xyz);
+    let ray_dir = normalize(world_pos - global.camera_pos.xyz);
+    let fog_col = sky_gradient(ray_dir, global.camera_pos.xyz, L);
     final_color = mix(final_color, fog_col, clamp(fog_factor, 0.0, 1.0));
 
-    // 5. Post Processing
+    return final_color;
+}
+
+// tone mapping and output colour space of a linear HDR colour; the final step of every fragment shader
+fn post_process(lit: vec3<f32>) -> vec3<f32> {
     // Tone Mapping (HDR -> LDR)
-    final_color = aces_approx(final_color);
-    
+    var final_color = aces_approx(lit);
+
     // Gamma Correction (Linear -> sRGB)
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
 
@@ -501,7 +646,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
         discard;
     }
-    return vec4<f32>(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy), 1.0);
+    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy)), 1.0);
 }
 
 // --- DEFERRED SHADING (deferred.rs) ---
@@ -548,10 +693,39 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
     let dist = textureLoad(d_dist, p, 0).r;
-    if (dist <= 0.0) { discard; } // sky: the pass's clear colour
-    let N = normalize(textureLoad(d_normal, p, 0).xyz * 2.0 - 1.0);
-    let world_pos = world_from_pixel(pos.xy, dist);
-    return vec4<f32>(shade(textureLoad(d_albedo, p, 0).rgb, N, world_pos, pos.xy), 1.0);
+    let cam_pos = global.camera_pos.xyz;
+    let uv = pos.xy / global.screen.xy;
+    let ray_dir = normalize(global.ray_dirs[0].xyz + uv.x * global.ray_dirs[1].xyz + uv.y * global.ray_dirs[2].xyz);
+    let L = normalize(global.sun_dir.xyz);
+    let t = global.screen.w;
+
+    var color: vec3<f32>;
+    if (dist <= 0.0) {
+        color = sky_gradient(ray_dir, cam_pos, L); // sky: no geometry behind the cloud shell
+    } else {
+        let N = normalize(textureLoad(d_normal, p, 0).xyz * 2.0 - 1.0);
+        let world_pos = world_from_pixel(pos.xy, dist);
+        color = shade(textureLoad(d_albedo, p, 0).rgb, N, world_pos, pos.xy);
+    }
+
+    // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky
+    // pixels; also from orbit, looking down at the cloud layer over the ground)
+    let cloud_r = global.camera_pos.w * CLOUD_ALT;
+    let cloud_t = sphere_hit(cam_pos, ray_dir, cloud_r);
+    if (cloud_t > 0.0 && (dist <= 0.0 || cloud_t < dist)) {
+        let cl = cloud_shade(cam_pos + ray_dir * cloud_t, ray_dir, t, L);
+        color = mix(color, cl.rgb, cl.a);
+    }
+
+    return vec4<f32>(post_process(color), 1.0);
+}
+
+// full-screen white flash drawn over everything (text included) right after F2/`/screenshot` captures a
+// frame, so the capture itself is reliably invisible: it only fires once the swapchain image already
+// has the un-flashed frame copied out. `local.params.x` is the flash's current opacity (Renderer::render).
+@fragment
+fn fs_flash() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, local.params.x);
 }
 
 // translucent water surface (MeshGen::build_water), drawn after the lighting over the lit sea floor.
@@ -639,15 +813,18 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     if (floor_dist > 0.0) { depth = max(floor_dist - water_dist, 0.0); }
     var alpha = 1.0 - exp(-depth * 0.35);
 
-    // the sea floor's shadow (no shadow texel belongs to the surface itself)
-    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos));
+    // the sea floor's shadow (no shadow texel belongs to the surface itself), dimmed under cloud cover too
+    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos)) * cloud_shadow(in.world_pos, L, t);
     let NdotL = max(dot(up, L), 0.0);
     let body = mix(WATER_SHALLOW, WATER_DEEP, 1.0 - exp(-depth * 0.15));
     var color = body * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
 
-    // sky reflection at grazing angles and a sun glint
+    // sky + cloud reflection at grazing angles, and a sun glint
     let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-    color = mix(color, SKY_COLOR * 1.2, fresnel);
+    let refl_dir = reflect(-V, N);
+    let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
+    let refl = mix(sky_gradient(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
+    color = mix(color, refl * 1.2, fresnel);
     let spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
     color += SUN_COLOR * spec * 3.0;
     alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
@@ -674,7 +851,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         color = WATER_DEEP * SKY_COLOR * 4.0; // looking up at the surface from below
         alpha = 0.6;
     }
-    return vec4<f32>(finish(color, in.world_pos), alpha * local.params.x);
+    return vec4<f32>(post_process(fog(color, in.world_pos)), alpha * local.params.x);
 }
 
 // shadow-resolution G-buffer (rt_blur.rs g_pos / g_nrm) from the full-resolution one, nearest pixel
@@ -696,4 +873,4 @@ fn cs_gbuf_down(@builtin(global_invocation_id) id: vec3<u32>) {
     let world_pos = world_from_pixel(vec2<f32>(src) + 0.5, dist);
     textureStore(down_pos, vec2<i32>(id.xy), vec4<f32>(world_pos, dist));
     textureStore(down_nrm, vec2<i32>(id.xy), vec4<f32>(textureLoad(d_normal, src, 0).xyz * 2.0 - 1.0, 0.0));
-}
+}

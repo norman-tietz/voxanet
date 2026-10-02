@@ -6,6 +6,8 @@ pub struct Console {
     pub history: Vec<(String, [f32; 3])>, 
     pub height_fraction: f32, 
     pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
+    pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
+    pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
     
    
     history_capacity: usize,
@@ -19,6 +21,8 @@ impl Console {
             history: Vec::new(),
             height_fraction: 0.0,
             hw_shadows_request: None,
+            screenshot_request: None,
+            view_request: None,
             history_capacity: 50,
         }
     }
@@ -64,6 +68,12 @@ impl Console {
         self.input_buffer.clear();
     }
 
+    // scripted command injection (see main.rs's screenshot/command trigger files), bypassing the input buffer
+    pub fn exec(&mut self, cmd_line: &str, player: &mut Player) {
+        self.log(&format!("> {}", cmd_line), [1.0, 1.0, 1.0]);
+        self.process_command(cmd_line, player);
+    }
+
     fn process_command(&mut self, cmd_line: &str, player: &mut Player) {
         let parts: Vec<&str> = cmd_line.trim().split_whitespace().collect();
         if parts.is_empty() { return; }
@@ -98,12 +108,29 @@ impl Console {
                 }
             },
 
+            "/view" => {
+                match (parts.get(1), parts.get(2)) {
+                    (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
+                    (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
+                    _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
+                }
+            },
+
+            "/screenshot" => {
+                match parts.get(1) {
+                    Some(path) => { self.screenshot_request = Some(path.to_string()); self.log("Capturing screenshot...", [0.0, 1.0, 0.0]); },
+                    None => self.log("Usage: /screenshot <path>", [1.0, 0.5, 0.0]),
+                }
+            },
+
             "help" => {
                 self.log("Available Commands:", [0.0, 1.0, 1.0]);
-                self.log("  /debug_mode set true", [0.8, 0.8, 0.8]); 
+                self.log("  /debug_mode set true", [0.8, 0.8, 0.8]);
                 self.log("  /move_speed set {value}", [0.8, 0.8, 0.8]);
                 self.log("  /jump_force set {value}", [0.8, 0.8, 0.8]);
                 self.log("  /hw_shadows set true|false  (hardware ray-traced shadows)", [0.8, 0.8, 0.8]);
+                self.log("  /screenshot <path>  (save the current frame as PNG)", [0.8, 0.8, 0.8]);
+                self.log("  /view set first|third", [0.8, 0.8, 0.8]);
             },
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);

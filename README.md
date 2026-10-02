@@ -10,6 +10,7 @@
 This project is a high-performance voxel engine built from scratch in **Rust**, capable of generating fully explorable, spherical planets in real-time.
 
 *   **Oceans:** Water fills every part of the terrain below sea level. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint on an animated, rippling surface, and surf foam along the shores; sunlight under water forms moving caustics on the sea floor. You can swim on the surface and dive below it; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
+*   **Dynamic Clouds & Atmosphere:** A procedurally shaded cloud layer wraps the planet with no extra geometry: horizon-grazing view rays cross far more of the layer's thickness, so clouds thicken and brighten near the horizon the way real atmosphere does, while a stylised sky gradient gives a blue dome overhead and a glowing atmospheric limb when the planet is seen from orbit. Clouds drift over time, cast moving shadows on the terrain and ocean below, and are reflected on the water's surface.
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
 *   **Custom Rendering Engine:** Powered by **wgpu**, featuring soft sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
@@ -71,6 +72,12 @@ In water deeper than about half a block you swim at half the walking speed; you 
 | `]` | Grow the planet (resolution ×1.2) and regenerate terrain |
 | `[` | Shrink the planet (resolution ÷1.2) and regenerate terrain |
 
+### Screenshots
+
+| Input | Action |
+|-------|--------|
+| `F2` | Save the current frame as a PNG to `screenshots/voxanet_<timestamp>.png` (folder created automatically) |
+
 ### Console
 
 Press `` ` `` (backtick) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`.
@@ -82,6 +89,8 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `/move_speed get` / `/move_speed set <value>` | Read or change walking speed |
 | `/jump_force get` / `/jump_force set <value>` | Read or change jump strength |
 | `/hw_shadows set true\|false` | Switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
+| `/screenshot <path>` | Save the current frame as a PNG to a custom path (e.g. `/screenshot captures/shot.png`), instead of the `F2` default location |
+| `/view set first\|third` | Switch camera mode from the console |
 
 ### Debug Keys (require `/debug_mode set true`)
 

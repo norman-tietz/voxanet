@@ -16,6 +16,7 @@ mod hw_rt;
 mod deferred;
 mod material;
 mod system_diagnostics;
+mod screenshot;
 
 
 
@@ -120,6 +121,26 @@ impl Game {
         // UPDATE ANIMATION
         console.update_animation(dt);
 
+        if let Some(path) = console.screenshot_request.take() {
+            renderer.request_screenshot(path);
+        }
+        if let Some(fp) = console.view_request.take() {
+            controller.first_person = fp;
+            controller.cam_dist = if fp { 40.0 } else { 100.0 };
+        }
+        // dev convenience: polled instead of a console command so screenshots can be scripted without
+        // needing window focus or keyboard injection
+        const SCREENSHOT_TRIGGER: &str = "/tmp/voxanet_screenshot.trigger";
+        if let Ok(path) = std::fs::read_to_string(SCREENSHOT_TRIGGER) {
+            let _ = std::fs::remove_file(SCREENSHOT_TRIGGER);
+            renderer.request_screenshot(path.trim().to_string());
+        }
+        const COMMAND_TRIGGER: &str = "/tmp/voxanet_cmd.trigger";
+        if let Ok(cmd) = std::fs::read_to_string(COMMAND_TRIGGER) {
+            let _ = std::fs::remove_file(COMMAND_TRIGGER);
+            console.exec(cmd.trim(), player);
+        }
+
         if let Some(on) = console.hw_shadows_request.take() {
             let active = renderer.set_hw_shadows(on);
             if on && !active {
@@ -207,6 +228,12 @@ impl Game {
             },
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                 if let PhysicalKey::Code(KeyCode::F2) = event.physical_key {
+                     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+                     let _ = std::fs::create_dir_all("screenshots");
+                     renderer.request_screenshot(format!("screenshots/voxanet_{ms}.png"));
+                     renderer.window.request_redraw();
+                 }
                  if let Key::Character(ref s) = event.logical_key {
                     if s == "]" || s == "[" {
                         if s == "]" { planet.resize(true); }

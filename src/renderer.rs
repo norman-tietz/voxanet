@@ -146,6 +146,11 @@ pub struct Renderer {
     gpu_timer: Option<GpuTimer>, // None without timestamp queries
     hw_rt: Option<HwRt>, // hardware ray-traced shadows, None without ray queries
     pub hw_shadows: bool, // use hw_rt instead of the ray march (console: /hw_shadows)
+    screenshot_request: Option<String>, // set by /screenshot, consumed at the end of the next render()
+    flash_pipeline: wgpu::RenderPipeline,
+    flash_buf: wgpu::Buffer,
+    flash_bind: wgpu::BindGroup,
+    screenshot_flash: Option<std::time::Instant>, // set right after a capture, so the flash itself is never in the PNG
 }
 
 impl Renderer {
@@ -188,6 +193,7 @@ impl Renderer {
 
 let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width, size.height).unwrap();
+        config.usage |= wgpu::TextureUsages::COPY_SRC; // lets /screenshot read back the swapchain texture
         // macOS only colour-manages the window when its layer has a colour space; for 8-bit surfaces wgpu
         // offers sRGB (which leaves the layer untagged) or Display P3, so tag it P3 and convert the
         // output to P3 primaries in fs_main. Otherwise sRGB colours show oversaturated on P3 displays.
@@ -325,10 +331,22 @@ let size = window.inner_size();
             contents: bytemuck::cast_slice(&[default_local]), 
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, 
         });
-        let local_bind_player = device.create_bind_group(&wgpu::BindGroupDescriptor { 
-            layout: &local_layout, 
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: local_buf_player.as_entire_binding() }], 
-            label: None 
+        let local_bind_player = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: local_buf_player.as_entire_binding() }],
+            label: None
+        });
+
+        // screenshot flash (F2 / /screenshot feedback): opacity-only, reuses params.x like fading chunks
+        let flash_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Flash Uniform"),
+            contents: bytemuck::cast_slice(&[default_local]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let flash_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: flash_buf.as_entire_binding() }],
+            label: None,
         });
 
         // --- PIPELINES ---
@@ -365,6 +383,18 @@ let size = window.inner_size();
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
+            multisample: Default::default(), multiview_mask: None, cache: None,
+        });
+
+        // --- FLASH PIPELINE --- (full-screen triangle, only needs local.params.x for its opacity)
+        let flash_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[None, Some(&local_layout)], immediate_size: 0 });
+        let flash_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Flash Pipeline"),
+            layout: Some(&flash_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_flash"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: config.format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })] }),
+            primitive: Default::default(),
+            depth_stencil: None,
             multisample: Default::default(), multiview_mask: None, cache: None,
         });
 
@@ -437,6 +467,7 @@ let size = window.inner_size();
             global_buf, global_bind, 
             local_bind_identity,
             local_buf_player, local_bind_player,
+            flash_pipeline, flash_buf, flash_bind, screenshot_flash: None,
             deferred,
 
             font_system,
@@ -480,7 +511,12 @@ let size = window.inner_size();
             gpu_timer,
             hw_rt,
             hw_shadows,
+            screenshot_request: None,
         }
+    }
+
+    pub fn request_screenshot(&mut self, path: String) {
+        self.screenshot_request = Some(path);
     }
 
     fn create_pipeline(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule, topology: wgpu::PrimitiveTopology, wireframe: bool) -> wgpu::RenderPipeline {
@@ -1055,7 +1091,7 @@ if controller.show_collisions {
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
             ray_dirs: Self::ray_dirs(mvp, cam_pos),
-            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
+            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, planet.resolution as f32 * 0.5], // w: planet radius (shader.wgsl clouds/sky; rt.resolution is 0 in hardware shadow mode)
             screen: [self.config.width as f32, self.config.height as f32, CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution),
                      self.start_time.elapsed().as_secs_f32() % 3600.0], // wrapped: keeps f32 wave phases precise
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, if self.output_p3 { 1.0 } else { 0.0 }],
@@ -1066,6 +1102,16 @@ if controller.show_collisions {
         self.queue.write_buffer(&self.local_buf_player, 0, bytemuck::cast_slice(model_mat.as_ref()));
 
         let now = std::time::Instant::now();
+
+        // screenshot flash: quick fade-out starting the frame after a capture (see the capture call below)
+        let mut flash_alpha = 0.0f32;
+        if let Some(start) = self.screenshot_flash {
+            const FLASH_DURATION: f32 = 0.18;
+            let t = now.duration_since(start).as_secs_f32();
+            if t < FLASH_DURATION { flash_alpha = 0.65 * (1.0 - t / FLASH_DURATION); } else { self.screenshot_flash = None; }
+        }
+        self.queue.write_buffer(&self.flash_buf, 0, bytemuck::cast_slice(&[LocalUniform { model: glam::Mat4::IDENTITY.to_cols_array(), params: [flash_alpha, 0.0, 0.0, 0.0] }]));
+
         let dying_status = self.animator.update_dying(now);
         for (key, alpha) in dying_status {
             if let Some(state) = self.animator.dying_chunks.get(&key) {
@@ -1185,7 +1231,8 @@ if controller.show_collisions {
                     view: &view, 
                     resolve_target: None, 
                     ops: wgpu::Operations { 
-                        // sky; fs_light discards pixels without geometry
+                        // overwritten everywhere by fs_light (sky_gradient + clouds, see shader.wgsl); kept
+                        // as a harmless fallback matching SPACE_COLOR
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }),
                         store: wgpu::StoreOp::Store 
                     } 
@@ -1429,11 +1476,23 @@ if controller.show_collisions {
             });
             
             self.text_renderer.render(&self.text_atlas, &self.text_viewport, &mut pass).unwrap();
+
+            // screenshot flash: drawn last (over the text too), so it's visible feedback on screen but,
+            // since it's timed to start only after this frame's capture (below), never in the PNG itself
+            if flash_alpha > 0.001 {
+                pass.set_pipeline(&self.flash_pipeline);
+                pass.set_bind_group(1, &self.flash_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
 
         if let Some(timer) = &mut self.gpu_timer { timer.resolve(&mut enc); }
         self.queue.submit(std::iter::once(enc.finish()));
         if let Some(timer) = &mut self.gpu_timer { timer.after_submit(); }
+        if let Some(path) = self.screenshot_request.take() {
+            crate::screenshot::capture(&self.device, &self.queue, &out.texture, self.config.format, self.config.width, self.config.height, &path);
+            self.screenshot_flash = Some(std::time::Instant::now());
+        }
         self.queue.present(out);
         self.text_atlas.trim();
     }
