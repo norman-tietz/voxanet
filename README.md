@@ -51,6 +51,15 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
 
+### Flying
+
+Fly mode has no collision, so a terrain-following floor keeps you from flying into the ground: it holds a clearance above the highest terrain ahead of you (so it starts climbing before you reach a hill, not after), and flying on over lower terrain keeps your current altitude rather than diving down to hug it.
+
+| Input | Action |
+|-------|--------|
+| `Space` (hold) | Climb |
+| `Left Shift` (hold) | Descend (held back by the terrain floor — you can't fly through the ground) |
+
 ### Swimming
 
 In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Your health (`HP: current/max` shown in the top-right overlay) regenerates when safe, but drains if you are submerged in a damaging liquid like lava on Volcanic planets; if health reaches zero, you respawn at your last spawn point.
@@ -59,7 +68,7 @@ In water deeper than about half a block you swim at half the walking speed; you 
 |-------|--------|
 | `W` `A` `S` `D` | Swim; `W` follows the look direction, so look down to dive and up to surface |
 | `Space` (hold) | Swim up; at the surface, hop out (e.g. onto a ledge) |
-| `Left Ctrl` (hold) | Dive |
+| `Left Shift` (hold) | Dive |
 
 ### Building
 

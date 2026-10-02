@@ -23,6 +23,7 @@ pub struct Controller {
     pub show_collisions: bool,
     pub fly_mode: bool,
     pub sprint: bool,
+    pub move_down: bool, // Left Shift: fly down, or dive while swimming
     pub freeze_culling: bool,
     pub cursor_id: Option<BlockId>,
 
@@ -46,6 +47,7 @@ impl Controller {
             fly_mode: false,
             freeze_culling: false,
             sprint: false,
+            move_down: false,
             first_person: true,
             mouse_released: false,
             keys: [false; 7],
@@ -91,6 +93,7 @@ impl Controller {
             planet,
             input,
             jump,
+            self.move_down,
             rotation_delta,
             turn,
             self.fly_mode,
@@ -160,6 +163,7 @@ impl Controller {
                     PhysicalKey::Code(KeyCode::KeyE) => self.keys[6] = pressed,
 
                     PhysicalKey::Code(KeyCode::ControlLeft) => self.sprint = pressed,
+                    PhysicalKey::Code(KeyCode::ShiftLeft) => self.move_down = pressed,
 
                     PhysicalKey::Code(
                         code @ (KeyCode::Digit1

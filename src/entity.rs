@@ -60,6 +60,21 @@ fn fly_floor_climb(radius: f32, floor: f32, dt: f32) -> f32 {
     (floor - radius).max(0.0).min(FLY_CLIMB_RATE * dt)
 }
 
+// Clamps a downward vertical speed (`vert`, +up) so this tick's descent can't cross below `floor`,
+// regardless of how fast the player is trying to descend (sprinting down, or diving via pitch).
+// Pure so the clamp is regression-tested without a planet. Complements fly_floor_climb: that one
+// corrects an overshoot after the fact (for the lookahead-anticipated climb toward rising terrain
+// ahead), this one prevents the overshoot from happening in the first place for a descent already
+// in progress, so the two don't fight each other.
+fn fly_max_descent(vert: f32, radius: f32, floor: f32, dt: f32) -> f32 {
+    if vert >= 0.0 {
+        return vert;
+    }
+    let allowed_descent = (radius - floor).max(0.0);
+    let min_vert = -(allowed_descent / dt.max(1e-6));
+    vert.max(min_vert)
+}
+
 // The minimum world-space radius fly mode should keep the player at: hover clearance above the
 // highest terrain sampled between the player and `lookahead_dist` ahead along `horizontal_dir`.
 // Looking ahead (rather than just checking directly underfoot) is what lets the floor start
@@ -135,6 +150,7 @@ impl Player {
         planet: &PlanetData,
         input: Vec3,
         jump: bool,
+        down: bool,
         mouse_delta: (f32, f32),
         turn: f32,
         flying: bool,
@@ -156,7 +172,7 @@ impl Player {
 
         // --- SWIMMING ---
         // deeper than the knees in the ocean: buoyancy, water drag, half speed; W moves where you look,
-        // Space swims up (or hops out at the surface), Left Ctrl dives
+        // Space swims up (or hops out at the surface), Left Shift dives
         let water_depth = planet.water_depth(self.position); // of the feet
         let depth = water_depth.unwrap_or(f32::MIN);
 
@@ -177,7 +193,7 @@ impl Player {
         }
 
         if !flying && depth > SWIM_DEPTH {
-            self.swim(dt, planet, input, jump, sprint, depth, up);
+            self.swim(dt, planet, input, jump, down, depth, up);
             self.rotation = Physics::align_to_planet(self.rotation, up);
             return;
         }
@@ -194,16 +210,46 @@ impl Player {
 
         // --- MOVEMENT INPUT ---
         if flying {
+            let mut fly_dir = Vec3::ZERO;
             if input.length() > 0.01 {
                 let input_normalized = input.normalize();
                 let pitch_rot = Quat::from_axis_angle(Vec3::X, self.cam_pitch);
-                let fly_dir = self.rotation
+                fly_dir += self.rotation
                     * pitch_rot
                     * Vec3::new(input_normalized.x, 0.0, input_normalized.z);
-                // self.velocity = fly_dir * 1.5;
-                self.velocity = fly_dir * effective_speed;
+            }
+            // Space/Left Shift: climb/descend along the planet-relative up vector, independent of
+            // where the camera is looking (unlike WASD, which flies toward the look direction)
+            if jump {
+                fly_dir += up;
+            }
+            if down {
+                fly_dir -= up;
+            }
+            self.velocity = if fly_dir.length() > 0.01 {
+                fly_dir.normalize() * effective_speed
             } else {
-                self.velocity = Vec3::ZERO;
+                Vec3::ZERO
+            };
+
+            // terrain floor, clamped before solving movement so a fast descent (sprinting down,
+            // or diving via pitch) can't tunnel through the floor within a single tick — unlike the
+            // post-solve correction below, which only ever climbs, this only ever holds back a
+            // descent already in progress, so it doesn't fight the anticipatory climb.
+            let vel_horizontal = self.velocity - up * self.velocity.dot(up);
+            let look_dir = if vel_horizontal.length() > 0.5 {
+                vel_horizontal.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            let lookahead = (vel_horizontal.length() * FLY_LOOKAHEAD_TIME)
+                .clamp(FLY_LOOKAHEAD_MIN, FLY_LOOKAHEAD_MAX);
+            let floor = fly_terrain_floor(self.position, look_dir, lookahead, planet);
+            let radius = self.position.length();
+            let vert = self.velocity.dot(up);
+            let clamped_vert = fly_max_descent(vert, radius, floor, dt);
+            if clamped_vert != vert {
+                self.velocity -= up * (vert - clamped_vert);
             }
         } else {
             // walk
@@ -393,6 +439,43 @@ mod tests {
         let gap = 0.01; // much smaller than FLY_CLIMB_RATE * dt
         let climb = fly_floor_climb(99.99, 99.99 + gap, dt);
         assert!((climb - gap).abs() < 1e-4, "climb was {climb}");
+    }
+
+    #[test]
+    fn fly_max_descent_passes_through_upward_velocity_unchanged() {
+        assert_eq!(fly_max_descent(5.0, 50.0, 30.0, 1.0 / 60.0), 5.0);
+    }
+
+    #[test]
+    fn fly_max_descent_allows_a_slow_descent_well_above_the_floor() {
+        let dt = 1.0 / 60.0;
+        // radius far above the floor: a modest descent speed shouldn't be clamped at all
+        assert_eq!(fly_max_descent(-5.0, 100.0, 30.0, dt), -5.0);
+    }
+
+    #[test]
+    fn fly_max_descent_never_lets_one_tick_cross_the_floor() {
+        let dt = 1.0 / 60.0;
+        // sprinting down (-50 units/s) right at the floor: must not descend at all this tick
+        let radius = 30.0;
+        let floor = 30.0;
+        let clamped = fly_max_descent(-50.0, radius, floor, dt);
+        assert!(
+            radius + clamped * dt >= floor - 1e-4,
+            "would cross the floor: {clamped}"
+        );
+    }
+
+    #[test]
+    fn fly_max_descent_never_lets_a_fast_descent_tunnel_through_a_gap() {
+        let dt = 1.0 / 60.0;
+        let radius = 35.0;
+        let floor = 30.0; // 5 units of room left
+        let clamped = fly_max_descent(-500.0, radius, floor, dt); // absurdly fast dive
+        assert!(
+            radius + clamped * dt >= floor - 1e-4,
+            "would cross the floor: {clamped}"
+        );
     }
 
     // with no horizontal direction (hovering in place), the floor is based only on the current
