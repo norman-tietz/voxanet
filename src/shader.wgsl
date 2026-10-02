@@ -31,6 +31,16 @@ struct RtParams {
 }
 @group(0) @binding(1) var<uniform> rt: RtParams;
 @group(0) @binding(2) var<storage, read> rt_bits: array<u32>;
+struct Biome {
+    liquid_shallow: vec4<f32>, // w: 0 = reflective, 1 = glowing
+    liquid_deep: vec4<f32>,
+    sky_zenith: vec4<f32>,
+    sky_horizon: vec4<f32>,
+    cloud_light: vec4<f32>,
+    cloud_dark: vec4<f32>,
+    space_color: vec4<f32>,
+}
+@group(0) @binding(3) var<uniform> biome: Biome;
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
 @group(2) @binding(0) var rt_blurred: texture_2d<f32>;
 
@@ -43,10 +53,7 @@ struct Local {
 // --- CONSTANTS ---
 // Natural, physical light values
 const SUN_COLOR       = vec3<f32>(1.6, 1.5, 1.3);    // High intensity warm sun
-const SKY_COLOR       = vec3<f32>(0.15, 0.3, 0.6);   // Deep blue ambient sky
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
-const WATER_DEEP      = vec3<f32>(0.002, 0.030, 0.090); // linear colour of deep water
-const WATER_SHALLOW   = vec3<f32>(0.020, 0.150, 0.170); // ... and of shallow water (turquoise)
 const FOAM_COLOR      = vec3<f32>(0.80, 0.85, 0.88);  // shore foam (linear albedo)
 const CAUSTIC_FOCUS   = 0.4;                         // how strongly the ripples focus sunlight below them
 const CAUSTIC_STEEP   = 0.08;                        // slope of the caustic ripples
@@ -59,7 +66,6 @@ const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Dis
     vec3<f32>(0.1774, 0.9669, 0.0724),
     vec3<f32>(0.0000, 0.0000, 0.9108),
 );
-const SPACE_COLOR     = vec3<f32>(0.010, 0.015, 0.030); // deep space beyond the atmosphere
 
 // cloud shell: a thin band of coverage noise at CLOUD_ALT * planet radius, well above the terrain
 // (which caps at 1.2x the radius, see CLAUDE.md). Shaped as a direction-space FBM so it has no seams
@@ -71,8 +77,6 @@ const CLOUD_COVERAGE      = 0.52;  // threshold: higher = less sky covered
 const CLOUD_SOFTNESS      = 0.28;  // smoothstep band around the threshold (soft cloud edges)
 const CLOUD_WIND_SPEED    = 0.012; // drift speed of the noise field
 const CLOUD_SHADOW_STRENGTH = 0.6; // max fraction of sunlight a thick cloud blocks
-const CLOUD_LIGHT  = vec3<f32>(0.92, 0.94, 0.98); // sunlit cloud colour
-const CLOUD_DARK   = vec3<f32>(0.16, 0.18, 0.24); // shadowed underside
 const CLOUD_SILVER = 1.5;          // backlit edge glow strength, looking toward the sun
 
 // --- VERTEX SHADER ---
@@ -522,8 +526,8 @@ fn cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4
     density *= 0.25;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(CLOUD_DARK, CLOUD_LIGHT, ndotl) * SUN_COLOR * 0.55;
-    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * CLOUD_LIGHT;
+    let lit = mix(biome.cloud_dark.rgb, biome.cloud_light.rgb, ndotl) * SUN_COLOR * 0.55;
+    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * biome.cloud_light.rgb;
     return vec4<f32>(lit + silver, clamp(density, 0.0, 1.0));
 }
 
@@ -544,8 +548,8 @@ fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f3
     let closest = length(cam_pos + ray_dir * s_star);
     let limb = clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
-    let dome = mix(SKY_COLOR * 0.7, SKY_COLOR * 1.6 + SUN_COLOR * 0.4, sun_glow);
-    return mix(SPACE_COLOR, dome, limb);
+    let dome = mix(biome.sky_zenith.rgb, biome.sky_horizon.rgb, sun_glow);
+    return mix(biome.space_color.rgb, dome, limb);
 }
 
 // --- FRAGMENT SHADER ---
@@ -583,12 +587,12 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Top of objects gets Sky Color, Bottom gets Ground Bounce
     let up_dot = dot(N, normalize(world_pos)); // Relative Up for sphere
     let hemi_factor = up_dot * 0.5 + 0.5;
-    let ambient_light = mix(GROUND_COLOR, SKY_COLOR, hemi_factor);
+    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor);
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
     let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-    let rim_light = SKY_COLOR * fresnel * 0.2 * shadow;
+    let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow;
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
@@ -606,7 +610,7 @@ fn fog(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
 
     // seen from below the sea surface, everything fades into deep water instead
     if (length(global.camera_pos.xyz) < global.screen.z) {
-        final_color = mix(final_color * vec3<f32>(0.4, 0.75, 0.9), WATER_DEEP * 2.0, 1.0 - exp(-dist * 0.12));
+        final_color = mix(final_color * vec3<f32>(0.4, 0.75, 0.9), biome.liquid_deep.rgb * 2.0, 1.0 - exp(-dist * 0.12));
     }
     // Fog density tuned for the scale defined in gen.rs
     let fog_density = 0.0015;
@@ -816,17 +820,25 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     // the sea floor's shadow (no shadow texel belongs to the surface itself), dimmed under cloud cover too
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos)) * cloud_shadow(in.world_pos, L, t);
     let NdotL = max(dot(up, L), 0.0);
-    let body = mix(WATER_SHALLOW, WATER_DEEP, 1.0 - exp(-depth * 0.15));
-    var color = body * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
+    let glowing = biome.liquid_shallow.w > 0.5;
+    let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
+    var color = body * (SUN_COLOR * NdotL * shadow + biome.sky_zenith.rgb * 2.0);
+    if (glowing) {
+        color = body * 2.5; // emissive: pushed above 1.0 so ACES gives it a hot, blown-out look
+    }
 
-    // sky + cloud reflection at grazing angles, and a sun glint
+    // sky + cloud reflection at grazing angles, and a sun glint — skipped for glowing liquids (lava
+    // doesn't reflect the sky, it just glows)
     let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-    let refl_dir = reflect(-V, N);
-    let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
-    let refl = mix(sky_gradient(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
-    color = mix(color, refl * 1.2, fresnel);
-    let spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
-    color += SUN_COLOR * spec * 3.0;
+    var spec = 0.0;
+    if (!glowing) {
+        let refl_dir = reflect(-V, N);
+        let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
+        let refl = mix(sky_gradient(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
+        color = mix(color, refl * 1.2, fresnel);
+        spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
+        color += SUN_COLOR * spec * 3.0;
+    }
     alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
 
     // shore foam: a solid line where the water meets land, plus bands that run in toward the shore,
@@ -843,12 +855,12 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         let edge = 1.0 - smoothstep(0.05, 0.3, vdepth);
         let froth = shore * (0.55 * bands + 0.45 * patches) + shore * 0.3;
         let foam = max(edge, smoothstep(0.45, 0.8, froth) * band_fade) * 0.9;
-        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + SKY_COLOR * 2.0);
+        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + biome.sky_zenith.rgb * 2.0);
         color = mix(color, foam_col, foam);
         alpha = max(alpha, foam);
     }
     if (underwater) {
-        color = WATER_DEEP * SKY_COLOR * 4.0; // looking up at the surface from below
+        color = biome.liquid_deep.rgb * biome.sky_zenith.rgb * 4.0; // looking up at the surface from below
         alpha = 0.6;
     }
     return vec4<f32>(post_process(fog(color, in.world_pos)), alpha * local.params.x);
