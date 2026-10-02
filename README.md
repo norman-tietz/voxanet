@@ -10,6 +10,7 @@
 This project is a high-performance voxel engine built from scratch in **Rust**, capable of generating fully explorable, spherical planets in real-time.
 
 *   **Oceans:** Water fills every part of the terrain below sea level. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint on an animated, rippling surface, and surf foam along the shores; sunlight under water forms moving caustics on the sea floor. You can swim on the surface and dive below it; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
+*   **Planet Types:** Three switchable biomes—Earth-like (oceans and temperate terrain), Volcanic (lava lakes and glowing rock), and Ice (frozen landscape, no water)—each with unique materials, liquids (reflective or damaging), and atmosphere colours. Switch at runtime with `B` to regenerate the terrain surface and atmosphere. On Volcanic planets, submerged lava damages the player; on Ice planets the terrain is solid everywhere and there is no liquid to swim in.
 *   **Dynamic Clouds & Atmosphere:** A procedurally shaded cloud layer wraps the planet with no extra geometry: horizon-grazing view rays cross far more of the layer's thickness, so clouds thicken and brighten near the horizon the way real atmosphere does, while a stylised sky gradient gives a blue dome overhead and a glowing atmospheric limb when the planet is seen from orbit. Clouds drift over time, cast moving shadows on the terrain and ocean below, and are reflected on the water's surface.
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
@@ -52,7 +53,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 
 ### Swimming
 
-In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface.
+In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Your health (`HP: current/max` shown in the top-left overlay) regenerates when safe, but drains if you are submerged in a damaging liquid like lava on Volcanic planets; if health reaches zero, you respawn at your last spawn point.
 
 | Input | Action |
 |-------|--------|
@@ -76,6 +77,7 @@ In water deeper than about half a block you swim at half the walking speed; you 
 |-------|--------|
 | `]` | Grow the planet (resolution ×1.2) and regenerate terrain |
 | `[` | Shrink the planet (resolution ÷1.2) and regenerate terrain |
+| `B` | Cycle the planet type (Earth-like → Volcanic → Ice) and regenerate terrain with new materials and atmosphere |
 
 ### Screenshots
 
