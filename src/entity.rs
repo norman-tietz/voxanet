@@ -24,6 +24,23 @@ fn damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
     }
 }
 
+// Decides whether holding the up key in `swim()` should hop the player out of the water (e.g. onto
+// a shore level with the sea surface) this tick, and by how much. Pure so the anti-amplification
+// bound is regression-tested without a planet: `vert` (current vertical speed, +up) must stay in a
+// narrow band — not already rising fast, and critically not falling fast either, since the old
+// `SURFACE_HOP - vert` formula grew unbounded as a dive's `vert` went more negative, turning every
+// dive into a launch back out of the water (and, on lava, letting held-jump dodge damage
+// indefinitely). `at_surface` must also be a tight band around the wade threshold: it must exclude
+// FLOAT_DEPTH (the resting float depth), or an ordinary jump press while just treading water would
+// hop instead of gently swimming up.
+fn surface_hop_boost(vert: f32, at_surface: bool) -> Option<f32> {
+    if at_surface && vert > -1.0 && vert < SURFACE_HOP * 0.5 {
+        Some((SURFACE_HOP - vert).min(SURFACE_HOP))
+    } else {
+        None
+    }
+}
+
 pub struct Player {
     // State
     pub position: Vec3,
@@ -219,15 +236,14 @@ impl Player {
             let n = input.normalize();
             desired = self.rotation * pitch_rot * Vec3::new(n.x, 0.0, n.z) * speed;
         }
-        let at_surface = depth < FLOAT_DEPTH + 0.4;
-        if up_key && at_surface {
-            // hop out of the water, e.g. onto a beach that is level with the sea surface
-            let vert = self.velocity.dot(up);
-            if vert < SURFACE_HOP * 0.5 {
-                self.velocity += up * (SURFACE_HOP - vert);
+        let at_surface = depth < SWIM_DEPTH + 0.4;
+        let vert = self.velocity.dot(up);
+        if up_key {
+            if let Some(boost) = surface_hop_boost(vert, at_surface) {
+                self.velocity += up * boost;
+            } else {
+                desired += up * speed;
             }
-        } else if up_key {
-            desired += up * speed;
         }
         if down_key {
             desired -= up * speed;
@@ -296,6 +312,35 @@ mod tests {
     #[test]
     fn no_liquid_does_nothing() {
         assert_eq!(liquid_damage_this_tick(None, true, 0.5), 0.0);
+    }
+
+    // Regression for the "walking on water" / "jumping prevents diving or lava damage" bug: a fast
+    // dive (strongly negative `vert`) must sink, not get launched back out.
+    #[test]
+    fn surface_hop_never_fires_during_an_active_dive() {
+        assert_eq!(surface_hop_boost(-15.0, true), None);
+    }
+
+    // The old formula was `SURFACE_HOP - vert`, unbounded as vert fell; confirm the boost is now
+    // capped at SURFACE_HOP even at the edge of the eligible band.
+    #[test]
+    fn surface_hop_is_capped_at_surface_hop_speed() {
+        let boost = surface_hop_boost(-0.99, true).expect("just inside the eligible band");
+        assert!(boost <= SURFACE_HOP);
+    }
+
+    // Floating at rest (FLOAT_DEPTH) must be outside the hop band, or every jump press while
+    // treading water in open ocean would hop instead of a gentle swim-up.
+    #[test]
+    fn surface_hop_does_not_fire_while_floating_at_rest_depth() {
+        let at_rest_depth_is_surface = FLOAT_DEPTH < SWIM_DEPTH + 0.4;
+        assert!(!at_rest_depth_is_surface);
+        assert_eq!(surface_hop_boost(0.0, false), None);
+    }
+
+    #[test]
+    fn surface_hop_fires_for_a_stationary_player_right_at_the_surface() {
+        assert!(surface_hop_boost(0.0, true).is_some());
     }
 
     #[test]
