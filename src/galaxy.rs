@@ -5,7 +5,7 @@
 // and no connection yet to the player's actual planet (that's a later sub-project, landing/liftoff).
 
 use crate::biome::PlanetType;
-use glam::DVec3;
+use glam::{DVec3, Quat, Vec3};
 
 pub struct Star {
     pub radius: f64,
@@ -82,6 +82,94 @@ impl GalaxyPlanet {
             0.0,
             self.orbit_radius * angle.sin(),
         )
+    }
+}
+
+const GALAXY_CRUISE_SPEED: f32 = 500.0;
+const GALAXY_BOOST_SPEED: f32 = 2000.0;
+const GALAXY_ACCEL: f32 = 800.0; // units/s^2
+
+pub struct GalaxyFlight {
+    pub position: DVec3,
+    pub velocity: DVec3,
+    pub rotation: Quat,
+    mouse_sens: f32,
+}
+
+impl GalaxyFlight {
+    pub fn new(position: DVec3) -> Self {
+        Self {
+            position,
+            velocity: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            mouse_sens: 0.002,
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        dt: f32,
+        input: Vec3,
+        jump: bool,
+        down: bool,
+        mouse_delta: (f32, f32),
+        sprint: bool,
+    ) {
+        let yaw_delta = -mouse_delta.0 * self.mouse_sens;
+        if yaw_delta.abs() > 1e-6 {
+            self.rotation = Quat::from_axis_angle(Vec3::Y, yaw_delta) * self.rotation;
+        }
+        let pitch_delta = -mouse_delta.1 * self.mouse_sens;
+        if pitch_delta.abs() > 1e-6 {
+            self.rotation *= Quat::from_axis_angle(Vec3::X, pitch_delta);
+        }
+
+        let forward = if input.length() > 0.01 {
+            self.rotation * input.normalize()
+        } else {
+            Vec3::ZERO
+        };
+        let dir = compose_fly_direction(forward, jump, down);
+
+        let target_speed = if sprint {
+            GALAXY_BOOST_SPEED
+        } else {
+            GALAXY_CRUISE_SPEED
+        };
+        let target_velocity = dir * target_speed;
+
+        let vel_f32 = Vec3::new(
+            self.velocity.x as f32,
+            self.velocity.y as f32,
+            self.velocity.z as f32,
+        );
+        let new_vel = accelerate_toward(vel_f32, target_velocity, GALAXY_ACCEL * dt);
+        self.velocity = DVec3::new(new_vel.x as f64, new_vel.y as f64, new_vel.z as f64);
+
+        self.position += self.velocity * dt as f64;
+    }
+}
+
+// Pure: blends current velocity toward target, clamped by max acceleration this tick. Factored out
+// so the clamp is regression-tested without mouse/keyboard state.
+fn accelerate_toward(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
+    current + (target - current).clamp_length_max(max_delta)
+}
+
+// Pure: composes the desired flight direction from forward-thrust (already rotated into world
+// space by the caller) and vertical climb/descend keys, normalized. Factored out for testability.
+fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool) -> Vec3 {
+    let mut dir = forward;
+    if climb {
+        dir += Vec3::Y;
+    }
+    if descend {
+        dir -= Vec3::Y;
+    }
+    if dir.length() > 0.01 {
+        dir.normalize()
+    } else {
+        Vec3::ZERO
     }
 }
 
@@ -196,5 +284,70 @@ mod tests {
             (period - 180.0).abs() < 1.0,
             "period was {period}s, expected ~180s"
         );
+    }
+
+    #[test]
+    fn accelerate_toward_is_clamped_by_max_delta() {
+        let result = accelerate_toward(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 5.0);
+        assert_eq!(result, Vec3::new(5.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn accelerate_toward_reaches_target_when_under_max_delta() {
+        let result = accelerate_toward(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 50.0);
+        assert_eq!(result, Vec3::new(10.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn accelerate_toward_does_not_move_when_already_at_target() {
+        let target = Vec3::new(3.0, 4.0, 0.0);
+        let result = accelerate_toward(target, target, 10.0);
+        assert_eq!(result, target);
+    }
+
+    #[test]
+    fn compose_fly_direction_climb_only_is_straight_up() {
+        assert_eq!(compose_fly_direction(Vec3::ZERO, true, false), Vec3::Y);
+    }
+
+    #[test]
+    fn compose_fly_direction_descend_only_is_straight_down() {
+        assert_eq!(compose_fly_direction(Vec3::ZERO, false, true), -Vec3::Y);
+    }
+
+    #[test]
+    fn compose_fly_direction_climb_and_descend_cancel_to_zero() {
+        assert_eq!(compose_fly_direction(Vec3::ZERO, true, true), Vec3::ZERO);
+    }
+
+    #[test]
+    fn compose_fly_direction_forward_only_is_normalized() {
+        let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false);
+        assert!((result.length() - 1.0).abs() < 1e-6);
+        assert_eq!(result, Vec3::X);
+    }
+
+    #[test]
+    fn galaxy_flight_update_moves_position_in_input_direction() {
+        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+        for _ in 0..120 {
+            flight.update(
+                1.0 / 60.0,
+                Vec3::new(0.0, 0.0, -1.0),
+                false,
+                false,
+                (0.0, 0.0),
+                false,
+            );
+        }
+        // forward is -Z at identity rotation (matches Player's convention); after 2s should have
+        // moved forward a meaningful distance, and not drifted sideways or vertically
+        assert!(
+            flight.position.z < -10.0,
+            "expected forward movement, got {:?}",
+            flight.position
+        );
+        assert!((flight.position.x).abs() < 1e-6);
+        assert!((flight.position.y).abs() < 1e-6);
     }
 }
