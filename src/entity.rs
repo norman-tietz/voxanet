@@ -99,12 +99,12 @@ impl Player {
         // --- SWIMMING ---
         // deeper than the knees in the ocean: buoyancy, water drag, half speed; W moves where you look,
         // Space swims up (or hops out at the surface), Left Ctrl dives
-        let depth = planet.water_depth(self.position).unwrap_or(f32::MIN); // of the feet
+        let water_depth = planet.water_depth(self.position); // of the feet
+        let depth = water_depth.unwrap_or(f32::MIN);
 
         // --- HEALTH ---
-        let damaging =
-            depth > SWIM_DEPTH && planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
-        let damage_amount = damage_this_tick(Some(depth), damaging, dt);
+        let damaging = planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
+        let damage_amount = damage_this_tick(water_depth, damaging, dt);
         if damage_amount > 0.0 {
             self.health = (self.health - damage_amount).max(0.0);
         } else {
@@ -146,8 +146,11 @@ impl Player {
             }
         } else {
             // walk
+            // probe slightly below the feet: physics rests the feet just above the solid block
+            // (only a 5% "shave" margin), so probing `self.position` itself lands in the AIR
+            // block above the ground at random depending on exact resting height
             let friction_scale = planet
-                .ground_block(self.position)
+                .ground_block(self.position - up * 0.1)
                 .map_or(1.0, |b| b.friction_scale());
             if input.length() > 0.01 {
                 let input_normalized = input.normalize();
