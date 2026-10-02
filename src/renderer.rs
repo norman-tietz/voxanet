@@ -2109,6 +2109,22 @@ impl Renderer {
             );
             block_buf.shape_until_scroll(&mut self.font_system, false);
 
+            let mut hp_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+            hp_buf.set_size(
+                Some(self.config.width as f32),
+                Some(self.config.height as f32),
+            );
+            let hp_frac = (player.health / player.max_health).clamp(0.0, 1.0);
+            let hp_color =
+                glyphon::Color::rgb((255.0 * (1.0 - hp_frac)) as u8, (255.0 * hp_frac) as u8, 40);
+            hp_buf.set_text(
+                &format!("HP: {:.0}/{:.0}", player.health, player.max_health),
+                &Attrs::new().family(Family::Monospace).color(hp_color),
+                Shaping::Advanced,
+                None,
+            );
+            hp_buf.shape_until_scroll(&mut self.font_system, false);
+
             let mut debug_buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 18.0));
 
             if player.debug_mode {
@@ -2193,11 +2209,26 @@ impl Renderer {
                 custom_glyphs: &[],
             });
 
+            text_areas.push(TextArea {
+                buffer: &hp_buf,
+                left: self.config.width as f32 - 120.0,
+                top: 62.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+
             if player.debug_mode {
                 text_areas.push(TextArea {
                     buffer: &debug_buf,
                     left: self.config.width as f32 - 180.0,
-                    top: 62.0, // below the FPS and block lines
+                    top: 88.0, // below the FPS, block, and HP lines
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
