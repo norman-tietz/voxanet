@@ -1715,7 +1715,13 @@ impl Renderer {
             screen: [
                 self.config.width as f32,
                 self.config.height as f32,
-                CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution),
+                // 0.0 signals "no liquid here" (same convention PlanetData::water_depth uses):
+                // on a liquid-less planet (e.g. Ice) there's no sea surface to tint for or swim in
+                if planet.planet_type.def().liquid.is_none() {
+                    0.0
+                } else {
+                    CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
+                },
                 self.start_time.elapsed().as_secs_f32() % 3600.0,
             ], // wrapped: keeps f32 wave phases precise
             sun_dir: [

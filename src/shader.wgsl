@@ -579,7 +579,9 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below the sea surface
     var direct_light = SUN_COLOR * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
     let sea_depth = global.screen.z - length(world_pos);
-    if (global.screen.z > 0.0 && sea_depth > 0.0 && shadow_raw > 0.0) {
+    // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
+    // which doesn't focus light the same way (matches fs_water's reflective-vs-glowing branch)
+    if (global.screen.z > 0.0 && biome.liquid_shallow.w < 0.5 && sea_depth > 0.0 && shadow_raw > 0.0) {
         direct_light *= mix(1.0, caustics(world_pos, L, sea_depth), shadow_raw);
     }
 
