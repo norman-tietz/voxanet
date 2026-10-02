@@ -53,7 +53,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 
 ### Swimming
 
-In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Your health (`HP: current/max` shown in the top-left overlay) regenerates when safe, but drains if you are submerged in a damaging liquid like lava on Volcanic planets; if health reaches zero, you respawn at your last spawn point.
+In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Your health (`HP: current/max` shown in the top-right overlay) regenerates when safe, but drains if you are submerged in a damaging liquid like lava on Volcanic planets; if health reaches zero, you respawn at your last spawn point.
 
 | Input | Action |
 |-------|--------|
