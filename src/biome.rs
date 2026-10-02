@@ -28,6 +28,7 @@ impl PlanetType {
         match self {
             PlanetType::EarthLike => PlanetTypeDef {
                 name: "Earth-like",
+                day_length_secs: 120.0,
                 liquid: Some(LiquidDef {
                     shallow_color: [0.020, 0.150, 0.170],
                     deep_color: [0.002, 0.030, 0.090],
@@ -51,6 +52,7 @@ impl PlanetType {
             },
             PlanetType::Volcanic => PlanetTypeDef {
                 name: "Volcanic",
+                day_length_secs: 60.0,
                 liquid: Some(LiquidDef {
                     shallow_color: [1.4, 0.5, 0.05],
                     deep_color: [0.35, 0.05, 0.02],
@@ -74,6 +76,7 @@ impl PlanetType {
             },
             PlanetType::Ice => PlanetTypeDef {
                 name: "Ice",
+                day_length_secs: 240.0,
                 liquid: None,
                 palette: Palette {
                     peak: BlockType::Snow,
@@ -129,6 +132,9 @@ pub struct Palette {
 #[derive(Clone, Copy, Debug)]
 pub struct PlanetTypeDef {
     pub name: &'static str,
+    // seconds for one full day/night cycle (the planet's axial spin period); each type's own,
+    // since a faster or slower spin is just more data, same as its palette or atmosphere
+    pub day_length_secs: f32,
     pub liquid: Option<LiquidDef>,
     pub palette: Palette,
     pub atmosphere: AtmosphereDef,
@@ -162,6 +168,13 @@ mod tests {
         let liquid = def.liquid.expect("Volcanic has lava");
         assert!(matches!(liquid.behavior, LiquidBehavior::Glowing));
         assert!(liquid.damaging);
+    }
+
+    #[test]
+    fn each_planet_type_has_a_positive_day_length() {
+        for t in PlanetType::ALL {
+            assert!(t.def().day_length_secs > 0.0, "{}", t.def().name);
+        }
     }
 
     #[test]

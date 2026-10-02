@@ -549,7 +549,15 @@ fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f3
     let limb = clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
     let dome = mix(biome.sky_zenith.rgb * 0.7, biome.sky_horizon.rgb, sun_glow);
-    return mix(biome.space_color.rgb, dome, limb);
+
+    // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it
+    // out white-hot. Only ever drawn where this ray truly reaches deep space (sky_gradient is never
+    // called for a ray that hit terrain first), so it's automatically hidden on the planet's own
+    // night side and correctly occluded wherever callers composite clouds on top afterwards.
+    let sun_cos = max(dot(ray_dir, L), 0.0);
+    let sun = SUN_COLOR * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
+
+    return mix(biome.space_color.rgb, dome, limb) + sun;
 }
 
 // --- FRAGMENT SHADER ---

@@ -1673,8 +1673,15 @@ impl Renderer {
 
         self.update_rt_window(player.position, planet);
 
-        // directional sun, fixed in world space
-        let sun_dir = glam::Vec3::new(0.5, 0.8, 0.4).normalize();
+        // directional sun: a fixed direction in absolute space, rotated around the planet's spin
+        // axis (world +Y, matching the "North Pole" convention Game::new's spawn search already
+        // uses) at a rate set by the active planet type's own day length. Everything downstream
+        // (shade(), caustics, cloud_shadow, both shadow paths) already re-reads sun_dir fresh every
+        // frame, so a time-varying value is a drop-in — nothing else needs to change for day/night.
+        let time = self.start_time.elapsed().as_secs_f32() % 3600.0;
+        let spin_angle = (time / planet.planet_type.def().day_length_secs) * std::f32::consts::TAU;
+        let sun_dir = glam::Quat::from_axis_angle(glam::Vec3::Y, spin_angle)
+            * glam::Vec3::new(0.5, 0.2, 0.4).normalize();
 
         // -- Camera Matrix --
         let mvp =
@@ -1722,7 +1729,7 @@ impl Renderer {
                 } else {
                     CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
                 },
-                self.start_time.elapsed().as_secs_f32() % 3600.0,
+                time,
             ], // wrapped: keeps f32 wave phases precise
             sun_dir: [
                 sun_dir.x,
