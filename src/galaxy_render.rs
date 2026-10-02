@@ -4,6 +4,7 @@
 // each planet). Does not touch the existing deferred G-buffer/shadow pipeline in deferred.rs —
 // sub-project #2 replaces these placeholder spheres with real terrain-shaped impostors.
 
+use crate::deferred::DEPTH_FORMAT;
 use crate::galaxy::{Galaxy, GalaxyFlight};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
@@ -131,7 +132,7 @@ impl GalaxyRenderer {
             write_mask: wgpu::ColorWrites::ALL,
         };
         let depth_stencil = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: Default::default(),
@@ -276,6 +277,10 @@ impl GalaxyRenderer {
                 light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
             });
         }
+        debug_assert!(
+            bodies.len() <= MAX_BODIES,
+            "galaxy has more bodies than the storage buffer was sized for"
+        );
         queue.write_buffer(&self.body_buf, 0, bytemuck::cast_slice(&bodies));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -336,5 +341,76 @@ impl GalaxyRenderer {
             [col1.x, col1.y, col1.z, 0.0],
             [col2.x, col2.y, col2.z, 0.0],
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::galaxy::Galaxy;
+
+    // integration: Galaxy + GalaxyFlight together, at the same default entry point `Game::new` /
+    // the `/galaxy enter` handler use (src/main.rs), should keep every body within the render
+    // pipeline's near/far planes and within the body-storage buffer's capacity.
+    #[test]
+    // clippy's int_plus_one suggests `planets.len() < MAX_BODIES`, which is equivalent but hides
+    // the "+1 for the star" reasoning the assertion is meant to document; keep the explicit form.
+    #[allow(clippy::int_plus_one)]
+    fn galaxy_and_flight_keep_every_body_within_render_planes() {
+        let galaxy = Galaxy::generate(1);
+        let flight = GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
+
+        let star_distance = flight.position.length();
+        assert!(
+            star_distance > NEAR_PLANE as f64 && star_distance < FAR_PLANE as f64,
+            "star distance {star_distance} not within ({NEAR_PLANE}, {FAR_PLANE})"
+        );
+
+        for (i, p) in galaxy.planets.iter().enumerate() {
+            let distance = (p.position_at(0.0) - flight.position).length();
+            assert!(
+                distance > NEAR_PLANE as f64 && distance < FAR_PLANE as f64,
+                "planet {i} distance {distance} not within ({NEAR_PLANE}, {FAR_PLANE})"
+            );
+        }
+
+        assert!(
+            galaxy.planets.len() + 1 <= MAX_BODIES,
+            "star + planets ({}) exceed MAX_BODIES ({MAX_BODIES})",
+            galaxy.planets.len() + 1
+        );
+    }
+
+    // ray_dirs packs the camera frustum as a corner (ray_dirs[0]) plus two edge vectors
+    // (ray_dirs[1]/[2]) so the shader can interpolate `ray_dirs[0] + uv.x*ray_dirs[1] +
+    // uv.y*ray_dirs[2]` per pixel (same scheme as GlobalUniform.ray_dirs / fs_light). At the
+    // screen center (uv = 0.5, 0.5) that interpolation must reduce to the forward direction.
+    #[test]
+    fn ray_dirs_center_matches_forward_at_identity_rotation() {
+        let ray_dirs = GalaxyRenderer::ray_dirs(Quat::IDENTITY, 1.0, 16.0 / 9.0);
+        let top_left = Vec3::from_slice(&ray_dirs[0][..3]);
+        let col1 = Vec3::from_slice(&ray_dirs[1][..3]);
+        let col2 = Vec3::from_slice(&ray_dirs[2][..3]);
+        let center = top_left + 0.5 * col1 + 0.5 * col2;
+        let forward = Quat::IDENTITY * Vec3::NEG_Z;
+        assert!(
+            (center - forward).length() < 1e-5,
+            "center ray {center:?} should match forward {forward:?}"
+        );
+    }
+
+    #[test]
+    fn ray_dirs_center_matches_forward_under_rotation() {
+        let rotation = Quat::from_axis_angle(Vec3::Y, 1.2) * Quat::from_axis_angle(Vec3::X, -0.4);
+        let ray_dirs = GalaxyRenderer::ray_dirs(rotation, 1.0, 16.0 / 9.0);
+        let top_left = Vec3::from_slice(&ray_dirs[0][..3]);
+        let col1 = Vec3::from_slice(&ray_dirs[1][..3]);
+        let col2 = Vec3::from_slice(&ray_dirs[2][..3]);
+        let center = top_left + 0.5 * col1 + 0.5 * col2;
+        let forward = rotation * Vec3::NEG_Z;
+        assert!(
+            (center - forward).length() < 1e-5,
+            "center ray {center:?} should match forward {forward:?}"
+        );
     }
 }

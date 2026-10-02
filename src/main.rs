@@ -221,16 +221,23 @@ impl Game {
                     };
                     *galaxy_flight =
                         crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
+                    // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
+                    // player entered while in third person (Controller::raw_input gates it on
+                    // first_person && !mouse_released) — otherwise there's no way to turn at all.
+                    controller.first_person = true;
+                    controller.mouse_released = false;
                     console.log(
                         "Entered galaxy mode. /galaxy exit to return.",
                         [1.0, 1.0, 1.0],
                     );
+                    println!("Entered galaxy mode. /galaxy exit to return.");
                 }
                 (GameMode::Galaxy { return_point }, false) => {
                     player.position = *return_point;
                     player.velocity = glam::Vec3::ZERO;
                     *mode = GameMode::Planet;
                     console.log("Returned to the planet.", [1.0, 1.0, 1.0]);
+                    println!("Returned to the planet.");
                 }
                 _ => {} // already in the requested mode; no-op
             }
@@ -334,44 +341,46 @@ impl Game {
                 button,
                 ..
             } => {
-                if controller.first_person && controller.mouse_released {
-                    // recapture takes priority: don't also mine/place on the click that brings the mouse back
-                    controller.mouse_released = false;
-                    let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
-                    renderer.window.set_cursor_visible(false);
-                } else {
-                    let is_right = button == MouseButton::Right;
-                    if let Some(id) = controller.cursor_id {
-                        if button == MouseButton::Middle {
-                            // pick the targeted block's type for placing (the bedrock core isn't placeable)
-                            if let Some(ty) = planet.block_type(id).filter(|ty| {
-                                crate::material::placeable(&planet.planet_type.def().palette)
-                                    .contains(ty)
-                            }) {
-                                controller.selected_block = ty;
-                            }
-                        } else if is_right {
-                            let place_info = controller.raycast(
-                                player,
-                                planet,
-                                renderer.config.width as f32,
-                                renderer.config.height as f32,
-                                true,
-                            );
-                            if let Some((place_id, _)) = place_info {
-                                planet.add_block(place_id, controller.selected_block);
-                                renderer.refresh_neighbors(place_id, planet);
-                            }
-                        } else if button == MouseButton::Left {
-                            planet.remove_block(id);
-                            renderer.refresh_neighbors(id, planet);
-                        }
-                        renderer.window.request_redraw();
+                if matches!(self.mode, GameMode::Planet) {
+                    if controller.first_person && controller.mouse_released {
+                        // recapture takes priority: don't also mine/place on the click that brings the mouse back
+                        controller.mouse_released = false;
+                        let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
+                        renderer.window.set_cursor_visible(false);
                     } else {
-                        if controller.first_person {
-                            controller.mouse_released = false;
-                            let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
-                            renderer.window.set_cursor_visible(false);
+                        let is_right = button == MouseButton::Right;
+                        if let Some(id) = controller.cursor_id {
+                            if button == MouseButton::Middle {
+                                // pick the targeted block's type for placing (the bedrock core isn't placeable)
+                                if let Some(ty) = planet.block_type(id).filter(|ty| {
+                                    crate::material::placeable(&planet.planet_type.def().palette)
+                                        .contains(ty)
+                                }) {
+                                    controller.selected_block = ty;
+                                }
+                            } else if is_right {
+                                let place_info = controller.raycast(
+                                    player,
+                                    planet,
+                                    renderer.config.width as f32,
+                                    renderer.config.height as f32,
+                                    true,
+                                );
+                                if let Some((place_id, _)) = place_info {
+                                    planet.add_block(place_id, controller.selected_block);
+                                    renderer.refresh_neighbors(place_id, planet);
+                                }
+                            } else if button == MouseButton::Left {
+                                planet.remove_block(id);
+                                renderer.refresh_neighbors(id, planet);
+                            }
+                            renderer.window.request_redraw();
+                        } else {
+                            if controller.first_person {
+                                controller.mouse_released = false;
+                                let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
+                                renderer.window.set_cursor_visible(false);
+                            }
                         }
                     }
                 }

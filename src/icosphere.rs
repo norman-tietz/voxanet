@@ -5,47 +5,6 @@
 
 use glam::Vec3;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_subdivisions_is_the_bare_icosahedron() {
-        let (verts, indices) = generate(0);
-        assert_eq!(verts.len(), 12);
-        assert_eq!(indices.len(), 60); // 20 faces * 3
-    }
-
-    #[test]
-    fn subdivision_quadruples_face_count_each_level() {
-        let (_, indices1) = generate(1);
-        let (_, indices2) = generate(2);
-        assert_eq!(indices1.len(), 80 * 3);
-        assert_eq!(indices2.len(), 320 * 3);
-    }
-
-    #[test]
-    fn all_vertices_are_unit_length() {
-        for level in [0, 1, 2] {
-            let (verts, _) = generate(level);
-            for v in &verts {
-                assert!(
-                    (v.length() - 1.0).abs() < 1e-4,
-                    "level {level}: {v:?} not unit length"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_indices_reference_valid_vertices() {
-        let (verts, indices) = generate(2);
-        for &i in &indices {
-            assert!((i as usize) < verts.len());
-        }
-    }
-}
-
 fn base_icosahedron() -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let phi = (1.0 + 5.0_f32.sqrt()) / 2.0;
     let verts: Vec<Vec3> = [
@@ -131,4 +90,45 @@ pub fn generate(subdivisions: u32) -> (Vec<Vec3>, Vec<u32>) {
 
     let indices: Vec<u32> = faces.into_iter().flatten().collect();
     (verts, indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_subdivisions_is_the_bare_icosahedron() {
+        let (verts, indices) = generate(0);
+        assert_eq!(verts.len(), 12);
+        assert_eq!(indices.len(), 60); // 20 faces * 3
+    }
+
+    #[test]
+    fn subdivision_quadruples_face_count_each_level() {
+        let (_, indices1) = generate(1);
+        let (_, indices2) = generate(2);
+        assert_eq!(indices1.len(), 80 * 3);
+        assert_eq!(indices2.len(), 320 * 3);
+    }
+
+    #[test]
+    fn all_vertices_are_unit_length() {
+        for level in [0, 1, 2] {
+            let (verts, _) = generate(level);
+            for v in &verts {
+                assert!(
+                    (v.length() - 1.0).abs() < 1e-4,
+                    "level {level}: {v:?} not unit length"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_indices_reference_valid_vertices() {
+        let (verts, indices) = generate(2);
+        for &i in &indices {
+            assert!((i as usize) < verts.len());
+        }
+    }
 }
