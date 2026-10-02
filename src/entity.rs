@@ -15,6 +15,17 @@ const DAMAGE_RATE: f32 = 20.0; // HP/s; dies in ~5s fully submerged
 const REGEN_RATE: f32 = 5.0; // HP/s; ~20s from empty, only while not taking damage
 const MAX_HEALTH: f32 = 100.0;
 
+// fly mode terrain-following floor (Player::update's flying branch): fly mode has no collision
+// (Physics::solve_movement just integrates position when flying), so without this the player can
+// fly straight through the ground. The floor only ever pushes up, never down, so flying on over
+// lower terrain keeps the current altitude instead of hugging the ground like a drone.
+const FLY_HOVER_CLEARANCE: f32 = 3.0; // world units kept above the highest sampled terrain
+const FLY_LOOKAHEAD_TIME: f32 = 1.5; // seconds of travel to look ahead, scaled by current speed
+const FLY_LOOKAHEAD_MIN: f32 = 5.0;
+const FLY_LOOKAHEAD_MAX: f32 = 60.0;
+const FLY_LOOKAHEAD_SAMPLES: u32 = 4; // points between the player and the lookahead distance
+const FLY_CLIMB_RATE: f32 = 15.0; // world units/s the floor correction may lift the player
+
 // Compute damage amount for this tick. Pure decision logic, testable without a real planet/terrain.
 // Returns damage amount (>0 means take damage, 0 means no damage).
 fn damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
@@ -39,6 +50,36 @@ fn surface_hop_boost(vert: f32, at_surface: bool) -> Option<f32> {
     } else {
         None
     }
+}
+
+// How far upward to move this tick to approach the fly-mode terrain floor, capped at the climb
+// rate so a sudden floor jump (e.g. a cliff entering the lookahead window) is a smooth climb, not
+// a snap. Pure so the rate limit is regression-tested without a planet. Never negative: the floor
+// only ever pushes the player up, never pulls them down toward it.
+fn fly_floor_climb(radius: f32, floor: f32, dt: f32) -> f32 {
+    (floor - radius).max(0.0).min(FLY_CLIMB_RATE * dt)
+}
+
+// The minimum world-space radius fly mode should keep the player at: hover clearance above the
+// highest terrain sampled between the player and `lookahead_dist` ahead along `horizontal_dir`.
+// Looking ahead (rather than just checking directly underfoot) is what lets the floor start
+// rising before the player reaches a mountain, instead of reacting only once already over it.
+fn fly_terrain_floor(
+    pos: Vec3,
+    horizontal_dir: Vec3,
+    lookahead_dist: f32,
+    planet: &PlanetData,
+) -> f32 {
+    let res = planet.resolution;
+    let mut max_height = 0u32;
+    for i in 0..=FLY_LOOKAHEAD_SAMPLES {
+        let dist = lookahead_dist * (i as f32) / (FLY_LOOKAHEAD_SAMPLES as f32);
+        let sample_pos = pos + horizontal_dir * dist;
+        if let Some(id) = crate::gen::CoordSystem::pos_to_id(sample_pos, res) {
+            max_height = max_height.max(planet.effective_height(id.face, id.u, id.v));
+        }
+    }
+    crate::gen::CoordSystem::get_layer_radius(max_height, res) + FLY_HOVER_CLEARANCE
 }
 
 pub struct Player {
@@ -215,6 +256,28 @@ impl Player {
         self.velocity = new_vel;
         self.grounded = grounded;
 
+        // --- FLY MODE TERRAIN FLOOR ---
+        if flying {
+            let vel_horizontal = self.velocity - up * self.velocity.dot(up);
+            let dir = if vel_horizontal.length() > 0.5 {
+                vel_horizontal.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            let lookahead = (vel_horizontal.length() * FLY_LOOKAHEAD_TIME)
+                .clamp(FLY_LOOKAHEAD_MIN, FLY_LOOKAHEAD_MAX);
+            let floor = fly_terrain_floor(self.position, dir, lookahead, planet);
+            let radius = self.position.length();
+            let climb = fly_floor_climb(radius, floor, dt);
+            if climb > 0.0 {
+                self.position += up * climb;
+                let vert = self.velocity.dot(up);
+                if vert < 0.0 {
+                    self.velocity -= up * vert;
+                }
+            }
+        }
+
         // --- ALIGN TO SURFACE ---
         self.rotation = Physics::align_to_planet(self.rotation, up);
     }
@@ -306,6 +369,48 @@ mod tests {
         assert_eq!(
             liquid_damage_this_tick(Some(SWIM_DEPTH * 0.5), true, 0.5),
             0.0
+        );
+    }
+
+    #[test]
+    fn fly_floor_climb_never_pulls_the_player_down_toward_a_lower_floor() {
+        // "keep height over lower terrain": already above the floor means no correction at all.
+        assert_eq!(fly_floor_climb(50.0, 30.0, 1.0 / 60.0), 0.0);
+    }
+
+    #[test]
+    fn fly_floor_climb_is_capped_at_the_climb_rate() {
+        // a big, sudden floor jump (e.g. a cliff entering the lookahead window) must still be a
+        // smooth climb, not an instant snap to the new floor.
+        let dt = 1.0 / 60.0;
+        let climb = fly_floor_climb(0.0, 1000.0, dt);
+        assert_eq!(climb, FLY_CLIMB_RATE * dt);
+    }
+
+    #[test]
+    fn fly_floor_climb_does_not_overshoot_a_small_gap() {
+        let dt = 1.0 / 60.0;
+        let gap = 0.01; // much smaller than FLY_CLIMB_RATE * dt
+        let climb = fly_floor_climb(99.99, 99.99 + gap, dt);
+        assert!((climb - gap).abs() < 1e-4, "climb was {climb}");
+    }
+
+    // with no horizontal direction (hovering in place), the floor is based only on the current
+    // column — directly checks the i=0 (distance 0) lookahead sample against the same column read
+    // through the normal terrain API, so this doesn't depend on what the noise actually generated.
+    #[test]
+    fn fly_terrain_floor_with_no_direction_uses_the_current_column() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0, planet.resolution / 2, planet.resolution / 2);
+        let h = planet.effective_height(face, u, v);
+        let pos = crate::gen::CoordSystem::get_vertex_pos(face, u, v, h + 20, planet.resolution);
+
+        let floor = fly_terrain_floor(pos, Vec3::ZERO, 30.0, &planet);
+        let expected =
+            crate::gen::CoordSystem::get_layer_radius(h, planet.resolution) + FLY_HOVER_CLEARANCE;
+        assert!(
+            (floor - expected).abs() < 1e-3,
+            "floor was {floor}, expected {expected}"
         );
     }
 
