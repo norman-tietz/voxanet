@@ -15,6 +15,15 @@ const DAMAGE_RATE: f32 = 20.0; // HP/s; dies in ~5s fully submerged
 const REGEN_RATE: f32 = 5.0; // HP/s; ~20s from empty, only while not taking damage
 const MAX_HEALTH: f32 = 100.0;
 
+// Compute damage amount for this tick. Pure decision logic, testable without a real planet/terrain.
+// Returns damage amount (>0 means take damage, 0 means no damage).
+fn damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
+    match depth {
+        Some(d) if d > SWIM_DEPTH && damaging => DAMAGE_RATE * dt,
+        _ => 0.0,
+    }
+}
+
 pub struct Player {
     // State
     pub position: Vec3,
@@ -95,8 +104,9 @@ impl Player {
         // --- HEALTH ---
         let damaging =
             depth > SWIM_DEPTH && planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
-        if damaging {
-            self.health = (self.health - DAMAGE_RATE * dt).max(0.0);
+        let damage_amount = damage_this_tick(Some(depth), damaging, dt);
+        if damage_amount > 0.0 {
+            self.health = (self.health - damage_amount).max(0.0);
         } else {
             self.health = (self.health + REGEN_RATE * dt).min(self.max_health);
         }
@@ -248,12 +258,9 @@ impl Player {
 mod tests {
     use super::*;
 
-    // pure decision logic, factored out of update() so it's testable without a real planet/terrain
+    // Test wrapper that calls the production function
     fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
-        match depth {
-            Some(d) if d > SWIM_DEPTH && damaging => DAMAGE_RATE * dt,
-            _ => 0.0,
-        }
+        damage_this_tick(depth, damaging, dt)
     }
 
     #[test]
