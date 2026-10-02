@@ -9,6 +9,12 @@ const MAX_BUOYANCY: f32 = 1.15; // fully submerged: rise slowly when not swimmin
 const WATER_DRAG: f32 = 3.0; // 1/s
 const SURFACE_HOP: f32 = 6.5; // upward speed of a hop out of the water
 
+// health (Player.health); damage while submerged in a damaging liquid beyond SWIM_DEPTH, passive
+// regen otherwise
+const DAMAGE_RATE: f32 = 20.0; // HP/s; dies in ~5s fully submerged
+const REGEN_RATE: f32 = 5.0; // HP/s; ~20s from empty, only while not taking damage
+const MAX_HEALTH: f32 = 100.0;
+
 pub struct Player {
     // State
     pub position: Vec3,
@@ -17,6 +23,9 @@ pub struct Player {
     pub cam_pitch: f32,
     pub grounded: bool,
     pub debug_mode: bool,
+    pub health: f32,
+    pub max_health: f32,
+    pub spawn_point: Vec3,
 
     // Configuration
     pub move_speed: f32,
@@ -33,6 +42,9 @@ impl Player {
             cam_pitch: 0.0,
             grounded: false,
             debug_mode: false,
+            health: MAX_HEALTH,
+            max_health: MAX_HEALTH,
+            spawn_point: Vec3::new(0.0, 200.0, 0.0),
             move_speed: 5.0,
             jump_force: 8.0,
             mouse_sens: 0.002,
@@ -43,6 +55,8 @@ impl Player {
         self.position = pos;
         self.velocity = Vec3::ZERO;
         self.grounded = false;
+        self.health = self.max_health;
+        self.spawn_point = pos;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
@@ -77,6 +91,20 @@ impl Player {
         // deeper than the knees in the ocean: buoyancy, water drag, half speed; W moves where you look,
         // Space swims up (or hops out at the surface), Left Ctrl dives
         let depth = planet.water_depth(self.position).unwrap_or(f32::MIN); // of the feet
+
+        // --- HEALTH ---
+        let damaging =
+            depth > SWIM_DEPTH && planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
+        if damaging {
+            self.health = (self.health - DAMAGE_RATE * dt).max(0.0);
+        } else {
+            self.health = (self.health + REGEN_RATE * dt).min(self.max_health);
+        }
+        if self.health <= 0.0 {
+            let spawn_point = self.spawn_point;
+            self.spawn(spawn_point);
+        }
+
         if !flying && depth > SWIM_DEPTH {
             self.swim(dt, planet, input, jump, sprint, depth, up);
             self.rotation = Physics::align_to_planet(self.rotation, up);
@@ -213,5 +241,53 @@ impl Player {
         let forward = final_rot * Vec3::NEG_Z;
 
         glam::camera::rh::view::look_at_mat4(cam_pos, cam_pos + forward, up)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // pure decision logic, factored out of update() so it's testable without a real planet/terrain
+    fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
+        match depth {
+            Some(d) if d > SWIM_DEPTH && damaging => DAMAGE_RATE * dt,
+            _ => 0.0,
+        }
+    }
+
+    #[test]
+    fn damaging_liquid_drains_health_proportional_to_dt() {
+        assert_eq!(
+            liquid_damage_this_tick(Some(2.0), true, 0.5),
+            DAMAGE_RATE * 0.5
+        );
+    }
+
+    #[test]
+    fn non_damaging_liquid_does_nothing() {
+        assert_eq!(liquid_damage_this_tick(Some(2.0), false, 0.5), 0.0);
+    }
+
+    #[test]
+    fn shallow_damaging_liquid_does_nothing() {
+        assert_eq!(
+            liquid_damage_this_tick(Some(SWIM_DEPTH * 0.5), true, 0.5),
+            0.0
+        );
+    }
+
+    #[test]
+    fn no_liquid_does_nothing() {
+        assert_eq!(liquid_damage_this_tick(None, true, 0.5), 0.0);
+    }
+
+    #[test]
+    fn spawn_resets_health_and_remembers_spawn_point() {
+        let mut p = Player::new();
+        p.health = 10.0;
+        p.spawn(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(p.health, p.max_health);
+        assert_eq!(p.spawn_point, Vec3::new(1.0, 2.0, 3.0));
     }
 }
