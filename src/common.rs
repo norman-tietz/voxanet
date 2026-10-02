@@ -1,5 +1,6 @@
 //common.rs
 
+use crate::biome::PlanetType;
 use crate::material::{self, BlockType};
 use crate::noise::PlanetTerrain;
 use bytemuck::{Pod, Zeroable};
@@ -82,6 +83,7 @@ pub struct PlanetData {
     pub resolution: u32,
     pub has_core: bool,
     pub terrain: crate::noise::PlanetTerrain,
+    pub planet_type: PlanetType,
 }
 
 impl PlanetData {
@@ -95,7 +97,15 @@ impl PlanetData {
             resolution,
             has_core: true,
             terrain, // <--- Store it
+            planet_type: PlanetType::EarthLike,
         }
+    }
+
+    // switches the active planet type in place: clears edits (they reference the old palette)
+    // but keeps the same terrain shape — phase 1 reuses one noise map for every planet type
+    pub fn switch_planet_type(&mut self, to: PlanetType) {
+        self.planet_type = to;
+        self.chunks.clear();
     }
 
     pub fn resize(&mut self, increase: bool) {
@@ -168,6 +178,10 @@ impl PlanetData {
 
         // instead of a flat floor, we check the pre-calculated noise map
         let height = self.terrain.get_height(id.face, id.u, id.v);
+        if self.planet_type.def().liquid.is_none() {
+            let sea = self.terrain.sea_level();
+            return id.layer <= height.max(sea);
+        }
         id.layer <= height
     }
 
@@ -210,6 +224,7 @@ impl PlanetData {
     // how far `pos` lies below the sea surface (negative above it), or None outside the ocean: a column's
     // natural terrain must be below sea level, like the rendered water (MeshGen::build_water)
     pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
+        self.planet_type.def().liquid?;
         let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
         let sea = self.terrain.sea_level();
         if self.terrain.get_height(id.face, id.u, id.v) >= sea {
@@ -233,17 +248,36 @@ impl PlanetData {
 
     // the terrain's own block at this position, ignoring edits
     fn natural_type(&self, id: BlockId) -> Option<BlockType> {
-        if id.layer > self.terrain.get_height(id.face, id.u, id.v) {
+        let height = self.terrain.get_height(id.face, id.u, id.v);
+        let def = self.planet_type.def();
+        let effective_height = if def.liquid.is_none() {
+            height.max(self.terrain.sea_level())
+        } else {
+            height
+        };
+        if id.layer > effective_height {
             return None;
+        }
+        if id.layer > height {
+            // filled-in liquid-less "ocean": solid, but it's the beach material, not real terrain depth
+            return Some(def.palette.beach);
         }
         Some(material::natural_type(
             &self.terrain,
+            &def.palette,
             self.has_core,
             id.face,
             id.u,
             id.v,
             id.layer,
         ))
+    }
+
+    // the BlockType at `pos`'s column, at the layer pos itself sits in (for "what is the player
+    // standing on" checks — entity.rs's slippery-ice friction)
+    pub fn ground_block(&self, pos: glam::Vec3) -> Option<BlockType> {
+        let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
+        self.block_type(id)
     }
 }
 
@@ -288,5 +322,109 @@ impl Frustum {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::biome::PlanetType;
+
+    // res 32: small enough to generate fast in a test, large enough that continent noise
+    // reliably produces both land and ocean columns
+    const TEST_RES: u32 = 32;
+
+    fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {
+        let sea = planet.terrain.sea_level();
+        for face in 0..6u8 {
+            for u in 0..planet.resolution {
+                for v in 0..planet.resolution {
+                    if planet.terrain.get_height(face, u, v) < sea {
+                        return (face, u, v);
+                    }
+                }
+            }
+        }
+        panic!(
+            "test planet at res {} has no underwater column",
+            planet.resolution
+        );
+    }
+
+    #[test]
+    fn earth_like_ocean_column_is_not_solid_at_sea_level() {
+        let planet = PlanetData::new(TEST_RES);
+        let (face, u, v) = first_underwater_column(&planet);
+        let sea = planet.terrain.sea_level();
+        assert!(!planet.exists(BlockId {
+            face,
+            u,
+            v,
+            layer: sea
+        }));
+    }
+
+    #[test]
+    fn ice_planet_ocean_column_is_solid_ice_at_sea_level() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet.switch_planet_type(PlanetType::Ice);
+        let (face, u, v) = first_underwater_column(&planet);
+        let sea = planet.terrain.sea_level();
+        let id = BlockId {
+            face,
+            u,
+            v,
+            layer: sea,
+        };
+        assert!(planet.exists(id));
+        assert_eq!(planet.block_type(id), Some(crate::material::BlockType::Ice));
+    }
+
+    #[test]
+    fn water_depth_is_none_on_ice_planets() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let (face, u, v) = first_underwater_column(&planet);
+        let sea = planet.terrain.sea_level();
+        let pos = crate::gen::CoordSystem::get_vertex_pos(face, u, v, sea, planet.resolution);
+        assert!(
+            planet.water_depth(pos).is_some(),
+            "sanity check: Earth-like should report a depth here"
+        );
+
+        planet.switch_planet_type(PlanetType::Ice);
+        assert!(planet.water_depth(pos).is_none());
+    }
+
+    #[test]
+    fn switch_planet_type_clears_edits_but_keeps_terrain_shape() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let id = BlockId {
+            face: 0,
+            u: 5,
+            v: 5,
+            layer: planet.terrain.sea_level() + 50,
+        };
+        planet.add_block(id, crate::material::BlockType::Stone);
+        assert!(planet.chunks.values().any(|m| !m.placed.is_empty()));
+
+        let height_before = planet.terrain.get_height(0, 5, 5);
+        planet.switch_planet_type(PlanetType::Volcanic);
+        assert!(planet
+            .chunks
+            .values()
+            .all(|m| m.placed.is_empty() && m.mined.is_empty()));
+        assert_eq!(planet.terrain.get_height(0, 5, 5), height_before);
+        assert_eq!(planet.planet_type, PlanetType::Volcanic);
+    }
+
+    #[test]
+    fn ground_block_finds_the_surface_material_under_a_position() {
+        let planet = PlanetData::new(TEST_RES);
+        // somewhere well above sea level, away from the ocean scan above
+        let face = 0;
+        let (u, v) = (planet.resolution / 2, planet.resolution / 2);
+        let h = planet.terrain.get_height(face, u, v);
+        let pos = crate::gen::CoordSystem::get_vertex_pos(face, u, v, h, planet.resolution);
+        assert!(planet.ground_block(pos).is_some());
     }
 }

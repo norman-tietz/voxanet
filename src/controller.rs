@@ -123,7 +123,7 @@ impl Controller {
         &mut self,
         event: &WindowEvent,
         _player: &mut Player,
-        _planet: &PlanetData,
+        planet: &PlanetData,
     ) -> bool {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
@@ -175,7 +175,8 @@ impl Controller {
                             KeyCode::Digit4 => 3,
                             _ => 4,
                         };
-                        self.selected_block = BlockType::PLACEABLE[i];
+                        self.selected_block =
+                            crate::material::placeable(&planet.planet_type.def().palette)[i];
                         return true;
                     }
 

@@ -2,6 +2,7 @@
 // Block types, and the natural type of every terrain block: chosen from the column's height within the
 // planet's height range, the local slope and a little per-column jitter so material borders are ragged.
 
+use crate::biome::Palette;
 use crate::noise::PlanetTerrain;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -20,15 +21,6 @@ pub enum BlockType {
 }
 
 impl BlockType {
-    // selectable with the number keys 1..
-    pub const PLACEABLE: [BlockType; 5] = [
-        BlockType::Grass,
-        BlockType::Dirt,
-        BlockType::Sand,
-        BlockType::Stone,
-        BlockType::Snow,
-    ];
-
     pub fn color(self) -> [f32; 3] {
         match self {
             BlockType::Grass => [0.1, 0.7, 0.1],
@@ -109,7 +101,13 @@ fn jitter(face: u8, u: u32, v: u32) -> f32 {
 }
 
 // the type of the top block of a column
-pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockType {
+pub fn surface_type(
+    terrain: &PlanetTerrain,
+    palette: &Palette,
+    face: u8,
+    u: u32,
+    v: u32,
+) -> BlockType {
     let h = terrain.get_height(face, u, v);
     let sea = terrain.sea_level() as f32;
     let peak = (terrain.height_range().1 as f32 - sea).max(1.0);
@@ -127,19 +125,20 @@ pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockT
     let steep = neighbours.iter().any(|&n| h >= n + STEEP);
 
     if rel >= SNOW_LINE {
-        BlockType::Snow
+        palette.peak
     } else if steep || rel >= ROCK_LINE {
-        BlockType::Stone
+        palette.rock
     } else if above_sea <= beach * (1.0 + 0.5 * j) {
-        BlockType::Sand
+        palette.beach
     } else {
-        BlockType::Grass
+        palette.ground
     }
 }
 
 // the natural type of a terrain block (layer <= column height)
 pub fn natural_type(
     terrain: &PlanetTerrain,
+    palette: &Palette,
     has_core: bool,
     face: u8,
     u: u32,
@@ -150,18 +149,83 @@ pub fn natural_type(
         return BlockType::Bedrock;
     }
     let depth = terrain.get_height(face, u, v).saturating_sub(layer);
-    let surface = surface_type(terrain, face, u, v);
+    let surface = surface_type(terrain, palette, face, u, v);
     match (depth, surface) {
         (0, s) => s,
-        (d, BlockType::Grass) if d <= SOIL_DEPTH => BlockType::Dirt,
-        (d, BlockType::Sand) if d <= SOIL_DEPTH => BlockType::Sand,
-        _ => BlockType::Stone,
+        (d, s) if s == palette.ground && d <= SOIL_DEPTH => palette.subsurface,
+        (d, s) if s == palette.beach && d <= SOIL_DEPTH => palette.beach,
+        _ => palette.rock,
     }
+}
+
+// selectable with the number keys 1.. on the active planet type
+pub fn placeable(palette: &Palette) -> [BlockType; 5] {
+    [
+        palette.ground,
+        palette.subsurface,
+        palette.beach,
+        palette.rock,
+        palette.peak,
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn earth_palette() -> Palette {
+        crate::biome::PlanetType::EarthLike.def().palette
+    }
+
+    fn ice_palette() -> Palette {
+        crate::biome::PlanetType::Ice.def().palette
+    }
+
+    #[test]
+    fn earth_like_palette_reproduces_grass_sand_stone_snow() {
+        // a tiny deterministic terrain: res 16 is enough to hit every band at some column
+        let terrain = PlanetTerrain::new(16);
+        let palette = earth_palette();
+        let mut seen = std::collections::HashSet::new();
+        for u in 0..16 {
+            for v in 0..16 {
+                seen.insert(surface_type(&terrain, &palette, 0, u, v));
+            }
+        }
+        // not asserting exact coverage of all four (terrain is random), just that nothing
+        // outside the Earth-like palette's roles ever comes out
+        for ty in &seen {
+            assert!([
+                BlockType::Grass,
+                BlockType::Sand,
+                BlockType::Stone,
+                BlockType::Snow
+            ]
+            .contains(ty));
+        }
+    }
+
+    #[test]
+    fn ice_palette_never_produces_grass() {
+        let terrain = PlanetTerrain::new(16);
+        let palette = ice_palette();
+        for u in 0..16 {
+            for v in 0..16 {
+                assert_ne!(surface_type(&terrain, &palette, 0, u, v), BlockType::Grass);
+            }
+        }
+    }
+
+    #[test]
+    fn placeable_follows_the_active_palette() {
+        // `placeable()` returns [ground, subsurface, beach, rock, peak] for the active palette.
+        // Earth-like's "ground" role is Grass, so it leads the array; Ice's "ground" role is
+        // Stone (there's no grass to walk on), but Ice itself is still selectable from the
+        // palette's beach role (brief's draft test asserted `[0] == Ice`, which contradicts the
+        // brief's own field order below — fixed here to check presence instead of position).
+        assert_eq!(placeable(&earth_palette())[0], BlockType::Grass);
+        assert!(placeable(&ice_palette()).contains(&BlockType::Ice));
+    }
 
     #[test]
     fn new_biome_block_types_have_names_and_colors() {

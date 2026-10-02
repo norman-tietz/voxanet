@@ -733,6 +733,7 @@ impl MeshGen {
                 let h = data.terrain.get_height(key.face, su, sv);
                 let surface = crate::material::natural_type(
                     &data.terrain,
+                    &data.planet_type.def().palette,
                     data.has_core,
                     key.face,
                     su,

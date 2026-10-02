@@ -23,7 +23,6 @@ use crate::cmd::Console;
 use crate::common::PlanetData;
 use crate::controller::Controller;
 use crate::entity::Player;
-use crate::material::BlockType;
 use crate::renderer::Renderer;
 use crate::system_diagnostics::SystemDiagnostics;
 use std::sync::Arc;
@@ -249,10 +248,10 @@ impl Game {
                     if let Some(id) = controller.cursor_id {
                         if button == MouseButton::Middle {
                             // pick the targeted block's type for placing (the bedrock core isn't placeable)
-                            if let Some(ty) = planet
-                                .block_type(id)
-                                .filter(|ty| BlockType::PLACEABLE.contains(ty))
-                            {
+                            if let Some(ty) = planet.block_type(id).filter(|ty| {
+                                crate::material::placeable(&planet.planet_type.def().palette)
+                                    .contains(ty)
+                            }) {
                                 controller.selected_block = ty;
                             }
                         } else if is_right {
