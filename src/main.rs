@@ -57,7 +57,7 @@ struct Game {
     planet: PlanetData,
     console: Console,
     last_time: Instant,
-    current_mode_first_person: bool,
+    current_cursor_locked: bool,
 }
 
 impl Game {
@@ -82,21 +82,23 @@ impl Game {
 
         player.spawn(glam::Vec3::new(0.0, spawn_h, 0.0));
 
-        Self { renderer, controller, player, planet, console, last_time: Instant::now(), current_mode_first_person: false }
+        Self { renderer, controller, player, planet, console, last_time: Instant::now(), current_cursor_locked: false } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
     // runs before every event is handled
     fn tick(&mut self) {
-        let Self { renderer, controller, player, planet, console, last_time, current_mode_first_person } = self;
+        let Self { renderer, controller, player, planet, console, last_time, current_cursor_locked } = self;
 
         let now = Instant::now();
         let dt = (now - *last_time).as_secs_f32();
         *last_time = now;
 
-        // cursor locking logic
-        if controller.first_person != *current_mode_first_person {
-            *current_mode_first_person = controller.first_person;
-            if *current_mode_first_person {
+        // cursor locking logic: locked only in first person, and only while the mouse hasn't been
+        // explicitly released (Escape) without leaving first person
+        let want_locked = controller.first_person && !controller.mouse_released;
+        if want_locked != *current_cursor_locked {
+            *current_cursor_locked = want_locked;
+            if *current_cursor_locked {
                 let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
                 renderer.window.set_cursor_visible(false);
             } else {
@@ -201,6 +203,12 @@ impl Game {
             WindowEvent::Resized(size) => renderer.resize(size.width, size.height),
 
             WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+              if controller.first_person && controller.mouse_released {
+                  // recapture takes priority: don't also mine/place on the click that brings the mouse back
+                  controller.mouse_released = false;
+                  let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
+                  renderer.window.set_cursor_visible(false);
+              } else {
                 let is_right = button == MouseButton::Right;
                 if let Some(id) = controller.cursor_id {
                      if button == MouseButton::Middle {
@@ -221,10 +229,12 @@ impl Game {
                     renderer.window.request_redraw();
                 } else {
                     if controller.first_person {
+                        controller.mouse_released = false;
                         let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
                         renderer.window.set_cursor_visible(false);
                     }
                 }
+              }
             },
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {

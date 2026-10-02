@@ -43,6 +43,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, 10× while flying) |
 | `F` | Toggle fly mode (first person only; fly in the direction you look) |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
+| `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
 
 ### Swimming

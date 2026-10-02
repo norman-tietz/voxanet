@@ -29,8 +29,9 @@ pub struct Controller {
 
     
     pub first_person: bool,
-    
-    
+    pub mouse_released: bool, // Escape toggles this: free the cursor without leaving first person
+
+
     keys: [bool; 7], // W, A, S, D, Space, Q, E
     pub selected_block: BlockType, // what right-click places
 }
@@ -49,6 +50,7 @@ impl Controller {
             freeze_culling: false,
             sprint: false,
             first_person: true,
+            mouse_released: false,
             keys: [false; 7],
             selected_block: BlockType::Dirt,
         }
@@ -72,7 +74,7 @@ impl Controller {
         if self.keys[5] { turn += TURN_SPEED * dt; } // Q
         if self.keys[6] { turn -= TURN_SPEED * dt; } // E
 
-        let rotation_delta = if self.first_person { self.mouse_delta } else { (0.0, 0.0) };
+        let rotation_delta = if self.first_person && !self.mouse_released { self.mouse_delta } else { (0.0, 0.0) };
 
         
 
@@ -96,7 +98,7 @@ impl Controller {
 
 
     pub fn process_mouse_motion(&mut self, delta: (f64, f64)) {
-        if self.first_person {
+        if self.first_person && !self.mouse_released {
             // accumulate raw mouse delta
             self.mouse_delta.0 += delta.0 as f32;
             self.mouse_delta.1 += delta.1 as f32;
@@ -173,10 +175,18 @@ impl Controller {
                     
                     PhysicalKey::Code(KeyCode::KeyK) if pressed => {
                         self.first_person = !self.first_person;
-                     
-                        
-                        if self.first_person { self.cam_dist = 40.0; } 
+                        self.mouse_released = false; // always re-enter first person with the mouse captured
+
+
+                        if self.first_person { self.cam_dist = 40.0; }
                         else { self.cam_dist = 100.0; }
+                        return true;
+                    }
+
+                    PhysicalKey::Code(KeyCode::Escape) if pressed => {
+                        if self.first_person {
+                            self.mouse_released = !self.mouse_released;
+                        }
                         return true;
                     }
                     
