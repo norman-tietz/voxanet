@@ -14,7 +14,7 @@ use std::time::Instant;
 // measured parts of a frame; each has a begin and an end timestamp (query 2i and 2i + 1)
 pub const PARTS: [&str; 5] = ["Geometry", "Rays", "Blur", "Lighting", "Text"];
 pub const GEOMETRY: usize = 0; // deferred G-buffer pass (all scene geometry)
-pub const RAYS: usize = 1;     // shadow G-buffer downsample + shadow compute pass (ray march or hardware rays)
+pub const RAYS: usize = 1; // shadow G-buffer downsample + shadow compute pass (ray march or hardware rays)
 pub const BLUR: usize = 2;
 pub const LIGHTING: usize = 3; // per-pixel lighting + forward overlays
 pub const TEXT: usize = 4;
@@ -46,12 +46,29 @@ impl GpuTimer {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("GPU Timer"), ty: wgpu::QueryType::Timestamp, count: QUERIES });
-        let buffer = |label, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: BYTES, usage, mapped_at_creation: false });
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("GPU Timer"),
+            ty: wgpu::QueryType::Timestamp,
+            count: QUERIES,
+        });
+        let buffer = |label, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: BYTES,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
         Some(Self {
             query_set,
-            resolve_buf: buffer("GPU Timer Resolve", wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
-            readback_buf: buffer("GPU Timer Readback", wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ),
+            resolve_buf: buffer(
+                "GPU Timer Resolve",
+                wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            ),
+            readback_buf: buffer(
+                "GPU Timer Readback",
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ),
             mapped: Arc::new(AtomicBool::new(false)),
             in_flight: false,
             copied: false,
@@ -64,7 +81,12 @@ impl GpuTimer {
     }
 
     // timestamp writes for a render pass: the begin and/or end of `part`
-    pub fn writes(&self, part: usize, begin: bool, end: bool) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    pub fn writes(
+        &self,
+        part: usize,
+        begin: bool,
+        end: bool,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: begin.then_some(2 * part as u32),
@@ -72,7 +94,12 @@ impl GpuTimer {
         })
     }
 
-    pub fn compute_writes(&self, part: usize, begin: bool, end: bool) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+    pub fn compute_writes(
+        &self,
+        part: usize,
+        begin: bool,
+        end: bool,
+    ) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
         Some(wgpu::ComputePassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: begin.then_some(2 * part as u32),
@@ -91,12 +118,17 @@ impl GpuTimer {
 
     // call after the frame is submitted
     pub fn after_submit(&mut self) {
-        if !self.copied { return; }
+        if !self.copied {
+            return;
+        }
         self.in_flight = true;
         let mapped = self.mapped.clone();
-        self.readback_buf.map_async(wgpu::MapMode::Read, .., move |result| {
-            if result.is_ok() { mapped.store(true, Ordering::Release); }
-        });
+        self.readback_buf
+            .map_async(wgpu::MapMode::Read, .., move |result| {
+                if result.is_ok() {
+                    mapped.store(true, Ordering::Release);
+                }
+            });
     }
 
     // call once per frame: collects a finished readback and updates the averages every second
@@ -106,8 +138,14 @@ impl GpuTimer {
             if let Ok(view) = self.readback_buf.get_mapped_range(..) {
                 let ticks: &[u64] = bytemuck::cast_slice(&view);
                 for part in 0..PARTS.len() {
-                    let start = if part == 0 { ticks[0] } else { ticks[2 * part - 1] }; // previous part's end
-                    self.sums_ms[part] += ticks[2 * part + 1].saturating_sub(start) as f64 * self.period_ns as f64 / 1e6;
+                    let start = if part == 0 {
+                        ticks[0]
+                    } else {
+                        ticks[2 * part - 1]
+                    }; // previous part's end
+                    self.sums_ms[part] += ticks[2 * part + 1].saturating_sub(start) as f64
+                        * self.period_ns as f64
+                        / 1e6;
                 }
                 self.samples += 1;
             }
@@ -126,7 +164,11 @@ impl GpuTimer {
 
     pub fn summary(&self) -> String {
         let total: f32 = self.average_ms.iter().sum();
-        let parts: Vec<String> = PARTS.iter().zip(self.average_ms).map(|(n, ms)| format!("{n:<8}{ms:6.2} ms")).collect();
+        let parts: Vec<String> = PARTS
+            .iter()
+            .zip(self.average_ms)
+            .map(|(n, ms)| format!("{n:<8}{ms:6.2} ms"))
+            .collect();
         format!("GPU     {total:6.2} ms\n{}", parts.join("\n"))
     }
 }

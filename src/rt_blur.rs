@@ -10,9 +10,9 @@
 // Shadows cost per texel, so these targets are capped at MAX_RT_PIXELS: on large screens the shadow
 // term is computed at a lower resolution and upsampled depth-aware.
 
+use crate::gpu_timer::{self, GpuTimer};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
-use crate::gpu_timer::{self, GpuTimer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const POS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float; // positions need f32 precision
@@ -22,8 +22,13 @@ pub const MAX_RT_PIXELS: f32 = 1.5e6;
 
 // size of the shadow targets for a screen size, keeping the aspect ratio
 fn rt_size(width: u32, height: u32) -> (u32, u32) {
-    let scale = (MAX_RT_PIXELS / (width.max(1) * height.max(1)) as f32).sqrt().min(1.0);
-    (((width as f32 * scale).round() as u32).max(1), ((height as f32 * scale).round() as u32).max(1))
+    let scale = (MAX_RT_PIXELS / (width.max(1) * height.max(1)) as f32)
+        .sqrt()
+        .min(1.0);
+    (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
 }
 
 // must match BlurParams in blur.wgsl
@@ -74,130 +79,303 @@ impl RtBlur {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
                 count: None,
             }],
         })
     }
 
     // `global_layout` is group 0 of the scene (cs_march reads the camera, sun and ray-march data from it)
-    pub fn new(device: &wgpu::Device, sample_layout: wgpu::BindGroupLayout, global_layout: &wgpu::BindGroupLayout, scene_shader: &wgpu::ShaderModule, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        sample_layout: wgpu::BindGroupLayout,
+        global_layout: &wgpu::BindGroupLayout,
+        scene_shader: &wgpu::ShaderModule,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
-            binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
-            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            count: None,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
         };
         let march_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("march_layout"),
             entries: &[
                 tex_entry(0),
                 tex_entry(1),
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, count: None, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: FORMAT, view_dimension: wgpu::TextureViewDimension::D2 } },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    count: None,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                },
             ],
         });
         let march_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Shadow March Pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(global_layout), None, None, Some(&march_layout)], immediate_size: 0 })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(global_layout), None, None, Some(&march_layout)],
+                    immediate_size: 0,
+                }),
+            ),
             module: scene_shader,
             entry_point: Some("cs_march"),
             compilation_options: Default::default(),
             cache: None,
         });
 
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blur"), source: wgpu::ShaderSource::Wgsl(include_str!("blur.wgsl").into()) });
+        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blur"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blur.wgsl").into()),
+        });
         let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blur_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
         });
-        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&blur_layout)], immediate_size: 0 });
+        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&blur_layout)],
+            immediate_size: 0,
+        });
         let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RT Blur Pipeline"),
             layout: Some(&blur_pipeline_layout),
-            vertex: wgpu::VertexState { module: &blur_shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
-            fragment: Some(wgpu::FragmentState { module: &blur_shader, entry_point: Some("fs_blur"), compilation_options: Default::default(), targets: &[Some(FORMAT.into())] }),
+            vertex: wgpu::VertexState {
+                module: &blur_shader,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blur_shader,
+                entry_point: Some("fs_blur"),
+                compilation_options: Default::default(),
+                targets: &[Some(FORMAT.into())],
+            }),
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
-            multiview_mask: None, cache: None,
+            multiview_mask: None,
+            cache: None,
         });
 
-        let params = |dir: [f32; 2]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Blur Params"),
-            contents: bytemuck::cast_slice(&[BlurParams { dir, focal: 1.0, width: PENUMBRA_WIDTH }]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let params = |dir: [f32; 2]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Blur Params"),
+                contents: bytemuck::cast_slice(&[BlurParams {
+                    dir,
+                    focal: 1.0,
+                    width: PENUMBRA_WIDTH,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        };
         let params_h = params([1.0, 0.0]);
         let params_v = params([0.0, 1.0]);
 
         let size = rt_size(width, height);
-        let t = Self::make_targets(device, &sample_layout, &blur_layout, &march_layout, &params_h, &params_v, size.0, size.1);
+        let t = Self::make_targets(
+            device,
+            &sample_layout,
+            &blur_layout,
+            &march_layout,
+            &params_h,
+            &params_v,
+            size.0,
+            size.1,
+        );
         Self {
-            size, target: t.target, g_pos: t.g_pos, g_nrm: t.g_nrm, march_pipeline, march_layout, march_bind: t.march_bind,
-            tmp: t.tmp, out: t.out, sample_layout, sample_bind: t.sample_bind, blur_layout, blur_pipeline, params_h, params_v, bind_h: t.bind_h, bind_v: t.bind_v,
+            size,
+            target: t.target,
+            g_pos: t.g_pos,
+            g_nrm: t.g_nrm,
+            march_pipeline,
+            march_layout,
+            march_bind: t.march_bind,
+            tmp: t.tmp,
+            out: t.out,
+            sample_layout,
+            sample_bind: t.sample_bind,
+            blur_layout,
+            blur_pipeline,
+            params_h,
+            params_v,
+            bind_h: t.bind_h,
+            bind_v: t.bind_v,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn make_targets(device: &wgpu::Device, sample_layout: &wgpu::BindGroupLayout, blur_layout: &wgpu::BindGroupLayout, march_layout: &wgpu::BindGroupLayout, params_h: &wgpu::Buffer, params_v: &wgpu::Buffer, width: u32, height: u32) -> Targets {
-        let size = wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 };
-        let tex = |format: wgpu::TextureFormat, usage: wgpu::TextureUsages| device.create_texture(&wgpu::TextureDescriptor {
-            label: None, size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[],
-        }).create_view(&wgpu::TextureViewDescriptor::default());
+    fn make_targets(
+        device: &wgpu::Device,
+        sample_layout: &wgpu::BindGroupLayout,
+        blur_layout: &wgpu::BindGroupLayout,
+        march_layout: &wgpu::BindGroupLayout,
+        params_h: &wgpu::Buffer,
+        params_v: &wgpu::Buffer,
+        width: u32,
+        height: u32,
+    ) -> Targets {
+        let size = wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        };
+        let tex = |format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
         let color = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let target = tex(FORMAT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING); // written by compute
-        let shadow_gbuf = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING; // written by cs_gbuf_down
+        let target = tex(
+            FORMAT,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        ); // written by compute
+        let shadow_gbuf =
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING; // written by cs_gbuf_down
         let g_pos = tex(POS_FORMAT, shadow_gbuf);
         let g_nrm = tex(NRM_FORMAT, shadow_gbuf);
         let tmp = tex(FORMAT, color);
         let out = tex(FORMAT, color);
 
         let sample_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt_sample_bind"), layout: sample_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&out) }],
+            label: Some("rt_sample_bind"),
+            layout: sample_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&out),
+            }],
         });
-        let blur_bind = |src: &wgpu::TextureView, params: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("blur_bind"), layout: blur_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
-            ],
-        });
+        let blur_bind = |src: &wgpu::TextureView, params: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("blur_bind"),
+                layout: blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: params.as_entire_binding(),
+                    },
+                ],
+            })
+        };
         let bind_h = blur_bind(&target, params_h);
         let bind_v = blur_bind(&tmp, params_v);
         let march_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("march_bind"), layout: march_layout,
+            label: Some("march_bind"),
+            layout: march_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&g_pos) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&g_nrm) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&target) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&g_pos),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&g_nrm),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&target),
+                },
             ],
         });
-        Targets { target, g_pos, g_nrm, march_bind, tmp, out, sample_bind, bind_h, bind_v }
+        Targets {
+            target,
+            g_pos,
+            g_nrm,
+            march_bind,
+            tmp,
+            out,
+            sample_bind,
+            bind_h,
+            bind_v,
+        }
     }
 
     // width/height: the screen size
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.size = rt_size(width, height);
-        let t = Self::make_targets(device, &self.sample_layout, &self.blur_layout, &self.march_layout, &self.params_h, &self.params_v, self.size.0, self.size.1);
-        (self.target, self.g_pos, self.g_nrm, self.march_bind) = (t.target, t.g_pos, t.g_nrm, t.march_bind);
-        (self.tmp, self.out, self.sample_bind, self.bind_h, self.bind_v) = (t.tmp, t.out, t.sample_bind, t.bind_h, t.bind_v);
+        let t = Self::make_targets(
+            device,
+            &self.sample_layout,
+            &self.blur_layout,
+            &self.march_layout,
+            &self.params_h,
+            &self.params_v,
+            self.size.0,
+            self.size.1,
+        );
+        (self.target, self.g_pos, self.g_nrm, self.march_bind) =
+            (t.target, t.g_pos, t.g_nrm, t.march_bind);
+        (
+            self.tmp,
+            self.out,
+            self.sample_bind,
+            self.bind_h,
+            self.bind_v,
+        ) = (t.tmp, t.out, t.sample_bind, t.bind_h, t.bind_v);
     }
 
     // ray-marched shadow term, one invocation per texel (cs_march); global_bind: group 0 of the scene
-    pub fn march(&self, enc: &mut wgpu::CommandEncoder, global_bind: &wgpu::BindGroup, timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>) {
-        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Shadow March Pass"), timestamp_writes });
+    pub fn march(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        global_bind: &wgpu::BindGroup,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Shadow March Pass"),
+            timestamp_writes,
+        });
         pass.set_pipeline(&self.march_pipeline);
         pass.set_bind_group(0, global_bind, &[]);
         pass.set_bind_group(3, &self.march_bind, &[]);
@@ -208,20 +386,44 @@ impl RtBlur {
     pub fn set_fov(&self, queue: &wgpu::Queue, fov_y: f32) {
         let focal = self.size.1 as f32 * 0.5 / (fov_y * 0.5).tan(); // pixels per world unit at distance 1
         for (buf, dir) in [(&self.params_h, [1.0, 0.0]), (&self.params_v, [0.0, 1.0])] {
-            queue.write_buffer(buf, 0, bytemuck::cast_slice(&[BlurParams { dir, focal, width: PENUMBRA_WIDTH }]));
+            queue.write_buffer(
+                buf,
+                0,
+                bytemuck::cast_slice(&[BlurParams {
+                    dir,
+                    focal,
+                    width: PENUMBRA_WIDTH,
+                }]),
+            );
         }
     }
 
     pub fn clear_ops() -> wgpu::Operations<wgpu::Color> {
-        wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store }
+        wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }),
+            store: wgpu::StoreOp::Store,
+        }
     }
 
     // timer: the horizontal pass writes the blur's begin timestamp, the vertical pass its end
     pub fn blur(&self, enc: &mut wgpu::CommandEncoder, timer: Option<&GpuTimer>) {
-        for (i, (dst, bind)) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)].into_iter().enumerate() {
+        for (i, (dst, bind)) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)]
+            .into_iter()
+            .enumerate()
+        {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("RT Blur Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { depth_slice: None, view: dst, resolve_target: None, ops: Self::clear_ops() })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
+                    view: dst,
+                    resolve_target: None,
+                    ops: Self::clear_ops(),
+                })],
                 depth_stencil_attachment: None,
                 timestamp_writes: timer.and_then(|t| t.writes(gpu_timer::BLUR, i == 0, i == 1)),
                 occlusion_query_set: None,

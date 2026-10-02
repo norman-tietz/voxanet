@@ -1,6 +1,6 @@
-use glam::Vec3;
 use crate::gen::CoordSystem;
-use std::sync::Arc; 
+use glam::Vec3;
+use std::sync::Arc;
 
 // --- TERRAIN SHAPE ---
 // Heights are layers relative to sea level (layer res/2). Continents and mountain ranges are sized
@@ -9,8 +9,8 @@ use std::sync::Arc;
 // unit thick at any size, so on small planets a fixed number of layers would be huge spikes and pits.
 
 struct TerrainShape {
-    relief: f32,      // highest mountains above sea level, in layers
-    hill_freq: f32,   // noise frequencies on the unit sphere (cycles per radian)
+    relief: f32,    // highest mountains above sea level, in layers
+    hill_freq: f32, // noise frequencies on the unit sphere (cycles per radian)
     ridge_freq: f32,
     range_freq: f32,
 }
@@ -38,12 +38,22 @@ impl TerrainShape {
             0.12 * self.relief * smoothstep(0.0, 0.12, c) // lowlands rise inland
         };
 
-        let hills = g.fbm(dir * self.hill_freq + Vec3::new(-5.3, 11.9, 2.4), 4) * 0.15 * self.relief * (0.4 + 0.6 * land);
+        let hills = g.fbm(dir * self.hill_freq + Vec3::new(-5.3, 11.9, 2.4), 4)
+            * 0.15
+            * self.relief
+            * (0.4 + 0.6 * land);
 
         // mountain ranges: ridged noise, only where the range mask is high and on land
-        let range = smoothstep(-0.05, 0.25, g.fbm(dir * self.range_freq + Vec3::new(8.8, -2.6, 31.5), 3)) * land;
+        let range = smoothstep(
+            -0.05,
+            0.25,
+            g.fbm(dir * self.range_freq + Vec3::new(8.8, -2.6, 31.5), 3),
+        ) * land;
         let mountains = if range > 0.0 {
-            g.ridged(dir * self.ridge_freq + Vec3::new(1.9, 23.3, -7.7), 5).powf(1.5) * self.relief * range
+            g.ridged(dir * self.ridge_freq + Vec3::new(1.9, 23.3, -7.7), 5)
+                .powf(1.5)
+                * self.relief
+                * range
         } else {
             0.0
         };
@@ -61,7 +71,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 
 pub struct PlanetTerrain {
     // Flattened height map
-    heights: Arc<Vec<u16>>, 
+    heights: Arc<Vec<u16>>,
     resolution: u32,
     height_range: (u32, u32), // lowest and highest column
     sea_level: u32,
@@ -76,14 +86,19 @@ impl PlanetTerrain {
         let mut heights = vec![0u16; (6 * resolution * resolution) as usize];
 
         // rows are independent, so generate them in parallel
-        heights.par_chunks_mut(resolution as usize).enumerate().for_each(|(row, out)| {
-            let face = (row as u32 / resolution) as u8;
-            let v = row as u32 % resolution;
-            for (u, h) in out.iter_mut().enumerate() {
-                let dir = CoordSystem::get_direction(face, u as u32, v, resolution);
-                *h = (sea_level as f32 + shape.height(&generator, dir)).round().max(1.0) as u16;
-            }
-        });
+        heights
+            .par_chunks_mut(resolution as usize)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let face = (row as u32 / resolution) as u8;
+                let v = row as u32 % resolution;
+                for (u, h) in out.iter_mut().enumerate() {
+                    let dir = CoordSystem::get_direction(face, u as u32, v, resolution);
+                    *h = (sea_level as f32 + shape.height(&generator, dir))
+                        .round()
+                        .max(1.0) as u16;
+                }
+            });
 
         let height_range = (
             heights.iter().copied().min().unwrap_or(0) as u32,
@@ -91,7 +106,12 @@ impl PlanetTerrain {
         );
 
         // Wrap in Arc for cheap cloning
-        Self { heights: Arc::new(heights), resolution, height_range, sea_level } 
+        Self {
+            heights: Arc::new(heights),
+            resolution,
+            height_range,
+            sea_level,
+        }
     }
 
     // the layer of the water surface: columns at or below it are sea floor
@@ -117,8 +137,7 @@ impl PlanetTerrain {
         let idx = Self::get_index(face, u_safe, v_safe, self.resolution);
         self.heights[idx] as u32
     }
-    
-    }
+}
 
 impl Clone for PlanetTerrain {
     fn clone(&self) -> Self {
@@ -130,7 +149,6 @@ impl Clone for PlanetTerrain {
         }
     }
 }
-
 
 // --- NOISE GENERATOR ---
 
@@ -184,12 +202,12 @@ impl NoiseGenerator {
     }
 
     // --- PERLIN MATH ---
-    
+
     fn perlin(&self, pos: Vec3) -> f32 {
         let x = pos.x.floor();
         let y = pos.y.floor();
         let z = pos.z.floor();
-        
+
         let xi = x as i32 & 255;
         let yi = y as i32 & 255;
         let zi = z as i32 & 255;
@@ -209,24 +227,57 @@ impl NoiseGenerator {
         let ba = self.perm[b] as usize + zi as usize;
         let bb = self.perm[b + 1] as usize + zi as usize;
 
-        lerp(w, lerp(v, lerp(u, grad(self.perm[aa], x, y, z),
-                                grad(self.perm[ba], x - 1.0, y, z)),
-                        lerp(u, grad(self.perm[ab], x, y - 1.0, z),
-                                grad(self.perm[bb], x - 1.0, y - 1.0, z))),
-                lerp(v, lerp(u, grad(self.perm[aa + 1], x, y, z - 1.0),
-                                grad(self.perm[ba + 1], x - 1.0, y, z - 1.0)),
-                        lerp(u, grad(self.perm[ab + 1], x, y - 1.0, z - 1.0),
-                                grad(self.perm[bb + 1], x - 1.0, y - 1.0, z - 1.0))))
+        lerp(
+            w,
+            lerp(
+                v,
+                lerp(
+                    u,
+                    grad(self.perm[aa], x, y, z),
+                    grad(self.perm[ba], x - 1.0, y, z),
+                ),
+                lerp(
+                    u,
+                    grad(self.perm[ab], x, y - 1.0, z),
+                    grad(self.perm[bb], x - 1.0, y - 1.0, z),
+                ),
+            ),
+            lerp(
+                v,
+                lerp(
+                    u,
+                    grad(self.perm[aa + 1], x, y, z - 1.0),
+                    grad(self.perm[ba + 1], x - 1.0, y, z - 1.0),
+                ),
+                lerp(
+                    u,
+                    grad(self.perm[ab + 1], x, y - 1.0, z - 1.0),
+                    grad(self.perm[bb + 1], x - 1.0, y - 1.0, z - 1.0),
+                ),
+            ),
+        )
     }
 }
 
 // ---MATH-HELPERS---
 
-fn fade(t: f32) -> f32 { t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
-fn lerp(t: f32, a: f32, b: f32) -> f32 { a + t * (b - a) }
+fn fade(t: f32) -> f32 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+fn lerp(t: f32, a: f32, b: f32) -> f32 {
+    a + t * (b - a)
+}
 fn grad(hash: u8, x: f32, y: f32, z: f32) -> f32 {
     let h = hash & 15;
     let u = if h < 8 { x } else { y };
-    let v = if h < 4 { y } else { if h == 12 || h == 14 { x } else { z } };
+    let v = if h < 4 {
+        y
+    } else {
+        if h == 12 || h == 14 {
+            x
+        } else {
+            z
+        }
+    };
     (if (h & 1) == 0 { u } else { -u }) + (if (h & 2) == 0 { v } else { -v })
 }

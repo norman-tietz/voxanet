@@ -3,13 +3,12 @@ use crate::entity::Player;
 pub struct Console {
     pub is_open: bool,
     pub input_buffer: String,
-    pub history: Vec<(String, [f32; 3])>, 
-    pub height_fraction: f32, 
+    pub history: Vec<(String, [f32; 3])>,
+    pub height_fraction: f32,
     pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
-    
-   
+
     history_capacity: usize,
 }
 
@@ -30,7 +29,6 @@ impl Console {
     pub fn toggle(&mut self) {
         self.is_open = !self.is_open;
         if self.is_open {
-            
             self.input_buffer.clear();
         }
     }
@@ -38,7 +36,7 @@ impl Console {
     pub fn log(&mut self, text: &str, color: [f32; 3]) {
         // print to actual terminal
         println!("{}", text);
-        
+
         if self.history.len() >= self.history_capacity {
             self.history.remove(0);
         }
@@ -46,7 +44,9 @@ impl Console {
     }
 
     pub fn handle_char(&mut self, c: char) {
-        if !self.is_open { return; }
+        if !self.is_open {
+            return;
+        }
         // filter control characters
         if !c.is_control() {
             self.input_buffer.push(c);
@@ -54,16 +54,20 @@ impl Console {
     }
 
     pub fn handle_backspace(&mut self) {
-        if !self.is_open { return; }
+        if !self.is_open {
+            return;
+        }
         self.input_buffer.pop();
     }
 
     pub fn submit(&mut self, player: &mut Player) {
-        if self.input_buffer.is_empty() { return; }
-        
+        if self.input_buffer.is_empty() {
+            return;
+        }
+
         let cmd = self.input_buffer.clone();
         self.log(&format!("> {}", cmd), [1.0, 1.0, 1.0]); // log
-        
+
         self.process_command(&cmd, player);
         self.input_buffer.clear();
     }
@@ -76,51 +80,56 @@ impl Console {
 
     fn process_command(&mut self, cmd_line: &str, player: &mut Player) {
         let parts: Vec<&str> = cmd_line.trim().split_whitespace().collect();
-        if parts.is_empty() { return; }
+        if parts.is_empty() {
+            return;
+        }
 
         let command = parts[0];
 
         match command {
             "/move_speed" => {
                 self.handle_property_command(parts, "move_speed", &mut player.move_speed);
-            },
+            }
             "/jump_force" => {
                 self.handle_property_command(parts, "jump_force", &mut player.jump_force);
-            },
-            
+            }
+
             "/debug_mode" => {
-                 if parts.len() < 3 || parts[1] != "set" {
+                if parts.len() < 3 || parts[1] != "set" {
                     self.log("Usage: /debug_mode set [true/false]", [1.0, 0.5, 0.0]);
                     return;
                 }
                 match parts[2] {
-                    "true" => { player.debug_mode = true; self.log("Debug Mode: ON", [0.0, 1.0, 0.0]); },
-                    "false" => { player.debug_mode = false; self.log("Debug Mode: OFF", [1.0, 0.0, 0.0]); },
+                    "true" => {
+                        player.debug_mode = true;
+                        self.log("Debug Mode: ON", [0.0, 1.0, 0.0]);
+                    }
+                    "false" => {
+                        player.debug_mode = false;
+                        self.log("Debug Mode: OFF", [1.0, 0.0, 0.0]);
+                    }
                     _ => self.log("Value must be true or false", [1.0, 0.0, 0.0]),
                 }
-            },
-         
-            "/hw_shadows" => {
-                match (parts.get(1), parts.get(2)) {
-                    (Some(&"set"), Some(&"true")) => self.hw_shadows_request = Some(true),
-                    (Some(&"set"), Some(&"false")) => self.hw_shadows_request = Some(false),
-                    _ => self.log("Usage: /hw_shadows set [true/false]", [1.0, 0.5, 0.0]),
-                }
+            }
+
+            "/hw_shadows" => match (parts.get(1), parts.get(2)) {
+                (Some(&"set"), Some(&"true")) => self.hw_shadows_request = Some(true),
+                (Some(&"set"), Some(&"false")) => self.hw_shadows_request = Some(false),
+                _ => self.log("Usage: /hw_shadows set [true/false]", [1.0, 0.5, 0.0]),
             },
 
-            "/view" => {
-                match (parts.get(1), parts.get(2)) {
-                    (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
-                    (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
-                    _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
-                }
+            "/view" => match (parts.get(1), parts.get(2)) {
+                (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
+                (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
+                _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
             },
 
-            "/screenshot" => {
-                match parts.get(1) {
-                    Some(path) => { self.screenshot_request = Some(path.to_string()); self.log("Capturing screenshot...", [0.0, 1.0, 0.0]); },
-                    None => self.log("Usage: /screenshot <path>", [1.0, 0.5, 0.0]),
+            "/screenshot" => match parts.get(1) {
+                Some(path) => {
+                    self.screenshot_request = Some(path.to_string());
+                    self.log("Capturing screenshot...", [0.0, 1.0, 0.0]);
                 }
+                None => self.log("Usage: /screenshot <path>", [1.0, 0.5, 0.0]),
             },
 
             "help" => {
@@ -128,10 +137,16 @@ impl Console {
                 self.log("  /debug_mode set true", [0.8, 0.8, 0.8]);
                 self.log("  /move_speed set {value}", [0.8, 0.8, 0.8]);
                 self.log("  /jump_force set {value}", [0.8, 0.8, 0.8]);
-                self.log("  /hw_shadows set true|false  (hardware ray-traced shadows)", [0.8, 0.8, 0.8]);
-                self.log("  /screenshot <path>  (save the current frame as PNG)", [0.8, 0.8, 0.8]);
+                self.log(
+                    "  /hw_shadows set true|false  (hardware ray-traced shadows)",
+                    [0.8, 0.8, 0.8],
+                );
+                self.log(
+                    "  /screenshot <path>  (save the current frame as PNG)",
+                    [0.8, 0.8, 0.8],
+                );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-            },
+            }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
             }
@@ -146,8 +161,11 @@ impl Console {
 
         match parts[1] {
             "get" => {
-                self.log(&format!("{} is currently: {:.2}", name, property), [0.0, 1.0, 0.0]);
-            },
+                self.log(
+                    &format!("{} is currently: {:.2}", name, property),
+                    [0.0, 1.0, 0.0],
+                );
+            }
             "set" => {
                 if parts.len() < 3 {
                     self.log(&format!("Usage: /{} set <value>", name), [1.0, 0.5, 0.0]);
@@ -157,14 +175,17 @@ impl Console {
                     Ok(val) => {
                         *property = val;
                         self.log(&format!("{} set to {:.2}", name, val), [0.0, 1.0, 0.0]);
-                    },
+                    }
                     Err(_) => {
                         self.log("Invalid number format.", [1.0, 0.0, 0.0]);
                     }
                 }
-            },
+            }
             _ => {
-                self.log(&format!("Unknown operation '{}'. Use set or get.", parts[1]), [1.0, 0.5, 0.0]);
+                self.log(
+                    &format!("Unknown operation '{}'. Use set or get.", parts[1]),
+                    [1.0, 0.5, 0.0],
+                );
             }
         }
     }

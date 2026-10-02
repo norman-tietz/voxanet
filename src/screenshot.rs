@@ -53,7 +53,9 @@ fn zlib_stored(raw: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&(!(chunk.len() as u16)).to_le_bytes());
         out.extend_from_slice(chunk);
         i = end;
-        if is_last { break; }
+        if is_last {
+            break;
+        }
     }
     out.extend_from_slice(&adler32(raw).to_be_bytes());
     out
@@ -82,7 +84,14 @@ fn encode_rgba8(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
 
 // nearest-neighbour downsample to at most `max_dim` on the long side, unpadding rows and swapping
 // BGRA -> RGBA if the swapchain format needs it; alpha is forced opaque (the swapchain's is meaningless)
-fn downsample_rgba(src: &[u8], width: u32, height: u32, padded_row: u32, bgra: bool, max_dim: u32) -> (u32, u32, Vec<u8>) {
+fn downsample_rgba(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    padded_row: u32,
+    bgra: bool,
+    max_dim: u32,
+) -> (u32, u32, Vec<u8>) {
     let scale = (max_dim as f32 / width.max(height) as f32).min(1.0);
     let out_w = ((width as f32 * scale).round() as u32).max(1);
     let out_h = ((height as f32 * scale).round() as u32).max(1);
@@ -109,7 +118,15 @@ fn downsample_rgba(src: &[u8], width: u32, height: u32, padded_row: u32, bgra: b
 }
 
 // copies `texture` (the current swapchain texture, still valid until it's presented) to a PNG at `path`
-pub fn capture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, format: wgpu::TextureFormat, width: u32, height: u32, path: &str) {
+pub fn capture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    path: &str,
+) {
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded = unpadded.div_ceil(align) * align;
@@ -121,28 +138,56 @@ pub fn capture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Textu
         mapped_at_creation: false,
     });
 
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Screenshot Copy") });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Screenshot Copy"),
+    });
     enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) } },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit(std::iter::once(enc.finish()));
 
     let mapped = Arc::new(AtomicBool::new(false));
     let mapped2 = mapped.clone();
     buf.map_async(wgpu::MapMode::Read, .., move |result| {
-        if result.is_ok() { mapped2.store(true, Ordering::Release); }
+        if result.is_ok() {
+            mapped2.store(true, Ordering::Release);
+        }
     });
     loop {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        if mapped.load(Ordering::Acquire) { break; }
+        if mapped.load(Ordering::Acquire) {
+            break;
+        }
     }
 
-    let bgra = matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
     let (out_w, out_h, rgba) = match buf.get_mapped_range(..) {
         Ok(view) => downsample_rgba(&view, width, height, padded, bgra, 1280),
-        Err(e) => { println!("screenshot: readback map failed: {e}"); return; }
+        Err(e) => {
+            println!("screenshot: readback map failed: {e}");
+            return;
+        }
     };
     buf.unmap();
 

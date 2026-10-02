@@ -1,9 +1,9 @@
 //common.rs
 
-use std::collections::{HashMap, HashSet};
-use bytemuck::{Pod, Zeroable};
-use crate::noise::PlanetTerrain;
 use crate::material::{self, BlockType};
+use crate::noise::PlanetTerrain;
+use bytemuck::{Pod, Zeroable};
+use std::collections::{HashMap, HashSet};
 
 // --- CONSTANTS ---
 pub const CHUNK_SIZE: u32 = 32;
@@ -12,16 +12,16 @@ pub const CHUNK_SIZE: u32 = 32;
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct BlockId {
-    pub face: u8, 
-    pub layer: u32, 
-    pub u: u32, 
+    pub face: u8,
+    pub layer: u32,
+    pub u: u32,
     pub v: u32,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct ChunkKey {
-    pub face: u8, 
-    pub u_idx: u32, 
+    pub face: u8,
+    pub u_idx: u32,
     pub v_idx: u32,
 }
 
@@ -53,34 +53,32 @@ pub struct WaterMesh {
     pub num_inds: u32,
 }
 
-
-
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct LodKey {
     pub face: u8,
-    pub x: u32,      
-    pub y: u32,      
-    pub size: u32,   
+    pub x: u32,
+    pub y: u32,
+    pub size: u32,
 }
 
-
-#[derive(Clone)] 
+#[derive(Clone)]
 pub struct ChunkMods {
     pub mined: HashSet<BlockId>,
     pub placed: HashMap<BlockId, BlockType>,
 }
 
-
-
 impl ChunkMods {
     pub fn new() -> Self {
-        Self { mined: HashSet::new(), placed: HashMap::new() }
+        Self {
+            mined: HashSet::new(),
+            placed: HashMap::new(),
+        }
     }
 }
 
-#[derive(Clone)] 
+#[derive(Clone)]
 pub struct PlanetData {
-    pub chunks: HashMap<ChunkKey, ChunkMods>, 
+    pub chunks: HashMap<ChunkKey, ChunkMods>,
     pub resolution: u32,
     pub has_core: bool,
     pub terrain: crate::noise::PlanetTerrain,
@@ -91,7 +89,7 @@ impl PlanetData {
         println!("Generating Terrain Noise Map for res {}...", resolution);
         let terrain = PlanetTerrain::new(resolution); // calculate once
         println!("Terrain Generation Complete.");
-        
+
         Self {
             chunks: HashMap::new(),
             resolution,
@@ -100,24 +98,23 @@ impl PlanetData {
         }
     }
 
-pub fn resize(&mut self, increase: bool) {
+    pub fn resize(&mut self, increase: bool) {
         if increase {
             // multiply by 1.2
             // i use .max(self.resolution + 1) to ensure it always grows by at least 1 block
             let new_res = (self.resolution as f32 * 1.2) as u32;
-            self.resolution = new_res.max(self.resolution + 1).min(16384); 
+            self.resolution = new_res.max(self.resolution + 1).min(16384);
         } else {
             // divide by 1.2
             let new_res = (self.resolution as f32 / 1.2) as u32;
             self.resolution = new_res.max(8);
         }
-        
 
         self.chunks.clear();
-        
+
         // regenerate noise map for new resolution
         println!("Regenerating Terrain for new res {}...", self.resolution);
-        self.terrain = PlanetTerrain::new(self.resolution); 
+        self.terrain = PlanetTerrain::new(self.resolution);
     }
 
     fn get_chunk_key(id: BlockId) -> ChunkKey {
@@ -142,12 +139,12 @@ pub fn resize(&mut self, increase: bool) {
         }
     }
 
-pub fn remove_block(&mut self, id: BlockId) {
+    pub fn remove_block(&mut self, id: BlockId) {
         // protect the bottom 4 layers as the unbreakable core
         if self.has_core && id.layer < 6 {
-            return; 
+            return;
         }
-        
+
         let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v);
         let key = Self::get_chunk_key(id);
         let mods = self.chunks.entry(key).or_insert_with(ChunkMods::new);
@@ -157,14 +154,17 @@ pub fn remove_block(&mut self, id: BlockId) {
             mods.mined.insert(id);
         }
     }
-    
+
     pub fn exists(&self, id: BlockId) -> bool {
         let key = Self::get_chunk_key(id);
         if let Some(mods) = self.chunks.get(&key) {
-            if mods.placed.contains_key(&id) { return true; }
-            if mods.mined.contains(&id) { return false; }
+            if mods.placed.contains_key(&id) {
+                return true;
+            }
+            if mods.mined.contains(&id) {
+                return false;
+            }
         }
-        
 
         // instead of a flat floor, we check the pre-calculated noise map
         let height = self.terrain.get_height(id.face, id.u, id.v);
@@ -173,7 +173,14 @@ pub fn remove_block(&mut self, id: BlockId) {
 
     // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
     // is a column of the neighbouring face, found by continuing the line from the inner neighbour outward
-    pub fn neighbor_column(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> Option<(u8, u32, u32)> {
+    pub fn neighbor_column(
+        &self,
+        face: u8,
+        u: u32,
+        v: u32,
+        du: i32,
+        dv: i32,
+    ) -> Option<(u8, u32, u32)> {
         let res = self.resolution;
         let (nu, nv) = (u as i32 + du, v as i32 + dv);
         if nu >= 0 && nv >= 0 && nu < res as i32 && nv < res as i32 {
@@ -181,12 +188,19 @@ pub fn remove_block(&mut self, id: BlockId) {
         }
         let mid = res / 2;
         let here = crate::gen::CoordSystem::get_block_center(face, u, v, mid, res);
-        let inner = crate::gen::CoordSystem::get_block_center(face, (u as i32 - du) as u32, (v as i32 - dv) as u32, mid, res);
+        let inner = crate::gen::CoordSystem::get_block_center(
+            face,
+            (u as i32 - du) as u32,
+            (v as i32 - dv) as u32,
+            mid,
+            res,
+        );
         crate::gen::CoordSystem::pos_to_id(here * 2.0 - inner, res).map(|id| (id.face, id.u, id.v))
     }
 
     pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
-        self.neighbor_column(face, u, v, du, dv).map_or(0, |(f, nu, nv)| self.terrain.get_height(f, nu, nv))
+        self.neighbor_column(face, u, v, du, dv)
+            .map_or(0, |(f, nu, nv)| self.terrain.get_height(f, nu, nv))
     }
 
     pub fn chunk_key(id: BlockId) -> ChunkKey {
@@ -198,28 +212,40 @@ pub fn remove_block(&mut self, id: BlockId) {
     pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
         let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
         let sea = self.terrain.sea_level();
-        if self.terrain.get_height(id.face, id.u, id.v) >= sea { return None; }
+        if self.terrain.get_height(id.face, id.u, id.v) >= sea {
+            return None;
+        }
         Some(crate::gen::CoordSystem::get_layer_radius(sea + 1, self.resolution) - pos.length())
     }
 
     // the type of an existing block, None for air
     pub fn block_type(&self, id: BlockId) -> Option<BlockType> {
         if let Some(mods) = self.chunks.get(&Self::get_chunk_key(id)) {
-            if let Some(&ty) = mods.placed.get(&id) { return Some(ty); }
-            if mods.mined.contains(&id) { return None; }
+            if let Some(&ty) = mods.placed.get(&id) {
+                return Some(ty);
+            }
+            if mods.mined.contains(&id) {
+                return None;
+            }
         }
         self.natural_type(id)
     }
 
     // the terrain's own block at this position, ignoring edits
     fn natural_type(&self, id: BlockId) -> Option<BlockType> {
-        if id.layer > self.terrain.get_height(id.face, id.u, id.v) { return None; }
-        Some(material::natural_type(&self.terrain, self.has_core, id.face, id.u, id.v, id.layer))
+        if id.layer > self.terrain.get_height(id.face, id.u, id.v) {
+            return None;
+        }
+        Some(material::natural_type(
+            &self.terrain,
+            self.has_core,
+            id.face,
+            id.u,
+            id.v,
+            id.layer,
+        ))
     }
-
-    
 }
-
 
 // --- FRUSTUM CULLING HELPER ---
 
@@ -256,7 +282,7 @@ impl Frustum {
     pub fn intersects_sphere(&self, center: glam::Vec3, radius: f32) -> bool {
         for plane in &self.planes {
             let dist = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
-            
+
             if dist < -radius {
                 return false;
             }

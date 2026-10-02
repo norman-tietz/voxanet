@@ -16,7 +16,13 @@ pub enum BlockType {
 
 impl BlockType {
     // selectable with the number keys 1..
-    pub const PLACEABLE: [BlockType; 5] = [BlockType::Grass, BlockType::Dirt, BlockType::Sand, BlockType::Stone, BlockType::Snow];
+    pub const PLACEABLE: [BlockType; 5] = [
+        BlockType::Grass,
+        BlockType::Dirt,
+        BlockType::Sand,
+        BlockType::Stone,
+        BlockType::Snow,
+    ];
 
     pub fn color(self) -> [f32; 3] {
         match self {
@@ -41,13 +47,13 @@ impl BlockType {
     }
 }
 
-const BEACH: f32 = 0.06;     // fraction of the peak height above sea level that is still sand ...
-const MAX_BEACH: f32 = 1.5;  // ... but at most this many layers
-// fractions of the height from sea level up to the highest peak
+const BEACH: f32 = 0.06; // fraction of the peak height above sea level that is still sand ...
+const MAX_BEACH: f32 = 1.5; // ... but at most this many layers
+                            // fractions of the height from sea level up to the highest peak
 const ROCK_LINE: f32 = 0.45; // bare stone above
 const SNOW_LINE: f32 = 0.62; // snow above
-const STEEP: u32 = 3;        // a height step of this many layers to a neighbour exposes stone
-const SOIL_DEPTH: u32 = 3;   // layers of dirt/sand below the surface before stone
+const STEEP: u32 = 3; // a height step of this many layers to a neighbour exposes stone
+const SOIL_DEPTH: u32 = 3; // layers of dirt/sand below the surface before stone
 pub const CORE_LAYERS: u32 = 6;
 
 // colour of the ocean in the distant LOD meshes (near water is drawn translucent by fs_water)
@@ -55,7 +61,9 @@ pub const WATER_COLOR: [f32; 3] = [0.12, 0.32, 0.55];
 
 // deterministic value in -1..1 per lattice point
 fn hash(face: u8, x: u32, y: u32) -> f32 {
-    let mut h = (face as u32).wrapping_mul(0x9E37_79B9) ^ x.wrapping_mul(0x85EB_CA6B) ^ y.wrapping_mul(0xC2B2_AE35);
+    let mut h = (face as u32).wrapping_mul(0x9E37_79B9)
+        ^ x.wrapping_mul(0x85EB_CA6B)
+        ^ y.wrapping_mul(0xC2B2_AE35);
     h ^= h >> 16;
     h = h.wrapping_mul(0x7FEB_352D);
     h ^= h >> 15;
@@ -67,7 +75,10 @@ fn hash(face: u8, x: u32, y: u32) -> f32 {
 const JITTER_CELL: u32 = 6;
 fn jitter(face: u8, u: u32, v: u32) -> f32 {
     let (gx, gy) = (u / JITTER_CELL, v / JITTER_CELL);
-    let s = |f: u32| { let t = f as f32 / JITTER_CELL as f32; t * t * (3.0 - 2.0 * t) };
+    let s = |f: u32| {
+        let t = f as f32 / JITTER_CELL as f32;
+        t * t * (3.0 - 2.0 * t)
+    };
     let (tx, ty) = (s(u % JITTER_CELL), s(v % JITTER_CELL));
     let top = hash(face, gx, gy) * (1.0 - tx) + hash(face, gx + 1, gy) * tx;
     let bottom = hash(face, gx, gy + 1) * (1.0 - tx) + hash(face, gx + 1, gy + 1) * tx;
@@ -104,7 +115,14 @@ pub fn surface_type(terrain: &PlanetTerrain, face: u8, u: u32, v: u32) -> BlockT
 }
 
 // the natural type of a terrain block (layer <= column height)
-pub fn natural_type(terrain: &PlanetTerrain, has_core: bool, face: u8, u: u32, v: u32, layer: u32) -> BlockType {
+pub fn natural_type(
+    terrain: &PlanetTerrain,
+    has_core: bool,
+    face: u8,
+    u: u32,
+    v: u32,
+    layer: u32,
+) -> BlockType {
     if has_core && layer < CORE_LAYERS {
         return BlockType::Bedrock;
     }

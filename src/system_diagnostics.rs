@@ -10,13 +10,19 @@ impl SystemDiagnostics {
         println!("\n==========================================");
         println!("           SYSTEM DIAGNOSTICS       ");
         println!("==========================================");
-        
+
         // OS
         let os_name = System::name().unwrap_or("Unknown".to_string());
         let os_ver = System::os_version().unwrap_or("".to_string());
         println!("OS       : {} {}", os_name, os_ver);
-        println!("Kernel   : {}", System::kernel_version().unwrap_or("Unknown".to_string()));
-        println!("Hostname : {}", System::host_name().unwrap_or("Unknown".to_string()));
+        println!(
+            "Kernel   : {}",
+            System::kernel_version().unwrap_or("Unknown".to_string())
+        );
+        println!(
+            "Hostname : {}",
+            System::host_name().unwrap_or("Unknown".to_string())
+        );
 
         // CPU
         let cpus = sys.cpus();
@@ -28,8 +34,11 @@ impl SystemDiagnostics {
         // RAM
         let total_ram = sys.total_memory() as f32 / 1024.0 / 1024.0 / 1024.0;
         let used_ram = sys.used_memory() as f32 / 1024.0 / 1024.0 / 1024.0;
-        println!("Memory   : {:.2} GB used / {:.2} GB total", used_ram, total_ram);
-        
+        println!(
+            "Memory   : {:.2} GB used / {:.2} GB total",
+            used_ram, total_ram
+        );
+
         println!("==========================================\n");
     }
 
