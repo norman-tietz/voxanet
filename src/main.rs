@@ -291,6 +291,32 @@ impl Game {
                     renderer.request_screenshot(format!("screenshots/voxanet_{ms}.png"));
                     renderer.window.request_redraw();
                 }
+                if let PhysicalKey::Code(KeyCode::KeyB) = event.physical_key {
+                    planet.switch_planet_type(planet.planet_type.next());
+
+                    let new_res = planet.resolution;
+                    let current_dir = if player.position.length() > 0.1 {
+                        player.position.normalize()
+                    } else {
+                        glam::Vec3::Y
+                    };
+                    let probe_dist = new_res as f32 / 2.0;
+                    let dummy_pos = current_dir * probe_dist;
+
+                    let spawn_radius =
+                        if let Some(id) = crate::gen::CoordSystem::pos_to_id(dummy_pos, new_res) {
+                            let h = planet.terrain.get_height(id.face, id.u, id.v);
+                            crate::gen::CoordSystem::get_layer_radius(h, new_res) + 5.0
+                        } else {
+                            (new_res as f32 / 2.0) + 20.0
+                        };
+
+                    player.spawn(current_dir * spawn_radius);
+
+                    renderer.force_reload_all(planet, player.position);
+                    renderer.log_memory(planet);
+                    renderer.window.request_redraw();
+                }
                 if let Key::Character(ref s) = event.logical_key {
                     if s == "]" || s == "[" {
                         if s == "]" {
