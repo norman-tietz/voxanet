@@ -6,6 +6,7 @@ mod common;
 mod controller;
 mod deferred;
 mod entity;
+mod galaxy;
 mod gen;
 mod gpu_timer;
 mod hw_rt;
