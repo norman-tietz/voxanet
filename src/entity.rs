@@ -146,6 +146,9 @@ impl Player {
             }
         } else {
             // walk
+            let friction_scale = planet
+                .ground_block(self.position)
+                .map_or(1.0, |b| b.friction_scale());
             if input.length() > 0.01 {
                 let input_normalized = input.normalize();
                 let move_dir =
@@ -155,7 +158,7 @@ impl Player {
                 let target_horz = move_dir * effective_speed;
 
                 // acceleration
-                let accel = 25.0;
+                let accel = 25.0 * friction_scale;
                 let new_horz =
                     current_horz + (target_horz - current_horz).clamp_length_max(accel * dt);
 
@@ -163,7 +166,7 @@ impl Player {
             } else {
                 let horz_vel = self.velocity - (up * self.velocity.dot(up));
 
-                let friction = if self.grounded { 15.0 } else { 0.5 };
+                let friction = (if self.grounded { 15.0 } else { 0.5 }) * friction_scale;
 
                 let reduced = horz_vel * (1.0 - friction * dt).max(0.0);
                 self.velocity = reduced + (up * self.velocity.dot(up));
@@ -296,5 +299,23 @@ mod tests {
         p.spawn(Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(p.health, p.max_health);
         assert_eq!(p.spawn_point, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    // pure scaling math, factored out of update()'s walk branch so it's testable without a planet
+    fn scaled_walk_params(base_accel: f32, base_friction: f32, scale: f32) -> (f32, f32) {
+        (base_accel * scale, base_friction * scale)
+    }
+
+    #[test]
+    fn normal_ground_does_not_change_walk_params() {
+        assert_eq!(scaled_walk_params(25.0, 15.0, 1.0), (25.0, 15.0));
+    }
+
+    #[test]
+    fn ice_scales_down_both_acceleration_and_friction() {
+        let (accel, friction) =
+            scaled_walk_params(25.0, 15.0, crate::material::BlockType::Ice.friction_scale());
+        assert!(accel < 25.0 && accel > 0.0);
+        assert!(friction < 15.0 && friction > 0.0);
     }
 }
