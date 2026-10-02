@@ -7,6 +7,7 @@ struct Global {
     camera_pos: vec4<f32>, // w: planet radius (rt.resolution is 0 in hardware shadow mode, see hw_rt.rs)
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
+    motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -61,6 +62,8 @@ const CAUSTIC_BASE    = 0.7;                         // plain sunlight under wat
 const CAUSTIC_MAX     = 3.0;                         // brightest caustic, times the plain sunlight
 const FOAM_DEPTH      = 2.0;                         // vertical water depth below which foam forms
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
+const MOTION_BLUR_SAMPLES    = 6;    // extra G-buffer taps per pixel when global.motion.x > 0
+const MOTION_BLUR_MAX_PIXELS = 40.0; // blur radius in pixels at the screen edge, at full strength
 const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
     vec3<f32>(0.8225, 0.0332, 0.0171),
     vec3<f32>(0.1774, 0.9669, 0.0724),
@@ -703,23 +706,21 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }
 
-@fragment
-fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = vec2<i32>(pos.xy);
-    let dist = textureLoad(d_dist, p, 0).r;
-    let cam_pos = global.camera_pos.xyz;
-    let uv = pos.xy / global.screen.xy;
+// shades one pixel (G-buffer sample, sky/cloud compositing), without post-processing — factored
+// out of fs_light so radial motion blur can average several taps before the one final
+// post_process() call (tonemapping several already-tonemapped samples would double-compress them)
+fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec3<f32> {
+    let dist = textureLoad(d_dist, px, 0).r;
+    let uv = (vec2<f32>(px) + 0.5) / global.screen.xy;
     let ray_dir = normalize(global.ray_dirs[0].xyz + uv.x * global.ray_dirs[1].xyz + uv.y * global.ray_dirs[2].xyz);
-    let L = normalize(global.sun_dir.xyz);
-    let t = global.screen.w;
 
     var color: vec3<f32>;
     if (dist <= 0.0) {
         color = sky_gradient(ray_dir, cam_pos, L); // sky: no geometry behind the cloud shell
     } else {
-        let N = normalize(textureLoad(d_normal, p, 0).xyz * 2.0 - 1.0);
-        let world_pos = world_from_pixel(pos.xy, dist);
-        color = shade(textureLoad(d_albedo, p, 0).rgb, N, world_pos, pos.xy);
+        let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
+        let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
+        color = shade(textureLoad(d_albedo, px, 0).rgb, N, world_pos, vec2<f32>(px) + 0.5);
     }
 
     // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky
@@ -729,6 +730,40 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (cloud_t > 0.0 && (dist <= 0.0 || cloud_t < dist)) {
         let cl = cloud_shade(cam_pos + ray_dir * cloud_t, ray_dir, t, L);
         color = mix(color, cl.rgb, cl.a);
+    }
+    return color;
+}
+
+@fragment
+fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(pos.xy);
+    let cam_pos = global.camera_pos.xyz;
+    let L = normalize(global.sun_dir.xyz);
+    let t = global.screen.w;
+
+    var color = shade_pixel(p, cam_pos, L, t);
+
+    // radial motion blur: strength ramps from the screen center (none) to the edges (full),
+    // scaled by the player's current speed (global.motion.x, set in Renderer::render) — the sides
+    // blur while running/flying fast, the center of view stays sharp.
+    let center = global.screen.xy * 0.5;
+    let offset = pos.xy - center;
+    let edge_dist = length(offset) / length(center); // 0 at center, 1 at the corners
+    let strength = global.motion.x * edge_dist;
+    if (strength > 0.01) {
+        let dir = offset / max(length(offset), 0.001);
+        var sum = color;
+        var count = 1.0;
+        for (var i = 1; i <= MOTION_BLUR_SAMPLES; i++) {
+            let reach = strength * (f32(i) / f32(MOTION_BLUR_SAMPLES)) * MOTION_BLUR_MAX_PIXELS;
+            let sample_px = vec2<i32>(pos.xy - dir * reach);
+            if (sample_px.x >= 0 && sample_px.y >= 0
+                && sample_px.x < i32(global.screen.x) && sample_px.y < i32(global.screen.y)) {
+                sum += shade_pixel(sample_px, cam_pos, L, t);
+                count += 1.0;
+            }
+        }
+        color = sum / count;
     }
 
     return vec4<f32>(post_process(color), 1.0);

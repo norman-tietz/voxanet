@@ -37,6 +37,7 @@ pub struct GlobalUniform {
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub screen: [f32; 4], // width, height in pixels, sea surface radius, time in seconds (water animation)
+    pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed
 }
 
 #[repr(C)]
@@ -678,6 +679,7 @@ impl Renderer {
             cam_pos: [0.0, 0.0, 0.0, 0.0],
             screen: [config.width as f32, config.height as f32, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
+            motion: [0.0, 0.0, 0.0, 0.0],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1709,6 +1711,15 @@ impl Renderer {
         let cam_pos = controller.get_camera_pos(player);
         let frustum = crate::common::Frustum::from_matrix(mvp);
 
+        // radial motion blur (fs_light): eases in between these speeds so normal walking never
+        // blurs, reaching full strength around flying-sprint speed (move_speed * 10)
+        const MOTION_BLUR_MIN_SPEED: f32 = 10.0;
+        const MOTION_BLUR_MAX_SPEED: f32 = 45.0;
+        let speed = player.velocity.length();
+        let motion_blur = ((speed - MOTION_BLUR_MIN_SPEED)
+            / (MOTION_BLUR_MAX_SPEED - MOTION_BLUR_MIN_SPEED))
+            .clamp(0.0, 1.0);
+
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
@@ -1737,6 +1748,7 @@ impl Renderer {
                 sun_dir.z,
                 if self.output_p3 { 1.0 } else { 0.0 },
             ],
+            motion: [motion_blur, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
