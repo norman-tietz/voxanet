@@ -40,7 +40,7 @@ impl PlanetType {
                     subsurface: BlockType::Dirt,
                 },
                 atmosphere: AtmosphereDef {
-                    sky_zenith: [0.105, 0.21, 0.42],
+                    sky_zenith: [0.15, 0.3, 0.6],
                     sky_horizon_warm: [0.88, 1.08, 1.48],
                     cloud_light: [0.92, 0.94, 0.98],
                     cloud_dark: [0.16, 0.18, 0.24],

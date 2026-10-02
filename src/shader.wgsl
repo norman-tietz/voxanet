@@ -548,7 +548,7 @@ fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f3
     let closest = length(cam_pos + ray_dir * s_star);
     let limb = clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
-    let dome = mix(biome.sky_zenith.rgb, biome.sky_horizon.rgb, sun_glow);
+    let dome = mix(biome.sky_zenith.rgb * 0.7, biome.sky_horizon.rgb, sun_glow);
     return mix(biome.space_color.rgb, dome, limb);
 }
 
