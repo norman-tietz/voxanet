@@ -169,6 +169,8 @@ impl Controller {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // toggles act on the first press only: held down, the OS repeats the key and they'd flip back and forth
+                let toggled = pressed && !event.repeat;
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::KeyW) => self.keys[0] = pressed,
                     PhysicalKey::Code(KeyCode::KeyA) => self.keys[1] = pressed,
@@ -200,14 +202,14 @@ impl Controller {
                         return true;
                     }
 
-                    PhysicalKey::Code(KeyCode::KeyP) if pressed => {
+                    PhysicalKey::Code(KeyCode::KeyP) if toggled => {
                         if _player.debug_mode {
                             self.is_wireframe = !self.is_wireframe;
                         }
                         return true;
                     }
 
-                    PhysicalKey::Code(KeyCode::KeyO) if pressed => {
+                    PhysicalKey::Code(KeyCode::KeyO) if toggled => {
                         if _player.debug_mode {
                             self.show_collisions = !self.show_collisions;
                             println!("Show Collisions: {}", self.show_collisions);
@@ -215,14 +217,14 @@ impl Controller {
                         return true;
                     }
 
-                    PhysicalKey::Code(KeyCode::Quote) if pressed => {
+                    PhysicalKey::Code(KeyCode::Quote) if toggled => {
                         if _player.debug_mode {
                             self.freeze_culling = !self.freeze_culling;
                         }
                         return true;
                     }
 
-                    PhysicalKey::Code(KeyCode::KeyK) if pressed => {
+                    PhysicalKey::Code(KeyCode::KeyK) if toggled => {
                         self.first_person = !self.first_person;
                         self.mouse_released = false; // always re-enter first person with the mouse captured
 

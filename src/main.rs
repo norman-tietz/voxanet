@@ -709,9 +709,11 @@ impl Game {
                 }
             }
 
-            // planet-only keys: in galaxy mode these would silently regenerate the hidden planet
+            // planet-only keys: in galaxy mode these would silently regenerate the hidden planet. First
+            // press only: holding F would otherwise auto-repeat, starting and cancelling a landing in turn
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
+                    && !event.repeat
                     && matches!(self.mode, GameMode::Planet) =>
             {
                 // F: land while flying (refused over lava), take off while walking or swimming
