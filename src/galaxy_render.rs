@@ -185,6 +185,7 @@ pub struct GalaxyRenderer {
     i_buf: wgpu::Buffer,
     num_indices: u32,
     planet_pipeline: wgpu::RenderPipeline,
+    atmosphere_pipeline: wgpu::RenderPipeline,
     planet_uniform_buf: wgpu::Buffer,
     planet_uniform_bind: wgpu::BindGroup,
     planet_uniform_stride: u64,
@@ -416,6 +417,53 @@ impl GalaxyRenderer {
             cache: None,
         });
 
+        // atmosphere shell: the star's unit icosphere scaled per planet in vs_atmosphere; back faces
+        // only (so it also renders with the camera inside it), depth-tested against the planets but not
+        // writing depth, premultiplied over whatever is behind
+        let atmosphere_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Galaxy Atmosphere Pipeline"),
+            layout: Some(&planet_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_atmosphere"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_atmosphere"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Front),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // background: depth test on but no depth write, drawn first so it never occludes bodies
         // and is itself never occluded by the depth clear (compare Always, matches a skybox)
         let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -458,6 +506,7 @@ impl GalaxyRenderer {
             i_buf,
             num_indices: indices.len() as u32,
             planet_pipeline,
+            atmosphere_pipeline,
             planet_uniform_buf,
             planet_uniform_bind,
             planet_uniform_stride,
@@ -631,6 +680,22 @@ impl GalaxyRenderer {
                     pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
                 }
+            }
+
+            // atmosphere shells last, over the planets and everything behind them
+            pass.set_pipeline(&self.atmosphere_pipeline);
+            pass.set_vertex_buffer(0, self.v_buf.slice(..));
+            pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+            for i in 0..galaxy.planets.len() {
+                if !content.draws_planet(i) {
+                    continue;
+                }
+                pass.set_bind_group(
+                    1,
+                    &self.planet_uniform_bind,
+                    &[(i as u64 * self.planet_uniform_stride) as u32],
+                );
+                pass.draw_indexed(0..self.num_indices, 0, 0..1);
             }
         }
         queue.submit(std::iter::once(encoder.finish()));

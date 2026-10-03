@@ -133,6 +133,48 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(aces_and_gamma(color), 1.0);
 }
 
+// the atmosphere shell around each planet: a sphere this many planet radii out, comfortably past where
+// the sky opacity reaches 0 (~2.1 radii, atmosphere.wgsl), drawn after the planets
+const ATMOSPHERE_SHELL_RADII: f32 = 2.3;
+
+struct AtmosphereVertexOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) local_pos: vec3<f32>,
+}
+
+@vertex
+fn vs_atmosphere(@location(0) pos: vec3<f32>) -> AtmosphereVertexOut {
+    let local = pos * planet.offset.w * ATMOSPHERE_SHELL_RADII;
+    var out: AtmosphereVertexOut;
+    out.clip_pos = camera.view_proj * vec4<f32>(planet.offset.xyz + planet.model * local, 1.0);
+    out.local_pos = local;
+    return out;
+}
+
+// the sky the voxel engine would show along this ray (atmosphere.wgsl), premultiplied: the glow where
+// the ray grazes the planet's lit limb, clouds where it crosses the cloud shell. Only rays that miss the
+// planet reach this: the shell's back faces are drawn depth-tested behind the planet, so where the
+// planet is in front, fs_planet has already drawn the surface with its clouds.
+@fragment
+fn fs_atmosphere(in: AtmosphereVertexOut) -> @location(0) vec4<f32> {
+    let a = planet_atmosphere();
+    let cam = planet_frame_camera();
+    let L = planet_frame_light();
+    let t = camera.screen.z;
+    let ray_dir = normalize(in.local_pos - cam);
+
+    var alpha = atmo_sky_opacity(ray_dir, cam, L, a.planet_r);
+    var color = atmo_sky_gradient(ray_dir, cam, L, a) * alpha;
+    let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
+    if (cloud_t > 0.0) {
+        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
+        color = cl.rgb * cl.a + color * (1.0 - cl.a);
+        alpha = cl.a + alpha * (1.0 - cl.a);
+    }
+    // the engine blends post(sky * a) over its backdrop (fs_light), so the same here
+    return vec4<f32>(aces_and_gamma(color), alpha);
+}
+
 // deterministic hash for the starfield, independent of shader.wgsl's hash31 (kept standalone).
 // Integer-only (PCG3D, Jarzynski & Olano 2020), on purpose: the classic fract(sin(dot(p, k)) * big)
 // hash this replaced fed sin() arguments up to ~200,000 (cell coords reach ±400), where GPU f32 sin
