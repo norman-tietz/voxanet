@@ -8,7 +8,7 @@ use std::sync::Arc;
 // relief grows with the square root of the radius, capped at 20% of the radius: layers are about one
 // unit thick at any size, so on small planets a fixed number of layers would be huge spikes and pits.
 
-struct TerrainShape {
+pub(crate) struct TerrainShape {
     relief: f32,    // highest mountains above sea level, in layers
     hill_freq: f32, // noise frequencies on the unit sphere (cycles per radian)
     ridge_freq: f32,
@@ -16,7 +16,7 @@ struct TerrainShape {
 }
 
 impl TerrainShape {
-    fn new(resolution: u32) -> Self {
+    pub(crate) fn new(resolution: u32) -> Self {
         let radius = resolution as f32 / 2.0;
         Self {
             relief: (3.0 * radius.sqrt()).min(0.2 * radius),
@@ -27,7 +27,7 @@ impl TerrainShape {
     }
 
     // height above (or below) sea level for a direction on the unit sphere
-    fn height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+    pub(crate) fn height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
         // continents: low-frequency, positive = land
         let c = g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + 0.08;
         let land = smoothstep(-0.02, 0.12, c);
@@ -152,12 +152,12 @@ impl Clone for PlanetTerrain {
 
 // --- NOISE GENERATOR ---
 
-struct NoiseGenerator {
+pub(crate) struct NoiseGenerator {
     perm: [u8; 512],
 }
 
 impl NoiseGenerator {
-    fn new(seed: u32) -> Self {
+    pub(crate) fn new(seed: u32) -> Self {
         let mut p = [0u8; 512];
         let mut permutation: Vec<u8> = (0..=255).collect();
         let mut state = seed;

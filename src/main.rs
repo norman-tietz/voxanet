@@ -8,6 +8,7 @@ mod deferred;
 mod entity;
 mod galaxy;
 mod galaxy_render;
+mod galaxy_terrain;
 mod gen;
 mod gpu_timer;
 mod hw_rt;
