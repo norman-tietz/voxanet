@@ -107,7 +107,7 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `/hw_shadows set true\|false` | Switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
 | `/screenshot <path>` | Save the current frame as a PNG to a custom path (e.g. `/screenshot captures/shot.png`), instead of the `F2` default location |
 | `/view set first\|third` | Switch camera mode from the console |
-| `/galaxy enter\|exit` | Debug: enter/exit the galaxy foundation milestone (see `CLAUDE.md`) |
+| `/galaxy enter\|exit` | Debug: enter/exit galaxy mode — a seeded solar system with terrain-shaped planets (see `CLAUDE.md`) |
 
 ### Debug Keys (require `/debug_mode set true`)
 

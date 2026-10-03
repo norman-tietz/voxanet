@@ -34,10 +34,18 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
         .iter()
         .map(|&dir| shape.height(&generator, dir))
         .collect();
+    let def = planet.planet_type.def();
     let positions: Vec<Vec3> = unit_verts
         .iter()
         .zip(heights.iter())
-        .map(|(&dir, &h)| dir * (planet.radius + h))
+        .map(|(&dir, &h)| {
+            // mirrors PlanetData::effective_height (src/common.rs): on a liquid-less planet there's
+            // no water mesh to fill the gap visually, so the surface is solid up to sea level — the
+            // *color* logic below still uses the raw height to pick palette.beach for these columns,
+            // same as the real engine's natural_type() does for filled-in liquid-less "ocean"
+            let display_h = if def.liquid.is_none() { h.max(0.0) } else { h };
+            dir * (planet.radius + display_h)
+        })
         .collect();
 
     let mut normals = vec![Vec3::ZERO; positions.len()];
@@ -49,7 +57,6 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
         normals[c] += face_normal;
     }
 
-    let def = planet.planet_type.def();
     let relief = shape_relief(planet.radius);
 
     let verts = (0..positions.len())

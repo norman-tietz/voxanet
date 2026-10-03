@@ -633,4 +633,35 @@ mod tests {
         assert_eq!(subdivision_for_distance(2000.0, 250.0), 4);
         assert_eq!(subdivision_for_distance(2000.0, 40.0), 2);
     }
+
+    // composed regression: every link in noise_seed -> mesh -> cache -> LOD-tier has its own
+    // isolated test, but nothing exercised Galaxy::generate's *real* planets end to end before
+    // this — fixed tiers are used directly rather than going through distance mapping, since
+    // subdivision_for_distance already has its own coverage above.
+    #[test]
+    fn seeded_planets_produce_distinct_geometry_across_tiers_and_planets() {
+        let galaxy = Galaxy::generate(1);
+        let p0 = &galaxy.planets[0];
+        let p1 = &galaxy.planets[1];
+
+        let (v2, _) = crate::galaxy_terrain::generate_planet_mesh(p0, 2);
+        let (v4, _) = crate::galaxy_terrain::generate_planet_mesh(p0, 4);
+        let (v5, _) = crate::galaxy_terrain::generate_planet_mesh(p0, 5);
+        assert!(
+            v2.len() < v4.len() && v4.len() < v5.len(),
+            "tiers should have strictly increasing vertex counts"
+        );
+
+        let (v0, _) = crate::galaxy_terrain::generate_planet_mesh(p0, 2);
+        let (v1, _) = crate::galaxy_terrain::generate_planet_mesh(p1, 2);
+        let differs = v0.iter().zip(v1.iter()).any(|(a, b)| {
+            let ra = Vec3::from_array(a.pos).length();
+            let rb = Vec3::from_array(b.pos).length();
+            (ra - rb).abs() > 1e-3
+        });
+        assert!(
+            differs,
+            "planets 0 and 1 (different noise seeds, different radii) should not produce identical geometry"
+        );
+    }
 }
