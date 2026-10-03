@@ -151,11 +151,11 @@ impl Deferred {
                 module: shader,
                 entry_point: Some("fs_light"),
                 compilation_options: Default::default(),
-                // alpha-blended over the galaxy backdrop: fs_light's alpha is the sky's opacity
-                // (1 for terrain and for a thick, lit atmosphere)
+                // blended over the galaxy backdrop: fs_light outputs premultiplied colour and the sky's
+                // opacity as alpha (1 for terrain and for a thick, lit atmosphere)
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),

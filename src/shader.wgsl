@@ -531,7 +531,10 @@ fn cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
     let lit = mix(biome.cloud_dark.rgb, biome.cloud_light.rgb, ndotl) * SUN_COLOR * 0.55;
     let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * biome.cloud_light.rgb;
-    return vec4<f32>(lit + silver, clamp(density, 0.0, 1.0));
+    // on the night side clouds are barely lit (same twilight band as sky_opacity): with the night sky
+    // now transparent over the stars, the ndotl floor above alone left them glowing grey on black
+    let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
+    return vec4<f32>((lit + silver) * daylight, clamp(density, 0.0, 1.0));
 }
 
 // clouds along an arbitrary ray (camera view ray, or a water reflection ray); empty if it misses the shell
@@ -551,6 +554,8 @@ const SKY_DAY_ELEVATION: f32 = 0.15;
 // limb is ~0.7-0.9 for a camera standing on terrain (0.1-0.2 planet radii up), so it can't be used
 // as the opacity directly — stars would show through the daytime sky. 0.6 ~ 0.3 radii up, 0.15 ~ 1.1.
 const SKY_SPACE_LIMB: f32 = 0.15;
+// how bright clouds stay on the night side, relative to daylight (cloud_shade)
+const CLOUD_NIGHT_BRIGHTNESS: f32 = 0.06;
 const SKY_OPAQUE_LIMB: f32 = 0.6;
 
 // how much atmosphere the ray crosses: 1 when it skims the ground, falling to 0 out in space
@@ -805,10 +810,12 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         color = sum / count;
     }
 
-    // un-premultiply for tone mapping; the lighting pass alpha-blends the result over the backdrop
-    let alpha = color.a;
-    let rgb = color.rgb / max(alpha, 1e-4);
-    return vec4<f32>(post_process(rgb), alpha);
+    // premultiplied all the way out: the lighting pass blends with PREMULTIPLIED_ALPHA_BLENDING, so a
+    // sky pixel lands as post(sky * a) + backdrop * (1 - a) — the same post(sky * a) that fog() fades
+    // distant terrain toward (sky_over_black). Un-premultiplying before post_process and blending
+    // post(sky) * a instead made fogged terrain visibly brighter than the sky next to it whenever the
+    // sky was partly transparent (twilight, and the space-fade band seen from altitude).
+    return vec4<f32>(post_process(color.rgb), color.a);
 }
 
 // full-screen white flash drawn over everything (text included) right after F2/`/screenshot` captures a
