@@ -14,3 +14,6 @@ glyphon = "0.12"
 sysinfo = "0.39"
 
 
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] } # WGSL validation in unit tests (same naga wgpu uses)

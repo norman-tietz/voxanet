@@ -24,6 +24,14 @@ use wgpu::util::DeviceExt;
 use wgpu::PresentMode;
 use winit::window::Window;
 
+// the scene shader: the shared atmosphere maths (atmosphere.wgsl, also used by the galaxy impostors)
+// followed by the voxel engine's own shader
+pub(crate) const SCENE_SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    "\n",
+    include_str!("shader.wgsl")
+);
+
 // --- UNIFORMS ---
 
 #[repr(C)]
@@ -492,7 +500,7 @@ impl Renderer {
         // --- PIPELINES ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(SCENE_SHADER.into()),
         });
         // group 2: the blurred ray-marched shadow term, read by fs_main
         let rt_sample_layout = RtBlur::sample_layout(&device);
@@ -2688,8 +2696,26 @@ impl Renderer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // validates WGSL the way wgpu does at pipeline creation, so a shader mistake fails `cargo test`
+    // instead of panicking at startup
+    pub(crate) fn assert_valid_wgsl(source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("WGSL parse error:\n{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("WGSL validation error: {e:?}"));
+    }
+
+    #[test]
+    fn scene_shader_is_valid_wgsl() {
+        assert_valid_wgsl(SCENE_SHADER);
+    }
 
     // landing messages (F) must be seen without opening the console: a short HUD status line
     #[test]

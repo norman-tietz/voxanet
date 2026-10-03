@@ -10,6 +10,13 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
+// galaxy mode's shader: the shared atmosphere maths (atmosphere.wgsl) followed by galaxy.wgsl
+pub(crate) const GALAXY_SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    "\n",
+    include_str!("galaxy.wgsl")
+);
+
 const ICOSPHERE_SUBDIVISIONS: u32 = 2;
 // the first-person planet camera's 80 degrees (Controller::fov_y): the landing/liftoff handover
 // switches between the two cameras, and a different field of view would zoom the view right then
@@ -255,7 +262,7 @@ impl GalaxyRenderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("galaxy.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("galaxy.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(GALAXY_SHADER.into()),
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -704,6 +711,11 @@ impl GalaxyRenderer {
 mod tests {
     use super::*;
     use crate::galaxy::Galaxy;
+
+    #[test]
+    fn galaxy_shader_is_valid_wgsl() {
+        crate::renderer::tests::assert_valid_wgsl(GALAXY_SHADER);
+    }
 
     // the landing handover switches from galaxy mode's camera to the first-person planet camera:
     // a different field of view would zoom the planet visibly at that moment
