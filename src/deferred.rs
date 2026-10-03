@@ -151,7 +151,13 @@ impl Deferred {
                 module: shader,
                 entry_point: Some("fs_light"),
                 compilation_options: Default::default(),
-                targets: &[Some(surface_format.into())],
+                // alpha-blended over the galaxy backdrop: fs_light's alpha is the sky's opacity
+                // (1 for terrain and for a thick, lit atmosphere)
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {

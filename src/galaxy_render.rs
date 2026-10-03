@@ -134,6 +134,14 @@ impl GalaxyContent {
     }
 }
 
+// what Renderer::render draws behind the voxel world before anything else
+pub struct Backdrop<'a> {
+    pub galaxy: &'a Galaxy,
+    pub camera: GalaxyCamera,
+    pub content: GalaxyContent,
+    pub t: f64,
+}
+
 pub struct GalaxyRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,

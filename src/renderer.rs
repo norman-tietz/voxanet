@@ -1684,6 +1684,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         controller: &Controller,
@@ -1692,6 +1693,7 @@ impl Renderer {
         console: &Console,
         time: f64,     // shared game clock in seconds (Game::clock)
         sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs galaxy planet)
+        backdrop: &crate::galaxy_render::Backdrop, // the galaxy behind the voxel world, drawn first
     ) {
         self.update_console_mesh(console.height_fraction);
 
@@ -1722,6 +1724,22 @@ impl Renderer {
         let view = out
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // the galaxy behind everything: submitted on its own before this frame's encoder, so it lands
+        // in the swapchain first; it also uses Deferred::depth, which the geometry pass below clears
+        // again, so the backdrop can never hide terrain. The lighting pass blends the sky over it.
+        let screen = (self.config.width as f32, self.config.height as f32);
+        self.galaxy.render(
+            &self.device,
+            &self.queue,
+            &view,
+            &self.deferred.depth,
+            &backdrop.camera,
+            backdrop.content,
+            backdrop.galaxy,
+            backdrop.t,
+            screen,
+        );
 
         self.update_rt_window(player.position, planet);
 
@@ -1978,14 +1996,8 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // overwritten everywhere by fs_light (sky_gradient + clouds, see shader.wgsl); kept
-                        // as a harmless fallback matching SPACE_COLOR
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.03,
-                            b: 0.05,
-                            a: 1.0,
-                        }),
+                        // the galaxy backdrop is already in the swapchain; fs_light blends over it
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

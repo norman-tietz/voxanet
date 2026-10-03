@@ -576,7 +576,38 @@ impl Game {
                             PlanetWorld::Galaxy(i) => self.galaxy.planets[i]
                                 .sun_dir_in_planet_frame(self.galaxy.star.position(), t),
                         };
-                        renderer.render(controller, player, planet, console, t, sun)
+                        // the galaxy behind the voxel world, seen from exactly the planet camera
+                        use crate::galaxy_render::{Backdrop, GalaxyCamera, GalaxyContent};
+                        let (eye, cam_rot) = controller.camera_pose(player);
+                        let fov_y = controller.fov_y();
+                        let (camera, content) = match self.loaded_world {
+                            PlanetWorld::Home => (
+                                GalaxyCamera::on_home_planet(
+                                    cam_rot,
+                                    fov_y,
+                                    t,
+                                    planet.planet_type.def().day_length_secs,
+                                ),
+                                GalaxyContent::StarfieldOnly,
+                            ),
+                            PlanetWorld::Galaxy(i) => (
+                                GalaxyCamera::on_galaxy_planet(
+                                    &self.galaxy.planets[i],
+                                    eye,
+                                    cam_rot,
+                                    fov_y,
+                                    t,
+                                ),
+                                GalaxyContent::AllButPlanet(i),
+                            ),
+                        };
+                        let backdrop = Backdrop {
+                            galaxy: &self.galaxy,
+                            camera,
+                            content,
+                            t,
+                        };
+                        renderer.render(controller, player, planet, console, t, sun, &backdrop)
                     }
                     GameMode::Galaxy => {
                         renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t)
