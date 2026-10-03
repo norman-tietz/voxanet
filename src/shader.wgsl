@@ -490,12 +490,14 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Top of objects gets Sky Color, Bottom gets Ground Bounce
     let up_dot = dot(N, normalize(world_pos)); // Relative Up for sphere
     let hemi_factor = up_dot * 0.5 + 0.5;
-    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor);
+    // dims to moonlight on the night side, like the sky itself
+    let sky_light = atmo_ambient_daylight(world_pos, L);
+    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor) * sky_light;
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
     let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-    let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow;
+    let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow * sky_light;
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
@@ -758,7 +760,8 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let NdotL = max(dot(up, L), 0.0);
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
-    var color = body * (SUN_COLOR * NdotL * shadow + biome.sky_zenith.rgb * 2.0);
+    let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L);
+    var color = body * (SUN_COLOR * NdotL * shadow + sky_fill);
     if (glowing) {
         color = body * 2.5; // emissive: pushed above 1.0 so ACES gives it a hot, blown-out look
     }
@@ -792,7 +795,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         let edge = 1.0 - smoothstep(0.05, 0.3, vdepth);
         let froth = shore * (0.55 * bands + 0.45 * patches) + shore * 0.3;
         let foam = max(edge, smoothstep(0.45, 0.8, froth) * band_fade) * 0.9;
-        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + biome.sky_zenith.rgb * 2.0);
+        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + sky_fill);
         color = mix(color, foam_col, foam);
         alpha = max(alpha, foam);
     }

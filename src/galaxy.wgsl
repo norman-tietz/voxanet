@@ -119,8 +119,9 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
     let NdotL = max(dot(N, L), 0.0);
     let direct = SUN_COLOR * NdotL * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
-    let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi);
-    let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2;
+    let sky_light = atmo_ambient_daylight(in.local_pos, L);
+    let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi) * sky_light;
+    let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     var color = atmo_air_fog(albedo * (direct + ambient + rim), in.local_pos, cam, L, a);
 
     // clouds in front of the surface, like the engine's shade_pixel

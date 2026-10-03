@@ -27,6 +27,9 @@ const SKY_SPACE_LIMB: f32 = 0.15;
 const SKY_OPAQUE_LIMB: f32 = 0.6;
 // how bright clouds stay on the night side, relative to daylight (atmo_cloud_shade)
 const CLOUD_NIGHT_BRIGHTNESS: f32 = 0.06;
+// sky light (ambient, ground bounce, rim) left on the night side, relative to daylight: dim and cool,
+// like moonlight, so terrain stays readable at night (atmo_ambient_daylight)
+const NIGHT_AMBIENT = vec3<f32>(0.10, 0.12, 0.17);
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
 
@@ -172,6 +175,13 @@ fn atmo_limb(ray_dir: vec3<f32>, cam_pos: vec3<f32>, planet_r: f32) -> f32 {
     let s_star = max(-dot(cam_pos, ray_dir), 0.0);
     let closest = length(cam_pos + ray_dir * s_star);
     return clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
+}
+
+// how much of the sky's fill light (ambient, ground bounce, rim) reaches a surface point at `pos`:
+// white by day, NIGHT_AMBIENT on the night side, over the same twilight band as the sky's opacity
+fn atmo_ambient_daylight(pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+    let up = pos / max(length(pos), 1e-4);
+    return mix(NIGHT_AMBIENT, vec3<f32>(1.0), smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
 }
 
 // how opaque the sky is along the ray, for blending it over what lies behind (the galaxy): thick,

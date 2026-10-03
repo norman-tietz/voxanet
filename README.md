@@ -10,8 +10,10 @@
 This project is a high-performance voxel engine built from scratch in **Rust**, capable of generating fully explorable, spherical planets in real-time.
 
 *   **Oceans:** Water fills every part of the terrain below sea level. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint on an animated, rippling surface, and surf foam along the shores; sunlight under water forms moving caustics on the sea floor. You can swim on the surface and dive below it; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
-*   **Planet Types:** Three switchable biomes—Earth-like (oceans and temperate terrain), Volcanic (lava lakes and glowing rock), and Ice (frozen landscape, no water)—each with unique materials, liquids (reflective or damaging), and atmosphere colours. Switch at runtime with `B` to regenerate the terrain surface and atmosphere. On Volcanic planets, submerged lava damages the player; on Ice planets the terrain is solid everywhere and there is no liquid to swim in.
+*   **Planet Types:** Three switchable biomes—Earth-like (oceans and temperate terrain), Volcanic (lava lakes and glowing rock), and Ice (frozen landscape, no water)—each with unique materials, liquids (reflective or damaging), and atmosphere colours. Every planet in the solar system has one of them; pick the one you start on with `--biome`. On Volcanic planets, submerged lava damages the player; on Ice planets the terrain is solid everywhere and there is no liquid to swim in.
 *   **Dynamic Clouds & Atmosphere:** A procedurally shaded cloud layer wraps the planet with no extra geometry: horizon-grazing view rays cross far more of the layer's thickness, so clouds thicken and brighten near the horizon the way real atmosphere does, while a stylised sky gradient gives a blue dome overhead and a glowing atmospheric limb when the planet is seen from orbit. Clouds drift over time, cast moving shadows on the terrain and ocean below, and are reflected on the water's surface.
+*   **Day and Night:** Each planet turns under its star (a day lasts 1–4 minutes depending on the planet type). At night the sky turns transparent and shows the stars, the sun and the other planets, and the terrain falls back to a dim, cool moonlight.
+*   **Solar System & Seamless Landing:** The planet is one of several in a seeded solar system. Fly up and keep climbing to leave the atmosphere and cross over into space flight; fly at another planet to be captured by its orbit, and descend to land on it, with no loading screen at either handover (its terrain is generated in the background while you approach).
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
 *   **Custom Rendering Engine:** Powered by **wgpu**, featuring soft sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
@@ -29,6 +31,8 @@ cargo run --release
 
 Use `--release`, because terrain generation and meshing are much slower in debug builds.
 
+The game starts on planet #1 (Earth-like) at local noon. To start on the first planet of another type, pass `--biome earthlike|volcanic|ice`, e.g. `cargo run --release -- --biome ice`.
+
 If you're contributing, run `git config core.hooksPath .githooks` once to enable the pre-commit
 hook: it formats staged Rust files with `rustfmt` and prints `cargo clippy` output (advisory only,
 it won't block a commit).
@@ -45,8 +49,8 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | Mouse | Look around (first person) |
 | `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
-| `Left Ctrl` (hold) | Sprint (2× speed on foot, 10× while flying) |
-| `F` | Toggle fly mode (first person only; fly in the direction you look) |
+| `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
+| `F` | First person only: take off when walking or swimming; land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
@@ -59,6 +63,21 @@ Fly mode has no collision, so a terrain-following floor keeps you from flying in
 |-------|--------|
 | `Space` (hold) | Climb |
 | `Left Shift` (hold) | Descend (held back by the terrain floor — you can't fly through the ground) |
+
+Flying speed grows with altitude. Keep climbing and, a few planet radii out, the view hands over to space flight without a cut.
+
+### Space Flight
+
+In space there is no gravity and no terrain floor; a compass strip at the top of the screen shows each planet's number, type and distance (and the sun).
+
+| Input | Action |
+|-------|--------|
+| Mouse | Look / steer |
+| `W` `A` `S` `D` | Fly forward/left/back/right |
+| `Space` / `Left Shift` (hold) | Climb / descend (relative to the planet you are orbiting) |
+| `Left Ctrl` (hold) | Boost |
+
+Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
 
 ### Swimming
 
@@ -80,14 +99,6 @@ In water deeper than about half a block you swim at half the walking speed; you 
 | Middle mouse button (wheel click) | Pick the targeted block's type as the block type to place |
 | Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
 
-### World
-
-| Input | Action |
-|-------|--------|
-| `]` | Grow the planet (resolution ×1.2) and regenerate terrain |
-| `[` | Shrink the planet (resolution ÷1.2) and regenerate terrain |
-| `B` | Cycle the planet type (Earth-like → Volcanic → Ice) and regenerate terrain with new materials and atmosphere |
-
 ### Screenshots
 
 | Input | Action |
@@ -96,7 +107,7 @@ In water deeper than about half a block you swim at half the walking speed; you 
 
 ### Console
 
-Press `` ` `` (backtick) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`.
+Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`; `↑`/`↓` recall earlier commands. The console isn't shown in space flight.
 
 | Command | Description |
 |---------|-------------|
@@ -107,7 +118,9 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `/hw_shadows set true\|false` | Switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
 | `/screenshot <path>` | Save the current frame as a PNG to a custom path (e.g. `/screenshot captures/shot.png`), instead of the `F2` default location |
 | `/view set first\|third` | Switch camera mode from the console |
-| `/galaxy enter\|exit` | Debug: enter/exit galaxy mode — a seeded solar system with terrain-shaped planets (see `CLAUDE.md`) |
+| `/galaxy home` | Return to the start planet, standing at local noon |
+| `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
+| `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`) and radius (20–500) on the next orbit outward (up to 15 planets) |
 
 ### Debug Keys (require `/debug_mode set true`)
 
@@ -117,7 +130,7 @@ Press `` ` `` (backtick) to open or close the in-game console. While it is open,
 | `O` | Toggle collision box visualization |
 | `'` | Freeze/unfreeze frustum culling (to inspect culling from outside) |
 
-In debug mode the overlay in the top right also shows chunk/LOD counts and the **GPU time per frame**, split into shadows (ray marching), blur, main pass and text, averaged over one second (on GPUs with timestamp queries).
+In debug mode the overlay in the top right also shows chunk/LOD counts and the **GPU time per frame**, split into geometry, shadow rays, blur, lighting and text, averaged over one second (on GPUs with timestamp queries).
 
 ## Deep Dive for Those Interested
 
