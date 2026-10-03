@@ -401,14 +401,13 @@ impl Game {
             println!("Landing handover onto #{}", i + 1);
         }
         if let Some(i) = lift_off_from {
-            // voxel engine -> captured galaxy flight: same eye, same view direction
-            let (eye, rotation) = crate::landing::flight_pose_from_player(
+            // voxel engine -> captured galaxy flight: same eye, same view direction, same velocity
+            *galaxy_flight = crate::landing::liftoff_flight(
                 player.position,
                 player.rotation,
                 player.cam_pitch,
+                player.velocity,
             );
-            *galaxy_flight = crate::galaxy::GalaxyFlight::new(eye.as_dvec3());
-            galaxy_flight.rotation = rotation;
             *flight_frame = FlightFrame::Captured(i);
             player.landing = false;
             *mode = GameMode::Galaxy;
@@ -717,14 +716,14 @@ impl Game {
                         ) {
                             crate::landing::FAction::StartLanding => {
                                 player.landing = true;
-                                console.log("Landing...", [1.0, 1.0, 1.0]);
+                                renderer.show_status("Landing...");
                             }
                             crate::landing::FAction::CancelLanding => {
                                 player.landing = false;
-                                console.log("Landing cancelled.", [1.0, 1.0, 1.0]);
+                                renderer.show_status("Landing cancelled.");
                             }
                             crate::landing::FAction::RefuseLanding => {
-                                console.log("Can't land here: lava below.", [1.0, 0.5, 0.0]);
+                                renderer.show_status("Can't land here: lava below.");
                             }
                             crate::landing::FAction::TakeOff => {
                                 controller.fly_mode = true;

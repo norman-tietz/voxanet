@@ -64,6 +64,22 @@ pub fn flight_pose_from_player(position: Vec3, rotation: Quat, cam_pitch: f32) -
     )
 }
 
+// the galaxy flight a liftoff hands over to: the planet camera's eye and orientation
+// (flight_pose_from_player) and the player's velocity, so a climb doesn't stall at the handover —
+// both sides live in the planet frame, so the velocity carries over unchanged
+pub fn liftoff_flight(
+    position: Vec3,
+    rotation: Quat,
+    cam_pitch: f32,
+    velocity: Vec3,
+) -> crate::galaxy::GalaxyFlight {
+    let (eye, flight_rotation) = flight_pose_from_player(position, rotation, cam_pitch);
+    let mut flight = crate::galaxy::GalaxyFlight::new(eye.as_dvec3());
+    flight.rotation = flight_rotation;
+    flight.velocity = velocity.as_dvec3();
+    flight
+}
+
 // altitude above sea level at which the landing/liftoff handover happens (LAND_HANDOVER_RADII from
 // the centre is this many radii above the surface)
 pub fn handover_altitude(planet_radius: f32) -> f32 {
@@ -157,6 +173,20 @@ pub fn keep_above_planet(pos: glam::DVec3, planet_radius: f64) -> glam::DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // liftoff must keep the climb going: galaxy flight starts with the player's velocity, not
+    // from rest (both are in the planet frame)
+    #[test]
+    fn liftoff_keeps_the_climb_speed() {
+        let position = Vec3::new(0.0, 600.0, 0.0);
+        let rotation = Quat::IDENTITY; // upright at +Y, looking along -Z
+        let velocity = Vec3::new(10.0, 620.0, -5.0);
+        let flight = liftoff_flight(position, rotation, -0.3, velocity);
+        assert!((flight.velocity - velocity.as_dvec3()).length() < 1e-6);
+        let (eye, flight_rot) = flight_pose_from_player(position, rotation, -0.3);
+        assert!((flight.position - eye.as_dvec3()).length() < 1e-6);
+        assert!(flight.rotation.dot(flight_rot).abs() > 1.0 - 1e-6);
+    }
 
     // until the voxel world is ready the impostor is all there is: captured flight must not sink
     // into (or through) the planet while waiting

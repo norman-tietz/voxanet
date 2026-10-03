@@ -190,7 +190,17 @@ pub struct Renderer {
     flash_pipeline: wgpu::RenderPipeline,
     flash_buf: wgpu::Buffer,
     flash_bind: wgpu::BindGroup,
+    status: Option<(String, std::time::Instant)>, // timed HUD status line, see show_status
     screenshot_flash: Option<std::time::Instant>, // set right after a capture, so the flash itself is never in the PNG
+}
+
+// timed HUD status line (Renderer::show_status): fully visible, then fading out over the last
+// STATUS_FADE_SECONDS
+const STATUS_SECONDS: f32 = 2.5;
+const STATUS_FADE_SECONDS: f32 = 0.5;
+
+fn status_alpha(age_secs: f32) -> f32 {
+    ((STATUS_SECONDS - age_secs) / STATUS_FADE_SECONDS).clamp(0.0, 1.0)
 }
 
 impl Renderer {
@@ -746,6 +756,7 @@ impl Renderer {
             flash_buf,
             flash_bind,
             screenshot_flash: None,
+            status: None,
             deferred,
             galaxy,
 
@@ -1650,6 +1661,12 @@ impl Renderer {
         }
     }
 
+    // shows a short message in the planet-mode HUD for STATUS_SECONDS (fading out at the end) —
+    // for game feedback the player must see without opening the console, e.g. F-landing messages
+    pub fn show_status(&mut self, text: &str) {
+        self.status = Some((text.to_string(), std::time::Instant::now()));
+    }
+
     // shared by render() and render_galaxy() so the counter keeps ticking across a mode switch
     // instead of freezing at whatever it last read in planet mode
     fn update_fps(&mut self) {
@@ -2198,6 +2215,31 @@ impl Renderer {
             );
             hp_buf.shape_until_scroll(&mut self.font_system, false);
 
+            // timed status line (show_status), centred in the upper part of the screen
+            let status_text = self
+                .status
+                .as_ref()
+                .map(|(text, at)| (text.clone(), status_alpha(at.elapsed().as_secs_f32())))
+                .filter(|(_, alpha)| *alpha > 0.0);
+            let mut status_buf = Buffer::new(&mut self.font_system, Metrics::new(20.0, 24.0));
+            if let Some((text, alpha)) = &status_text {
+                status_buf.set_size(
+                    Some(self.config.width as f32),
+                    Some(self.config.height as f32),
+                );
+                status_buf.set_text(
+                    text,
+                    &Attrs::new()
+                        .family(Family::Monospace)
+                        .color(glyphon::Color::rgba(255, 235, 180, (alpha * 255.0) as u8)),
+                    Shaping::Advanced,
+                    None,
+                );
+                status_buf.shape_until_scroll(&mut self.font_system, false);
+            } else {
+                self.status = None;
+            }
+
             let mut debug_buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 18.0));
 
             if player.debug_mode {
@@ -2296,6 +2338,23 @@ impl Renderer {
                 default_color: glyphon::Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
             });
+
+            if let Some((text, _)) = &status_text {
+                text_areas.push(TextArea {
+                    buffer: &status_buf,
+                    left: self.config.width as f32 / 2.0 - text.chars().count() as f32 * 6.0,
+                    top: self.config.height as f32 * 0.25,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: glyphon::Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
+                });
+            }
 
             if player.debug_mode {
                 text_areas.push(TextArea {
@@ -2625,5 +2684,21 @@ impl Renderer {
             self.draw_flash(&mut pass, flash_alpha);
         }
         self.queue.submit(std::iter::once(enc.finish()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // landing messages (F) must be seen without opening the console: a short HUD status line
+    #[test]
+    fn status_message_shows_then_fades_out() {
+        assert_eq!(status_alpha(0.0), 1.0);
+        assert_eq!(status_alpha(STATUS_SECONDS - STATUS_FADE_SECONDS), 1.0);
+        let mid = status_alpha(STATUS_SECONDS - STATUS_FADE_SECONDS / 2.0);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        assert_eq!(status_alpha(STATUS_SECONDS), 0.0);
+        assert_eq!(status_alpha(STATUS_SECONDS + 5.0), 0.0);
     }
 }
