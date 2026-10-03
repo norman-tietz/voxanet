@@ -96,10 +96,22 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(color, 1.0);
 }
 
-// deterministic hash for the starfield, independent of shader.wgsl's hash31 (kept standalone)
-fn star_hash(p: vec3<f32>) -> f32 {
-    let h = dot(p, vec3<f32>(127.1, 311.7, 74.7));
-    return fract(sin(h) * 43758.5453123);
+// deterministic hash for the starfield, independent of shader.wgsl's hash31 (kept standalone).
+// Integer-only (PCG3D, Jarzynski & Olano 2020), on purpose: the classic fract(sin(dot(p, k)) * big)
+// hash this replaced fed sin() arguments up to ~200,000 (cell coords reach ±400), where GPU f32 sin
+// has no precision left. It only stayed random for directions near the plane where that dot product
+// is small, so the sky showed a band of stars, an empty hole on one side and a regular dot lattice
+// on the other. Integer math has no such range limit.
+fn star_hash(cell: vec3<i32>) -> f32 {
+    var v = bitcast<vec3<u32>>(cell) * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> vec3<u32>(16u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return f32(v.x >> 8u) / 16777216.0; // top 24 bits → [0, 1), exact in f32
 }
 
 @vertex
@@ -114,7 +126,7 @@ fn fs_background(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let ray_dir = normalize(camera.ray_dirs[0].xyz + uv.x * camera.ray_dirs[1].xyz + uv.y * camera.ray_dirs[2].xyz);
 
     let cell_scale = 400.0;
-    let cell = floor(ray_dir * cell_scale);
+    let cell = vec3<i32>(floor(ray_dir * cell_scale));
     let h = star_hash(cell);
     let brightness = smoothstep(0.985, 1.0, h); // sparse: only the top ~1.5% of cells show a star
     return vec4<f32>(vec3<f32>(brightness), 1.0);
