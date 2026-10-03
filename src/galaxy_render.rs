@@ -22,23 +22,17 @@ const ICOSPHERE_SUBDIVISIONS: u32 = 2;
 // switches between the two cameras, and a different field of view would zoom the view right then
 const FOV_Y_RADIANS: f32 = 80.0 * std::f32::consts::PI / 180.0;
 const NEAR_PLANE: f32 = 1.0;
-const FAR_PLANE: f32 = 200_000.0;
-// bodies farther than this are drawn pulled in to it (fit_within_far_plane): /galaxy add puts planets
-// on orbits far past FAR_PLANE (up to millions of units), and from out there the star is farther too
-const FAR_FIT_DISTANCE: f32 = 0.9 * FAR_PLANE;
 
-// where to draw a body at camera-relative `offset` so it fits inside the depth range: unchanged if
-// it's within FAR_FIT_DISTANCE, else pulled in along its direction to that distance, with the scale
-// its size must be multiplied by so it looks exactly as big as it would at its real distance
-fn fit_within_far_plane(offset: Vec3) -> (Vec3, f32) {
-    let distance = offset.length();
-    if distance <= FAR_FIT_DISTANCE {
-        (offset, 1.0)
-    } else {
-        let scale = FAR_FIT_DISTANCE / distance;
-        (offset * scale, scale)
-    }
+// reversed-Z with no far plane (depth 1 at the near plane, toward 0 at infinity, compare Greater, clear
+// 0): /galaxy add puts planets on orbits millions of units out, and a Depth32Float buffer keeps about
+// the same relative precision at every distance this way, so every body is drawn at its real distance
+// and size and far bodies still sort correctly. (A far plane with far bodies pulled in to it sorted
+// them by their shrunk size instead, and couldn't tell a far planet's front from its back.)
+fn projection(fov_y: f32, aspect: f32) -> Mat4 {
+    glam::camera::rh::proj::directx::perspective_infinite_reverse(fov_y, aspect, NEAR_PLANE)
 }
+const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
+const DEPTH_CLEAR: f32 = 0.0;
 const MAX_BODIES: usize = MAX_PLANETS + 1; // the star + every planet the galaxy can hold
 
 #[repr(C)]
@@ -61,7 +55,7 @@ struct GalaxyBodyUniform {
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct GalaxyPlanetUniform {
     offset: [f32; 4], // xyz: camera-relative planet centre, w: planet radius (voxel_resolution / 2)
-    light_dir: [f32; 4], // direction from this planet toward the star (galaxy space)
+    light_dir: [f32; 4], // xyz: direction from this planet toward the star (galaxy space), w unused
     sky_zenith: [f32; 4], // the planet type's AtmosphereDef colours (rgb), as the engine's BiomeUniform
     sky_horizon: [f32; 4],
     space_color: [f32; 4],
@@ -282,7 +276,7 @@ impl GalaxyRenderer {
         let depth_stencil = wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(DEPTH_COMPARE),
             stencil: Default::default(),
             bias: Default::default(),
         };
@@ -454,7 +448,7 @@ impl GalaxyRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(DEPTH_COMPARE),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -527,12 +521,7 @@ impl GalaxyRenderer {
         t: f64,
         screen: (f32, f32),
     ) {
-        let proj = glam::camera::rh::proj::directx::perspective(
-            camera.fov_y,
-            screen.0 / screen.1,
-            NEAR_PLANE,
-            FAR_PLANE,
-        );
+        let proj = projection(camera.fov_y, screen.0 / screen.1);
         let view = Mat4::from_quat(camera.rotation).inverse();
         let view_proj = proj * view;
 
@@ -551,14 +540,13 @@ impl GalaxyRenderer {
         let mut bodies = Vec::with_capacity(1 + galaxy.planets.len());
         {
             // the star is always part of the view (only planets can be left out)
-            let (star_offset, star_scale) =
-                fit_within_far_plane((galaxy.star.position() - camera.position).as_vec3());
+            let star_offset = (galaxy.star.position() - camera.position).as_vec3();
             bodies.push(GalaxyBodyUniform {
                 offset: [
                     star_offset.x,
                     star_offset.y,
                     star_offset.z,
-                    galaxy.star.radius as f32 * star_scale,
+                    galaxy.star.radius as f32,
                 ],
                 color: [1.6, 1.4, 0.9, 1.0],
                 light_dir: [0.0, 1.0, 0.0, 0.0],
@@ -585,17 +573,14 @@ impl GalaxyRenderer {
             let atmosphere = p.planet_type.def().atmosphere;
             let model = glam::Mat3::from_quat(p.orientation(t));
             let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
-            // far planets are drawn pulled in and shrunk (same apparent size); the shader undoes the
-            // scale for its planet-frame lighting
-            let (draw_offset, draw_scale) = fit_within_far_plane(camera_relative);
             planet_uniforms.push(GalaxyPlanetUniform {
                 offset: [
-                    draw_offset.x,
-                    draw_offset.y,
-                    draw_offset.z,
+                    camera_relative.x,
+                    camera_relative.y,
+                    camera_relative.z,
                     p.voxel_resolution() as f32 / 2.0,
                 ],
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, draw_scale],
+                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
                 sky_zenith: v4(atmosphere.sky_zenith),
                 sky_horizon: v4(atmosphere.sky_horizon_warm),
                 space_color: v4(atmosphere.space_color),
@@ -638,7 +623,7 @@ impl GalaxyRenderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -866,36 +851,19 @@ mod tests {
         assert_eq!(cam.fov_y, FOV_Y_RADIANS);
     }
 
-    // bodies beyond the far plane are drawn pulled in along their direction and shrunk by the same
-    // factor: same direction, same apparent size, but inside the depth range
-    #[test]
-    fn far_bodies_are_pulled_inside_the_far_plane_at_the_same_apparent_size() {
-        let far = Vec3::new(0.0, 0.0, -500_000.0);
-        let (pulled, scale) = fit_within_far_plane(far);
-        assert!(pulled.length() <= FAR_FIT_DISTANCE + 1e-2, "{pulled:?}");
-        assert!(
-            (pulled.normalize() - Vec3::NEG_Z).length() < 1e-6,
-            "same direction"
-        );
-        assert!(
-            (scale - FAR_FIT_DISTANCE / 500_000.0).abs() < 1e-6,
-            "same apparent size"
-        );
-        let near = Vec3::new(100.0, 0.0, 0.0);
-        assert_eq!(
-            fit_within_far_plane(near),
-            (near, 1.0),
-            "near bodies untouched"
-        );
+    // reversed-Z depth of a camera-relative point, as the depth test sees it
+    fn depth_of(offset: Vec3) -> f32 {
+        let clip = projection(FOV_Y_RADIANS, 16.0 / 9.0) * offset.extend(1.0);
+        clip.z / clip.w
     }
 
     // integration: a galaxy filled to MAX_PLANETS (/galaxy add puts planets on ever wider orbits,
-    // the outermost far past FAR_PLANE), seen from just above its outermost planet: after
-    // fit_within_far_plane every body — the star included — is inside the near/far planes, and
-    // the body buffer holds the star plus every planet
+    // millions of units out), seen from just above its outermost planet: every body, the star
+    // included, is in the depth range at its real distance with its near side in front of its far
+    // side, and the body buffer holds the star plus every planet
     #[test]
     #[allow(clippy::int_plus_one)]
-    fn a_full_galaxy_seen_from_its_outermost_planet_stays_within_render_planes() {
+    fn a_full_galaxy_seen_from_its_outermost_planet_has_ordered_depths() {
         let mut galaxy = Galaxy::generate(1);
         while galaxy.planets.len() < MAX_PLANETS {
             galaxy
@@ -909,18 +877,30 @@ mod tests {
             vec![(galaxy.star.position(), galaxy.star.radius as f32)];
         bodies.extend(galaxy.planets.iter().map(|p| (p.position_at(t), p.radius)));
         for (i, (pos, radius)) in bodies.into_iter().enumerate() {
-            let (offset, scale) = fit_within_far_plane((pos - camera).as_vec3());
-            let far_edge = offset.length() + radius * scale;
+            // looked at straight on: depth depends only on the distance along the view axis
+            let distance = (pos - camera).length() as f32;
+            let front = depth_of(Vec3::NEG_Z * (distance - radius));
+            let back = depth_of(Vec3::NEG_Z * (distance + radius));
             assert!(
-                far_edge < FAR_PLANE,
-                "body {i}: far edge {far_edge} beyond {FAR_PLANE}"
+                front <= 1.0 && back > 0.0,
+                "body {i} outside the depth range"
             );
             assert!(
-                offset.length() > NEAR_PLANE,
-                "body {i} inside the near plane"
+                front > back,
+                "body {i}: front {front} not in front of back {back}"
             );
         }
         assert!(galaxy.planets.len() + 1 <= MAX_BODIES);
+    }
+
+    // two bodies on the same line of sight far out: the nearer one is in front, even when the
+    // farther one is much bigger (pulling both in to a far plane sorted them by their shrunk size)
+    #[test]
+    fn far_bodies_sort_by_their_real_distance() {
+        let dir = Vec3::new(0.3, 0.1, -1.0).normalize();
+        let small_near_back = depth_of(dir * (1_000_000.0 + 40.0));
+        let big_far_front = depth_of(dir * (3_000_000.0 - 5_000.0));
+        assert!(small_near_back > big_far_front);
     }
 
     // ray_dirs packs the camera frustum as a corner (ray_dirs[0]) plus two edge vectors

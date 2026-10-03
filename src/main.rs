@@ -213,11 +213,13 @@ impl Game {
         let mut player = Player::new();
         let galaxy = crate::galaxy::Galaxy::generate(1);
         let start_planet = galaxy.start_planet_index(initial_biome);
-        let clock = Instant::now();
 
         // every planet lives in the galaxy: start on one of them, standing at local noon
         let mut planet = PlanetData::new(8); // placeholder, replaced right below
         let baked = bake_planet(&galaxy, start_planet);
+        // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
+        // turned on past noon while baking
+        let clock = Instant::now();
         let spawn = noon_spawn(&baked.data, &galaxy, start_planet, 0.0);
         install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
         player.spawn(spawn);
@@ -470,13 +472,15 @@ impl Game {
                     *bake_rx = None;
                     *baking = None;
                     let i = *start_planet;
-                    let t = clock.elapsed().as_secs_f64();
                     if *loaded_world != i {
                         let baked = bake_planet(galaxy, i);
+                        // the time after the bake: the planet keeps turning while it bakes
+                        let t = clock.elapsed().as_secs_f64();
                         let spawn = noon_spawn(&baked.data, galaxy, i, t);
                         install_world(renderer, controller, planet, baked, spawn);
                         *loaded_world = i;
                     }
+                    let t = clock.elapsed().as_secs_f64();
                     player.spawn(noon_spawn(planet, galaxy, i, t));
                     player.handover_altitude =
                         Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
