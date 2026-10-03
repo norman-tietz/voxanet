@@ -5,7 +5,7 @@ use crate::entity::Player;
 use crate::gen::CoordSystem;
 use crate::material::BlockType;
 use crate::physics::Physics;
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -246,19 +246,15 @@ impl Controller {
         false
     }
 
-    pub fn get_matrix(&self, player: &Player, width: f32, height: f32) -> Mat4 {
-        // use 45 degrees in Orbit mode for less distortion.
+    // vertical field of view: 80 degrees in first person, 45 in orbit mode for less distortion
+    pub fn fov_y(&self) -> f32 {
         let fov_degrees: f32 = if self.first_person { 80.0 } else { 45.0 };
+        fov_degrees.to_radians()
+    }
 
-        // far plane increased to 20,000 for massive zoom out
-        let proj = glam::camera::rh::proj::directx::perspective(
-            fov_degrees.to_radians(),
-            width / height,
-            0.1,
-            20000.0,
-        );
-
-        let view = if self.first_person {
+    // world -> camera, in the planet frame
+    pub fn view_matrix(&self, player: &Player) -> Mat4 {
+        if self.first_person {
             player.get_view_matrix()
         } else {
             let up = Physics::get_up_vector(player.position);
@@ -268,9 +264,28 @@ impl Controller {
             let player_forward = player.rotation * Vec3::NEG_Z;
 
             glam::camera::rh::view::look_at_mat4(cam_pos, target, player_forward)
-        };
+        }
+    }
 
-        proj * view
+    // eye position and orientation (looking down local -Z) of the camera view_matrix describes; the
+    // galaxy backdrop is drawn from exactly this pose (Renderer::render)
+    pub fn camera_pose(&self, player: &Player) -> (Vec3, Quat) {
+        let camera_to_world = self.view_matrix(player).inverse();
+        (
+            camera_to_world.w_axis.truncate(),
+            Quat::from_mat4(&camera_to_world).normalize(),
+        )
+    }
+
+    pub fn get_matrix(&self, player: &Player, width: f32, height: f32) -> Mat4 {
+        // far plane increased to 20,000 for massive zoom out
+        let proj = glam::camera::rh::proj::directx::perspective(
+            self.fov_y(),
+            width / height,
+            0.1,
+            20000.0,
+        );
+        proj * self.view_matrix(player)
     }
 
     pub fn raycast(
@@ -334,5 +349,48 @@ impl Controller {
             dist += step;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn player_on_a_slope() -> Player {
+        let mut player = Player::new();
+        player.spawn(Vec3::new(3.0, 40.0, -5.0));
+        player.cam_pitch = 0.3;
+        player
+    }
+
+    // the galaxy backdrop is drawn from camera_pose(); it must be exactly the camera the voxel
+    // engine renders with, in both views, or stars would drift against the terrain
+    #[test]
+    fn camera_pose_reproduces_the_view_matrix() {
+        let player = player_on_a_slope();
+        for first_person in [true, false] {
+            let mut c = Controller::new();
+            c.first_person = first_person;
+            let (eye, rot) = c.camera_pose(&player);
+            let rebuilt = Mat4::from_rotation_translation(rot, eye).inverse();
+            let view = c.view_matrix(&player);
+            let max_diff = (rebuilt - view)
+                .to_cols_array()
+                .iter()
+                .fold(0.0f32, |m, d| m.max(d.abs()));
+            assert!(
+                max_diff < 1e-4,
+                "first_person={first_person}: off by {max_diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn fov_is_80_degrees_first_person_and_45_third_person() {
+        let mut c = Controller::new();
+        c.first_person = true;
+        assert!((c.fov_y() - 80f32.to_radians()).abs() < 1e-6);
+        c.first_person = false;
+        assert!((c.fov_y() - 45f32.to_radians()).abs() < 1e-6);
     }
 }
