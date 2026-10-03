@@ -1,5 +1,28 @@
 use crate::entity::Player;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GalaxyRequest {
+    Enter,
+    Exit,
+    Land(usize), // TEMPORARY (removed with the seamless handover): 1-based planet number, as in the HUD
+}
+
+const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|land <planet number>";
+
+// parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
+// knows how many planets the galaxy has
+fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
+    match args {
+        ["enter"] => Ok(GalaxyRequest::Enter),
+        ["exit"] => Ok(GalaxyRequest::Exit),
+        ["land", n] => match n.parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(GalaxyRequest::Land(n)),
+            _ => Err("Planet number must be 1 or more, e.g. /galaxy land 3"),
+        },
+        _ => Err(GALAXY_USAGE),
+    }
+}
+
 pub struct Console {
     pub is_open: bool,
     pub input_buffer: String,
@@ -8,7 +31,7 @@ pub struct Console {
     pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
-    pub galaxy_request: Option<bool>, // set by /galaxy, applied by the game loop; true = enter, false = exit
+    pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
 
     history_capacity: usize,
 }
@@ -126,10 +149,9 @@ impl Console {
                 _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
             },
 
-            "/galaxy" => match parts.get(1).copied() {
-                Some("enter") => self.galaxy_request = Some(true),
-                Some("exit") => self.galaxy_request = Some(false),
-                _ => self.log("Usage: /galaxy enter|exit", [1.0, 0.5, 0.0]),
+            "/galaxy" => match parse_galaxy_command(&parts[1..]) {
+                Ok(request) => self.galaxy_request = Some(request),
+                Err(message) => self.log(message, [1.0, 0.5, 0.0]),
             },
 
             "/screenshot" => match parts.get(1) {
@@ -154,7 +176,7 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-                self.log("  /galaxy enter|exit", [0.8, 0.8, 0.8]);
+                self.log("  /galaxy enter|exit|land <n>", [0.8, 0.8, 0.8]);
             }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
@@ -206,5 +228,30 @@ impl Console {
         } else {
             self.height_fraction = (self.height_fraction - dt * speed).max(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_enter_exit_and_land() {
+        assert_eq!(parse_galaxy_command(&["enter"]), Ok(GalaxyRequest::Enter));
+        assert_eq!(parse_galaxy_command(&["exit"]), Ok(GalaxyRequest::Exit));
+        assert_eq!(
+            parse_galaxy_command(&["land", "3"]),
+            Ok(GalaxyRequest::Land(3))
+        );
+    }
+
+    #[test]
+    fn rejects_bad_land_numbers_and_unknown_subcommands() {
+        assert!(parse_galaxy_command(&["land"]).is_err());
+        assert!(parse_galaxy_command(&["land", "0"]).is_err()); // numbers are 1-based, like the HUD
+        assert!(parse_galaxy_command(&["land", "abc"]).is_err());
+        assert!(parse_galaxy_command(&["land", "-2"]).is_err());
+        assert!(parse_galaxy_command(&["fly"]).is_err());
+        assert!(parse_galaxy_command(&[]).is_err());
     }
 }

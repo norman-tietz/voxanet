@@ -214,38 +214,48 @@ impl Game {
             controller.first_person = fp;
             controller.cam_dist = if fp { 40.0 } else { 100.0 };
         }
-        if let Some(enter) = console.galaxy_request.take() {
-            match (&*mode, enter) {
-                (GameMode::Planet, true) => {
-                    *mode = GameMode::Galaxy {
-                        return_point: player.position,
-                    };
-                    *galaxy_flight =
-                        crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
-                    // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
-                    // player entered while in third person (Controller::raw_input gates it on
-                    // first_person && !mouse_released) — otherwise there's no way to turn at all.
-                    controller.first_person = true;
-                    controller.mouse_released = false;
-                    // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
-                    // input (WASD included) — close it rather than leave it capturing keys invisibly
-                    if console.is_open {
-                        console.toggle();
+        if let Some(request) = console.galaxy_request.take() {
+            let enter = match request {
+                crate::cmd::GalaxyRequest::Enter => Some(true),
+                crate::cmd::GalaxyRequest::Exit => Some(false),
+                crate::cmd::GalaxyRequest::Land(_) => {
+                    console.log("/galaxy land: not wired up yet", [1.0, 0.5, 0.0]);
+                    None
+                }
+            };
+            if let Some(enter) = enter {
+                match (&*mode, enter) {
+                    (GameMode::Planet, true) => {
+                        *mode = GameMode::Galaxy {
+                            return_point: player.position,
+                        };
+                        *galaxy_flight =
+                            crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
+                        // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
+                        // player entered while in third person (Controller::raw_input gates it on
+                        // first_person && !mouse_released) — otherwise there's no way to turn at all.
+                        controller.first_person = true;
+                        controller.mouse_released = false;
+                        // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
+                        // input (WASD included) — close it rather than leave it capturing keys invisibly
+                        if console.is_open {
+                            console.toggle();
+                        }
+                        console.log(
+                            "Entered galaxy mode. /galaxy exit to return.",
+                            [1.0, 1.0, 1.0],
+                        );
+                        println!("Entered galaxy mode. /galaxy exit to return.");
                     }
-                    console.log(
-                        "Entered galaxy mode. /galaxy exit to return.",
-                        [1.0, 1.0, 1.0],
-                    );
-                    println!("Entered galaxy mode. /galaxy exit to return.");
+                    (GameMode::Galaxy { return_point }, false) => {
+                        player.position = *return_point;
+                        player.velocity = glam::Vec3::ZERO;
+                        *mode = GameMode::Planet;
+                        console.log("Returned to the planet.", [1.0, 1.0, 1.0]);
+                        println!("Returned to the planet.");
+                    }
+                    _ => {} // already in the requested mode; no-op
                 }
-                (GameMode::Galaxy { return_point }, false) => {
-                    player.position = *return_point;
-                    player.velocity = glam::Vec3::ZERO;
-                    *mode = GameMode::Planet;
-                    console.log("Returned to the planet.", [1.0, 1.0, 1.0]);
-                    println!("Returned to the planet.");
-                }
-                _ => {} // already in the requested mode; no-op
             }
         }
         // dev convenience: polled instead of a console command so screenshots can be scripted without
