@@ -85,6 +85,25 @@ impl GalaxyCamera {
         }
     }
 
+    // galaxy mode's camera, whichever frame the flight is in (galaxy space, or captured by a planet)
+    pub fn from_flight_in_frame(
+        flight: &GalaxyFlight,
+        frame: crate::galaxy::FlightFrame,
+        galaxy: &Galaxy,
+        t: f64,
+    ) -> Self {
+        match frame {
+            crate::galaxy::FlightFrame::Free => Self::from_flight(flight),
+            crate::galaxy::FlightFrame::Captured(i) => Self::on_galaxy_planet(
+                &galaxy.planets[i],
+                flight.position.as_vec3(),
+                flight.rotation,
+                FOV_Y_RADIANS,
+                t,
+            ),
+        }
+    }
+
     // the planet camera (eye and orientation in the planet frame) on a galaxy planet
     pub fn on_galaxy_planet(
         planet: &GalaxyPlanet,
@@ -634,6 +653,32 @@ impl GalaxyRenderer {
 mod tests {
     use super::*;
     use crate::galaxy::Galaxy;
+
+    #[test]
+    fn camera_from_a_captured_flight_is_placed_in_galaxy_space() {
+        let g = Galaxy::generate(1);
+        let mut flight = GalaxyFlight::new(glam::DVec3::new(0.0, 600.0, 0.0)); // planet frame
+        flight.rotation = Quat::from_axis_angle(Vec3::X, -1.0);
+        let t = 21.0;
+        let cam = GalaxyCamera::from_flight_in_frame(
+            &flight,
+            crate::galaxy::FlightFrame::Captured(0),
+            &g,
+            t,
+        );
+        let p = &g.planets[0];
+        assert!((cam.position - p.from_planet_frame(flight.position, t)).length() < 1e-3);
+        assert!(
+            cam.rotation
+                .dot(p.rotation_from_planet_frame(flight.rotation, t))
+                .abs()
+                > 1.0 - 1e-6
+        );
+        assert_eq!(cam.fov_y, FOV_Y_RADIANS);
+        let free =
+            GalaxyCamera::from_flight_in_frame(&flight, crate::galaxy::FlightFrame::Free, &g, t);
+        assert_eq!(free.position, flight.position);
+    }
 
     #[test]
     fn content_selects_star_and_planets() {

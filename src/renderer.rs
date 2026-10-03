@@ -2373,7 +2373,7 @@ impl Renderer {
 
     pub fn render_galaxy(
         &mut self,
-        flight: &crate::galaxy::GalaxyFlight,
+        camera: &crate::galaxy_render::GalaxyCamera,
         galaxy: &crate::galaxy::Galaxy,
         t: f64,
     ) {
@@ -2395,14 +2395,14 @@ impl Renderer {
             &self.queue,
             &view,
             &self.deferred.depth,
-            &crate::galaxy_render::GalaxyCamera::from_flight(flight),
+            camera,
             crate::galaxy_render::GalaxyContent::Everything,
             galaxy,
             t,
             screen,
         );
         self.update_fps();
-        self.render_galaxy_overlay(&view, flight, galaxy, t);
+        self.render_galaxy_overlay(&view, camera, galaxy, t);
         if let Some(path) = self.screenshot_request.take() {
             crate::screenshot::capture(
                 &self.device,
@@ -2424,7 +2424,7 @@ impl Renderer {
     fn render_galaxy_overlay(
         &mut self,
         view: &wgpu::TextureView,
-        flight: &crate::galaxy::GalaxyFlight,
+        camera: &crate::galaxy_render::GalaxyCamera,
         galaxy: &crate::galaxy::Galaxy,
         t: f64,
     ) {
@@ -2455,8 +2455,8 @@ impl Renderer {
         // markers: (label, x, color), surface distance so "0" means you're touching it
         let mut markers: Vec<(String, f32, glyphon::Color)> = Vec::new();
         let mut add_marker = |name: String, pos: glam::DVec3, radius: f64, rgb: [f32; 3]| {
-            let b = crate::galaxy::compass_bearing(flight.rotation, flight.position, pos);
-            let dist = crate::galaxy::format_distance((pos - flight.position).length() - radius);
+            let b = crate::galaxy::compass_bearing(camera.rotation, camera.position, pos);
+            let dist = crate::galaxy::format_distance((pos - camera.position).length() - radius);
             let pitch = if b.pitch_deg > PITCH_HINT_DEG {
                 " ^"
             } else if b.pitch_deg < -PITCH_HINT_DEG {

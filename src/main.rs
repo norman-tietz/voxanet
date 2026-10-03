@@ -27,6 +27,7 @@ use crate::cmd::Console;
 use crate::common::PlanetData;
 use crate::controller::Controller;
 use crate::entity::Player;
+use crate::galaxy::FlightFrame;
 use crate::renderer::Renderer;
 use crate::system_diagnostics::SystemDiagnostics;
 use std::sync::Arc;
@@ -129,6 +130,17 @@ fn install_planet(
     renderer.log_memory(planet);
 }
 
+// galaxy mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
+// third person (Controller::raw_input gates it on first_person && !mouse_released); and the console
+// isn't drawn in galaxy mode, while an open one swallows all keyboard input (WASD included)
+fn enter_galaxy_controls(controller: &mut Controller, console: &mut Console) {
+    controller.first_person = true;
+    controller.mouse_released = false;
+    if console.is_open {
+        console.toggle();
+    }
+}
+
 struct Game {
     renderer: Renderer,
     controller: Controller,
@@ -140,7 +152,8 @@ struct Game {
     mode: GameMode,
     galaxy: crate::galaxy::Galaxy,
     galaxy_flight: crate::galaxy::GalaxyFlight,
-    clock: Instant, // shared game clock: galaxy orbits and planet day/night
+    flight_frame: FlightFrame, // galaxy space, or captured by a planet (galaxy.rs)
+    clock: Instant,            // shared game clock: galaxy orbits and planet day/night
     loaded_world: PlanetWorld,
     home_return: Option<HomeReturn>, // set when the player leaves the home planet
 }
@@ -181,6 +194,7 @@ impl Game {
             mode: GameMode::Planet,
             galaxy: crate::galaxy::Galaxy::generate(1),
             galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
+            flight_frame: FlightFrame::Free,
             clock: Instant::now(),
             loaded_world: PlanetWorld::Home,
             home_return: None,
@@ -200,6 +214,7 @@ impl Game {
             mode,
             galaxy,
             galaxy_flight,
+            flight_frame,
             clock,
             loaded_world,
             home_return,
@@ -240,6 +255,31 @@ impl Game {
             GameMode::Galaxy => {
                 let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
                 galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint);
+                let t = clock.elapsed().as_secs_f64();
+                // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
+                let next = crate::galaxy::next_flight_frame(
+                    galaxy,
+                    *flight_frame,
+                    galaxy_flight.position,
+                    t,
+                );
+                if next != *flight_frame {
+                    galaxy_flight.change_frame(*flight_frame, next, galaxy, t);
+                    match next {
+                        FlightFrame::Captured(i) => println!("Entering the orbit of #{}", i + 1),
+                        FlightFrame::Free => println!("Leaving orbit"),
+                    }
+                    *flight_frame = next;
+                }
+                // in a planet's frame, ease roll level with its horizon: the planet camera has none
+                if let FlightFrame::Captured(_) = *flight_frame {
+                    let up = galaxy_flight.position.normalize_or_zero().as_vec3();
+                    galaxy_flight.rotation = crate::galaxy::level_roll(
+                        galaxy_flight.rotation,
+                        up,
+                        crate::galaxy::ROLL_LEVEL_RATE * dt,
+                    );
+                }
             }
         }
 
@@ -275,16 +315,8 @@ impl Game {
                     *mode = GameMode::Galaxy;
                     *galaxy_flight =
                         crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
-                    // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
-                    // player entered while in third person (Controller::raw_input gates it on
-                    // first_person && !mouse_released) — otherwise there's no way to turn at all.
-                    controller.first_person = true;
-                    controller.mouse_released = false;
-                    // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
-                    // input (WASD included) — close it rather than leave it capturing keys invisibly
-                    if console.is_open {
-                        console.toggle();
-                    }
+                    *flight_frame = FlightFrame::Free;
+                    enter_galaxy_controls(controller, console);
                     say(console, "Entered galaxy mode. /galaxy exit to return.");
                 }
                 (GalaxyRequest::Exit, _) if *loaded_world == PlanetWorld::Home => {
@@ -334,6 +366,35 @@ impl Game {
                                 "Landed on #{n} {} (res {}). /galaxy exit to go home.",
                                 target.planet_type.def().name,
                                 target.voxel_resolution()
+                            ),
+                        );
+                    }
+                },
+                (GalaxyRequest::Goto { planet: n, radii }, _) => match galaxy.planets.get(n - 1) {
+                    None => console.log(
+                        &format!(
+                            "No planet #{n}: this galaxy has 1..={}",
+                            galaxy.planets.len()
+                        ),
+                        [1.0, 0.5, 0.0],
+                    ),
+                    Some(target) => {
+                        let t = clock.elapsed().as_secs_f64();
+                        // over the day side, looking at the planet's centre (roll levels out by itself)
+                        let dir = target.sun_dir_in_planet_frame(galaxy.star.position(), t);
+                        *galaxy_flight = crate::galaxy::GalaxyFlight::new(
+                            (dir * radii * target.radius).as_dvec3(),
+                        );
+                        galaxy_flight.rotation =
+                            glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
+                        *flight_frame = FlightFrame::Captured(n - 1);
+                        *mode = GameMode::Galaxy;
+                        enter_galaxy_controls(controller, console);
+                        say(
+                            console,
+                            &format!(
+                                "Orbiting #{n} {} at {radii} radii.",
+                                target.planet_type.def().name
                             ),
                         );
                     }
@@ -610,7 +671,13 @@ impl Game {
                         renderer.render(controller, player, planet, console, t, sun, &backdrop)
                     }
                     GameMode::Galaxy => {
-                        renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t)
+                        let camera = crate::galaxy_render::GalaxyCamera::from_flight_in_frame(
+                            &self.galaxy_flight,
+                            self.flight_frame,
+                            &self.galaxy,
+                            t,
+                        );
+                        renderer.render_galaxy(&camera, &self.galaxy, t)
                     }
                 }
             }
