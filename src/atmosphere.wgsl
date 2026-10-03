@@ -189,18 +189,26 @@ fn atmo_sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, planet
 // atmosphere seen beyond the clouds: a stylised gradient from deep space into a blue dome that warms
 // toward the sun, plus a glow where the view ray grazes the planet's limb (seen from orbit/third person)
 fn atmo_sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
+    return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L);
+}
+
+// the sky without the sun disc: for the galaxy impostors' atmosphere shell, where the galaxy draws
+// the star itself — and where L (planet -> star) is not the camera's direction to the star, so the
+// engine's disc would show up as a second sun beside the real one
+fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     let limb = atmo_limb(ray_dir, cam_pos, a.planet_r);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
     let dome = mix(a.sky_zenith * 0.7, a.sky_horizon, sun_glow);
+    return mix(a.space_color, dome, limb);
+}
 
-    // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it
-    // out white-hot. Only ever drawn where this ray truly reaches deep space (never called for a ray
-    // that hit terrain first), so it's automatically hidden on the planet's own night side and
-    // correctly occluded wherever callers composite clouds on top afterwards.
+// the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it out
+// white-hot. Only ever drawn where the ray truly reaches deep space (never for a ray that hit terrain
+// first), so it's automatically hidden on the planet's own night side and correctly occluded wherever
+// callers composite clouds on top afterwards.
+fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
     let sun_cos = max(dot(ray_dir, L), 0.0);
-    let sun = SUN_COLOR * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
-
-    return mix(a.space_color, dome, limb) + sun;
+    return SUN_COLOR * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what
@@ -209,10 +217,28 @@ fn atmo_sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: 
     return atmo_sky_gradient(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r);
 }
 
+// length of the segment from the camera to `world_pos` that lies inside the atmosphere (the sphere at
+// the limb scale, planet_r * CLOUD_ALT * 1.2): a camera inside it gets the whole distance
+fn atmo_fog_distance(cam_pos: vec3<f32>, world_pos: vec3<f32>, planet_r: f32) -> f32 {
+    let dist = distance(cam_pos, world_pos);
+    let atmo_r = planet_r * CLOUD_ALT * 1.2;
+    if (dot(cam_pos, cam_pos) <= atmo_r * atmo_r) {
+        return dist;
+    }
+    let entry = sphere_hit(cam_pos, (world_pos - cam_pos) / max(dist, 1e-6), atmo_r);
+    if (entry < 0.0) {
+        return 0.0;
+    }
+    return max(dist - entry, 0.0);
+}
+
 // exp² air fog toward the sky the camera would see in that direction, so there's no seam between
 // distant terrain and open sky; stays in linear space (no tone mapping)
 fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
-    let dist = distance(cam_pos, world_pos);
+    // only the stretch of the view ray inside the atmosphere fogs: on the ground that's all of it (as
+    // before); from orbit the empty space in between adds no haze — otherwise a planet seen from a few
+    // radii out faded into a flat sky-coloured disc
+    let dist = atmo_fog_distance(cam_pos, world_pos, a.planet_r);
     let fog_factor = 1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5));
     let ray_dir = normalize(world_pos - cam_pos);
     let fog_col = atmo_sky_over_black(ray_dir, cam_pos, L, a);

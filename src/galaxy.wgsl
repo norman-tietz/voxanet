@@ -164,7 +164,8 @@ fn fs_atmosphere(in: AtmosphereVertexOut) -> @location(0) vec4<f32> {
     let ray_dir = normalize(in.local_pos - cam);
 
     var alpha = atmo_sky_opacity(ray_dir, cam, L, a.planet_r);
-    var color = atmo_sky_gradient(ray_dir, cam, L, a) * alpha;
+    // no sun disc: the galaxy draws the star itself (atmo_sky_dome)
+    var color = atmo_sky_dome(ray_dir, cam, L, a) * alpha;
     let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
     if (cloud_t > 0.0) {
         let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
