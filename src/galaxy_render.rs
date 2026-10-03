@@ -38,6 +38,7 @@ struct GalaxyPlanetUniform {
     offset: [f32; 4],
     light_dir: [f32; 4],
     atmosphere_color: [f32; 4],
+    model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
 struct PlanetMesh {
@@ -514,6 +515,7 @@ impl GalaxyRenderer {
             }
             let light_dir = (-body_pos).normalize_or_zero().as_vec3();
             let atmosphere = p.planet_type.def().atmosphere;
+            let model = glam::Mat3::from_quat(p.orientation(t));
             planet_uniforms.push(GalaxyPlanetUniform {
                 offset: [camera_relative.x, camera_relative.y, camera_relative.z, 0.0],
                 light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
@@ -522,6 +524,11 @@ impl GalaxyRenderer {
                     atmosphere.sky_zenith[1],
                     atmosphere.sky_zenith[2],
                     ATMOSPHERE_GLOW_STRENGTH,
+                ],
+                model: [
+                    model.x_axis.extend(0.0).to_array(),
+                    model.y_axis.extend(0.0).to_array(),
+                    model.z_axis.extend(0.0).to_array(),
                 ],
             });
         }

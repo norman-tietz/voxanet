@@ -51,6 +51,7 @@ struct PlanetUniform {
     offset: vec4<f32>,         // camera-relative position (xyz), unused (w)
     light_dir: vec4<f32>,      // direction from this planet toward the star (xyz), unused (w)
     atmosphere_color: vec4<f32>, // rgb: limb-glow tint (the planet type's sky_zenith), w: glow strength
+    model: mat3x3<f32>,        // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
 @group(1) @binding(0) var<uniform> planet: PlanetUniform;
@@ -70,11 +71,11 @@ fn vs_planet(
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
 ) -> PlanetVertexOut {
-    let world_pos = planet.offset.xyz + pos;
+    let world_pos = planet.offset.xyz + planet.model * pos;
     var out: PlanetVertexOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.world_pos = world_pos;
-    out.world_normal = normal;
+    out.world_normal = planet.model * normal;
     out.color = color;
     out.light_dir = planet.light_dir.xyz;
     out.atmosphere_color = planet.atmosphere_color;
