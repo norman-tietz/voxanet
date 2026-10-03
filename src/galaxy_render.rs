@@ -22,7 +22,23 @@ const ICOSPHERE_SUBDIVISIONS: u32 = 2;
 // switches between the two cameras, and a different field of view would zoom the view right then
 const FOV_Y_RADIANS: f32 = 80.0 * std::f32::consts::PI / 180.0;
 const NEAR_PLANE: f32 = 1.0;
-const FAR_PLANE: f32 = 200_000.0; // comfortably past the outermost orbit (galaxy.rs)
+const FAR_PLANE: f32 = 200_000.0;
+// bodies farther than this are drawn pulled in to it (fit_within_far_plane): /galaxy add puts planets
+// on orbits far past FAR_PLANE (up to millions of units), and from out there the star is farther too
+const FAR_FIT_DISTANCE: f32 = 0.9 * FAR_PLANE;
+
+// where to draw a body at camera-relative `offset` so it fits inside the depth range: unchanged if
+// it's within FAR_FIT_DISTANCE, else pulled in along its direction to that distance, with the scale
+// its size must be multiplied by so it looks exactly as big as it would at its real distance
+fn fit_within_far_plane(offset: Vec3) -> (Vec3, f32) {
+    let distance = offset.length();
+    if distance <= FAR_FIT_DISTANCE {
+        (offset, 1.0)
+    } else {
+        let scale = FAR_FIT_DISTANCE / distance;
+        (offset * scale, scale)
+    }
+}
 const MAX_BODIES: usize = MAX_PLANETS + 1; // the star + every planet the galaxy can hold
 
 #[repr(C)]
@@ -535,13 +551,14 @@ impl GalaxyRenderer {
         let mut bodies = Vec::with_capacity(1 + galaxy.planets.len());
         {
             // the star is always part of the view (only planets can be left out)
-            let star_camera_relative = (galaxy.star.position() - camera.position).as_vec3();
+            let (star_offset, star_scale) =
+                fit_within_far_plane((galaxy.star.position() - camera.position).as_vec3());
             bodies.push(GalaxyBodyUniform {
                 offset: [
-                    star_camera_relative.x,
-                    star_camera_relative.y,
-                    star_camera_relative.z,
-                    galaxy.star.radius as f32,
+                    star_offset.x,
+                    star_offset.y,
+                    star_offset.z,
+                    galaxy.star.radius as f32 * star_scale,
                 ],
                 color: [1.6, 1.4, 0.9, 1.0],
                 light_dir: [0.0, 1.0, 0.0, 0.0],
@@ -568,14 +585,17 @@ impl GalaxyRenderer {
             let atmosphere = p.planet_type.def().atmosphere;
             let model = glam::Mat3::from_quat(p.orientation(t));
             let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
+            // far planets are drawn pulled in and shrunk (same apparent size); the shader undoes the
+            // scale for its planet-frame lighting
+            let (draw_offset, draw_scale) = fit_within_far_plane(camera_relative);
             planet_uniforms.push(GalaxyPlanetUniform {
                 offset: [
-                    camera_relative.x,
-                    camera_relative.y,
-                    camera_relative.z,
+                    draw_offset.x,
+                    draw_offset.y,
+                    draw_offset.z,
                     p.voxel_resolution() as f32 / 2.0,
                 ],
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                light_dir: [light_dir.x, light_dir.y, light_dir.z, draw_scale],
                 sky_zenith: v4(atmosphere.sky_zenith),
                 sky_horizon: v4(atmosphere.sky_horizon_warm),
                 space_color: v4(atmosphere.space_color),
@@ -846,36 +866,61 @@ mod tests {
         assert_eq!(cam.fov_y, FOV_Y_RADIANS);
     }
 
-    // integration: Galaxy + GalaxyFlight together, at the same default entry point `Game::new` /
-    // the `/galaxy enter` handler use (src/main.rs), should keep every body within the render
-    // pipeline's near/far planes and within the body-storage buffer's capacity.
+    // bodies beyond the far plane are drawn pulled in along their direction and shrunk by the same
+    // factor: same direction, same apparent size, but inside the depth range
     #[test]
-    // clippy's int_plus_one suggests `planets.len() < MAX_BODIES`, which is equivalent but hides
-    // the "+1 for the star" reasoning the assertion is meant to document; keep the explicit form.
-    #[allow(clippy::int_plus_one)]
-    fn galaxy_and_flight_keep_every_body_within_render_planes() {
-        let galaxy = Galaxy::generate(1);
-        let flight = GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
-
-        let star_distance = flight.position.length();
+    fn far_bodies_are_pulled_inside_the_far_plane_at_the_same_apparent_size() {
+        let far = Vec3::new(0.0, 0.0, -500_000.0);
+        let (pulled, scale) = fit_within_far_plane(far);
+        assert!(pulled.length() <= FAR_FIT_DISTANCE + 1e-2, "{pulled:?}");
         assert!(
-            star_distance > NEAR_PLANE as f64 && star_distance < FAR_PLANE as f64,
-            "star distance {star_distance} not within ({NEAR_PLANE}, {FAR_PLANE})"
+            (pulled.normalize() - Vec3::NEG_Z).length() < 1e-6,
+            "same direction"
         );
+        assert!(
+            (scale - FAR_FIT_DISTANCE / 500_000.0).abs() < 1e-6,
+            "same apparent size"
+        );
+        let near = Vec3::new(100.0, 0.0, 0.0);
+        assert_eq!(
+            fit_within_far_plane(near),
+            (near, 1.0),
+            "near bodies untouched"
+        );
+    }
 
-        for (i, p) in galaxy.planets.iter().enumerate() {
-            let distance = (p.position_at(0.0) - flight.position).length();
+    // integration: a galaxy filled to MAX_PLANETS (/galaxy add puts planets on ever wider orbits,
+    // the outermost far past FAR_PLANE), seen from just above its outermost planet: after
+    // fit_within_far_plane every body — the star included — is inside the near/far planes, and
+    // the body buffer holds the star plus every planet
+    #[test]
+    #[allow(clippy::int_plus_one)]
+    fn a_full_galaxy_seen_from_its_outermost_planet_stays_within_render_planes() {
+        let mut galaxy = Galaxy::generate(1);
+        while galaxy.planets.len() < MAX_PLANETS {
+            galaxy
+                .add_planet(crate::biome::PlanetType::Ice, 100.0)
+                .unwrap();
+        }
+        let outer = galaxy.planets[MAX_PLANETS - 1];
+        let t = 0.0;
+        let camera = outer.position_at(t) + glam::DVec3::new(0.0, 3.0 * outer.radius as f64, 0.0);
+        let mut bodies: Vec<(glam::DVec3, f32)> =
+            vec![(galaxy.star.position(), galaxy.star.radius as f32)];
+        bodies.extend(galaxy.planets.iter().map(|p| (p.position_at(t), p.radius)));
+        for (i, (pos, radius)) in bodies.into_iter().enumerate() {
+            let (offset, scale) = fit_within_far_plane((pos - camera).as_vec3());
+            let far_edge = offset.length() + radius * scale;
             assert!(
-                distance > NEAR_PLANE as f64 && distance < FAR_PLANE as f64,
-                "planet {i} distance {distance} not within ({NEAR_PLANE}, {FAR_PLANE})"
+                far_edge < FAR_PLANE,
+                "body {i}: far edge {far_edge} beyond {FAR_PLANE}"
+            );
+            assert!(
+                offset.length() > NEAR_PLANE,
+                "body {i} inside the near plane"
             );
         }
-
-        assert!(
-            galaxy.planets.len() + 1 <= MAX_BODIES,
-            "star + planets ({}) exceed MAX_BODIES ({MAX_BODIES})",
-            galaxy.planets.len() + 1
-        );
+        assert!(galaxy.planets.len() + 1 <= MAX_BODIES);
     }
 
     // ray_dirs packs the camera frustum as a corner (ray_dirs[0]) plus two edge vectors

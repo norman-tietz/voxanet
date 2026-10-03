@@ -50,7 +50,9 @@ fn fs_body(in: VertexOut) -> @location(0) vec4<f32> {
 
 struct PlanetUniform {
     offset: vec4<f32>,      // xyz: camera-relative planet centre, w: planet radius (voxel resolution / 2)
-    light_dir: vec4<f32>,   // direction from this planet toward the star (galaxy space)
+    light_dir: vec4<f32>,   // xyz: direction from this planet toward the star (galaxy space), w: draw scale
+                            // (< 1 when a far planet is drawn pulled inside the far plane, see
+                            // galaxy_render.rs fit_within_far_plane; offset is already pulled in)
     sky_zenith: vec4<f32>,  // the planet type's atmosphere colours (rgb), as the engine's Biome uniform
     sky_horizon: vec4<f32>,
     space_color: vec4<f32>,
@@ -75,7 +77,8 @@ fn planet_atmosphere() -> Atmosphere {
 // the camera (at the galaxy-space origin, camera-relative rendering) and the sun, in this planet's
 // own frame — where the voxel engine does all its lighting, clouds and sky
 fn planet_frame_camera() -> vec3<f32> {
-    return transpose(planet.model) * (-planet.offset.xyz);
+    // offset is pulled in by the draw scale for far planets: undo it, the lighting needs the real camera
+    return transpose(planet.model) * (-planet.offset.xyz / planet.light_dir.w);
 }
 
 fn planet_frame_light() -> vec3<f32> {
@@ -95,7 +98,7 @@ fn vs_planet(
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
 ) -> PlanetVertexOut {
-    let world_pos = planet.offset.xyz + planet.model * pos;
+    let world_pos = planet.offset.xyz + planet.model * (pos * planet.light_dir.w);
     var out: PlanetVertexOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.local_pos = pos;
@@ -146,7 +149,7 @@ struct AtmosphereVertexOut {
 fn vs_atmosphere(@location(0) pos: vec3<f32>) -> AtmosphereVertexOut {
     let local = pos * planet.offset.w * ATMOSPHERE_SHELL_RADII;
     var out: AtmosphereVertexOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(planet.offset.xyz + planet.model * local, 1.0);
+    out.clip_pos = camera.view_proj * vec4<f32>(planet.offset.xyz + planet.model * (local * planet.light_dir.w), 1.0);
     out.local_pos = local;
     return out;
 }
