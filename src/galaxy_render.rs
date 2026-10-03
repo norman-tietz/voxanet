@@ -50,6 +50,22 @@ const MAX_PLANETS: usize = MAX_BODIES - 1; // the star takes one conceptual slot
                                            // share the body path, but this keeps one shared cap
 const ATMOSPHERE_GLOW_STRENGTH: f32 = 0.6;
 
+// starting points from the galaxy-terrain-impostors design discussion's faceting estimate
+// (~10-13x radius before individual facets become visually obvious at this project's FOV);
+// tune after a visual check, same as every other distance-based constant in this codebase
+const LOD_MEDIUM_DISTANCE_MULTIPLIER: f32 = 13.0;
+const LOD_NEAR_DISTANCE_MULTIPLIER: f32 = 6.0;
+
+fn subdivision_for_distance(distance: f32, radius: f32) -> u32 {
+    if distance > LOD_MEDIUM_DISTANCE_MULTIPLIER * radius {
+        2
+    } else if distance > LOD_NEAR_DISTANCE_MULTIPLIER * radius {
+        4
+    } else {
+        5
+    }
+}
+
 pub struct GalaxyRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
@@ -389,9 +405,10 @@ impl GalaxyRenderer {
 
         let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
         for (i, p) in galaxy.planets.iter().enumerate() {
-            self.ensure_planet_mesh(device, i, p, ICOSPHERE_SUBDIVISIONS);
             let body_pos = p.position_at(t);
-            let camera_relative = (body_pos - flight.position).as_vec3();
+            let camera_relative = (body_pos - flight.position).as_vec3(); // already computed here
+            let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
+            self.ensure_planet_mesh(device, i, p, subdivision);
             let light_dir = (-body_pos).normalize_or_zero().as_vec3();
             let atmosphere = p.planet_type.def().atmosphere;
             planet_uniforms.push(GalaxyPlanetUniform {
@@ -458,8 +475,11 @@ impl GalaxyRenderer {
 
             pass.set_pipeline(&self.planet_pipeline);
             pass.set_bind_group(0, &self.camera_bind, &[]);
-            for i in 0..galaxy.planets.len() {
-                if let Some(mesh) = self.planet_meshes.get(&(i, ICOSPHERE_SUBDIVISIONS)) {
+            for (i, p) in galaxy.planets.iter().enumerate() {
+                let body_pos = p.position_at(t);
+                let camera_relative = (body_pos - flight.position).as_vec3();
+                let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
+                if let Some(mesh) = self.planet_meshes.get(&(i, subdivision)) {
                     pass.set_bind_group(
                         1,
                         &self.planet_uniform_bind,
@@ -589,5 +609,28 @@ mod tests {
             (center - forward).length() < 1e-5,
             "center ray {center:?} should match forward {forward:?}"
         );
+    }
+
+    #[test]
+    fn subdivision_is_coarsest_far_away() {
+        assert_eq!(subdivision_for_distance(2000.0, 100.0), 2); // 20x radius
+    }
+
+    #[test]
+    fn subdivision_steps_up_at_the_medium_threshold() {
+        assert_eq!(subdivision_for_distance(1200.0, 100.0), 4); // 12x radius, just inside 13x
+    }
+
+    #[test]
+    fn subdivision_is_finest_up_close() {
+        assert_eq!(subdivision_for_distance(500.0, 100.0), 5); // 5x radius, inside 6x
+    }
+
+    #[test]
+    fn subdivision_thresholds_scale_with_radius() {
+        // same distance, bigger planet: a 250-radius planet at 2000 units is only 8x its own
+        // radius (medium tier), while a 40-radius planet at the same distance is 50x (coarsest)
+        assert_eq!(subdivision_for_distance(2000.0, 250.0), 4);
+        assert_eq!(subdivision_for_distance(2000.0, 40.0), 2);
     }
 }
