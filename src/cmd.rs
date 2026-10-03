@@ -4,11 +4,10 @@ use crate::entity::Player;
 pub enum GalaxyRequest {
     Enter,
     Exit,
-    Land(usize), // TEMPORARY (removed with the seamless handover): 1-based planet number, as in the HUD
     Goto { planet: usize, radii: f32 }, // 1-based planet number; distance from its centre in its radii
 }
 
-const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|land <n>|goto <n> <radii>";
+const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|goto <n> <radii>";
 
 // parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
 // knows how many planets the galaxy has
@@ -16,10 +15,6 @@ fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
     match args {
         ["enter"] => Ok(GalaxyRequest::Enter),
         ["exit"] => Ok(GalaxyRequest::Exit),
-        ["land", n] => match n.parse::<usize>() {
-            Ok(n) if n >= 1 => Ok(GalaxyRequest::Land(n)),
-            _ => Err("Planet number must be 1 or more, e.g. /galaxy land 3"),
-        },
         ["goto", n, radii] => {
             let planet = n.parse::<usize>().ok().filter(|&n| n >= 1);
             let radii = radii
@@ -188,10 +183,7 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-                self.log(
-                    "  /galaxy enter|exit|land <n>|goto <n> <radii>",
-                    [0.8, 0.8, 0.8],
-                );
+                self.log("  /galaxy enter|exit|goto <n> <radii>", [0.8, 0.8, 0.8]);
             }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
@@ -274,21 +266,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_enter_exit_and_land() {
+    fn parses_enter_and_exit_and_no_longer_land() {
         assert_eq!(parse_galaxy_command(&["enter"]), Ok(GalaxyRequest::Enter));
         assert_eq!(parse_galaxy_command(&["exit"]), Ok(GalaxyRequest::Exit));
-        assert_eq!(
-            parse_galaxy_command(&["land", "3"]),
-            Ok(GalaxyRequest::Land(3))
-        );
+        // /galaxy land was milestone-1 scaffolding; the seamless handover replaces it
+        assert!(parse_galaxy_command(&["land", "3"]).is_err());
     }
 
     #[test]
-    fn rejects_bad_land_numbers_and_unknown_subcommands() {
-        assert!(parse_galaxy_command(&["land"]).is_err());
-        assert!(parse_galaxy_command(&["land", "0"]).is_err()); // numbers are 1-based, like the HUD
-        assert!(parse_galaxy_command(&["land", "abc"]).is_err());
-        assert!(parse_galaxy_command(&["land", "-2"]).is_err());
+    fn rejects_unknown_subcommands() {
         assert!(parse_galaxy_command(&["fly"]).is_err());
         assert!(parse_galaxy_command(&[]).is_err());
     }

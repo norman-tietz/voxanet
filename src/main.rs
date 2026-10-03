@@ -287,6 +287,9 @@ impl Game {
             }
         }
 
+        let mut land_on: Option<usize> = None; // landing handover this tick (planet index)
+        let mut lift_off_from: Option<usize> = None; // liftoff handover this tick
+
         // physics & player Update (once per tick: movement and turning speeds are per second)
         match mode {
             GameMode::Planet => {
@@ -300,6 +303,14 @@ impl Game {
 
                 renderer.update_cursor(planet, controller.cursor_id);
                 renderer.update_view(player.position, planet);
+
+                // high enough above a galaxy planet: hand back to captured galaxy flight
+                if let PlanetWorld::Galaxy(i) = *loaded_world {
+                    let radius = galaxy.planets[i].radius;
+                    if crate::landing::should_lift_off(player.position.length() / radius) {
+                        lift_off_from = Some(i);
+                    }
+                }
             }
             GameMode::Galaxy => {
                 let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
@@ -340,6 +351,11 @@ impl Game {
                     );
                 }
                 if let FlightFrame::Captured(i) = *flight_frame {
+                    // the impostor is all there is until the voxel world is ready: don't sink into it
+                    galaxy_flight.position = crate::landing::keep_above_planet(
+                        galaxy_flight.position,
+                        galaxy.planets[i].radius as f64,
+                    );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
                     if *loaded_world != PlanetWorld::Galaxy(i) && *baking != Some(i) {
                         *bake_rx = Some(start_bake(galaxy, i));
@@ -353,9 +369,51 @@ impl Game {
                             println!("Voxel world for #{} ready", i + 1);
                             *voxel_ready_announced = true;
                         }
+                        let distance_radii =
+                            galaxy_flight.position.length() / galaxy.planets[i].radius as f64;
+                        if crate::landing::should_land(distance_radii, renderer.view_covered()) {
+                            land_on = Some(i);
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(i) = land_on {
+            // galaxy flight -> voxel engine: same eye, same view direction, in fly mode
+            let (position, rotation, cam_pitch) = crate::landing::player_pose_from_flight(
+                galaxy_flight.position.as_vec3(),
+                galaxy_flight.rotation,
+            );
+            player.position = position;
+            player.rotation = rotation;
+            player.cam_pitch = cam_pitch;
+            player.velocity = glam::Vec3::ZERO;
+            player.landing = false;
+            player.handover_altitude =
+                Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
+            // dying here respawns on dry land below, not back in orbit
+            let below = planet.safe_spawn_direction(position.normalize());
+            player.spawn_point = below * spawn_radius(planet, below, 10.0);
+            controller.fly_mode = true;
+            controller.first_person = true;
+            *mode = GameMode::Planet;
+            println!("Landing handover onto #{}", i + 1);
+        }
+        if let Some(i) = lift_off_from {
+            // voxel engine -> captured galaxy flight: same eye, same view direction
+            let (eye, rotation) = crate::landing::flight_pose_from_player(
+                player.position,
+                player.rotation,
+                player.cam_pitch,
+            );
+            *galaxy_flight = crate::galaxy::GalaxyFlight::new(eye.as_dvec3());
+            galaxy_flight.rotation = rotation;
+            *flight_frame = FlightFrame::Captured(i);
+            player.landing = false;
+            *mode = GameMode::Galaxy;
+            enter_galaxy_controls(controller, console);
+            println!("Liftoff into the orbit of #{}", i + 1);
         }
 
         // a background bake finished: install it unless the player went home, landed or got
@@ -435,40 +493,11 @@ impl Game {
                         data.switch_planet_type(home.planet_type);
                         install_planet(renderer, controller, player, planet, data, home.position);
                     }
+                    player.handover_altitude = None;
                     *loaded_world = PlanetWorld::Home;
                     *mode = GameMode::Planet;
                     say(console, "Returned to the home planet.");
                 }
-                (GalaxyRequest::Land(n), _) => match galaxy.planets.get(n - 1) {
-                    None => console.log(
-                        &format!(
-                            "No planet #{n}: this galaxy has 1..={}",
-                            galaxy.planets.len()
-                        ),
-                        [1.0, 0.5, 0.0],
-                    ),
-                    Some(target) => {
-                        // TEMPORARY (milestone 1): a hard cut onto the surface, to validate the
-                        // seeded bake and the real-star sun before the seamless descent exists
-                        let t = clock.elapsed().as_secs_f64();
-                        let data = target.bake();
-                        // land at local noon: the surface point facing the star
-                        let noon = target.sun_dir_in_planet_frame(galaxy.star.position(), t);
-                        let dir = data.safe_spawn_direction(noon);
-                        let pos = dir * spawn_radius(&data, dir, 10.0);
-                        install_planet(renderer, controller, player, planet, data, pos);
-                        *loaded_world = PlanetWorld::Galaxy(n - 1);
-                        *mode = GameMode::Planet;
-                        say(
-                            console,
-                            &format!(
-                                "Landed on #{n} {} (res {}). /galaxy exit to go home.",
-                                target.planet_type.def().name,
-                                target.voxel_resolution()
-                            ),
-                        );
-                    }
-                },
                 (GalaxyRequest::Goto { planet: n, radii }, _) => match galaxy.planets.get(n - 1) {
                     None => console.log(
                         &format!(

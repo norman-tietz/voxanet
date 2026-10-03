@@ -139,9 +139,40 @@ pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) 
     })
 }
 
+// captured galaxy flight can't go below this distance from the planet's centre (in its radii):
+// it only matters while the voxel world isn't ready yet — once it is, the landing handover happens
+// at LAND_HANDOVER_RADII, above this
+pub const MIN_CAPTURED_RADII: f64 = 2.0;
+
+pub fn keep_above_planet(pos: glam::DVec3, planet_radius: f64) -> glam::DVec3 {
+    let min = MIN_CAPTURED_RADII * planet_radius;
+    let dist = pos.length();
+    if dist < min && dist > 1e-9 {
+        pos * (min / dist)
+    } else {
+        pos
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // until the voxel world is ready the impostor is all there is: captured flight must not sink
+    // into (or through) the planet while waiting
+    #[test]
+    fn captured_flight_is_kept_above_two_radii() {
+        let r = 168.5;
+        let inside = glam::DVec3::new(0.0, 1.2 * r, 0.0);
+        let kept = keep_above_planet(inside, r);
+        assert!((kept.length() - MIN_CAPTURED_RADII * r).abs() < 1e-9);
+        assert!(
+            (kept.normalize() - inside.normalize()).length() < 1e-12,
+            "same direction"
+        );
+        let fine = glam::DVec3::new(2.5 * r, 0.0, 0.0);
+        assert_eq!(keep_above_planet(fine, r), fine);
+    }
 
     #[test]
     fn fly_speed_matches_galaxy_cruise_at_the_handover_altitude() {

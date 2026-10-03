@@ -11,7 +11,9 @@ use glam::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
 const ICOSPHERE_SUBDIVISIONS: u32 = 2;
-const FOV_Y_RADIANS: f32 = 1.0;
+// the first-person planet camera's 80 degrees (Controller::fov_y): the landing/liftoff handover
+// switches between the two cameras, and a different field of view would zoom the view right then
+const FOV_Y_RADIANS: f32 = 80.0 * std::f32::consts::PI / 180.0;
 const NEAR_PLANE: f32 = 1.0;
 const FAR_PLANE: f32 = 200_000.0; // comfortably past the outermost orbit (galaxy.rs)
 const MAX_BODIES: usize = 16; // star + up to 15 planets; galaxy.rs generates 7 today
@@ -702,6 +704,15 @@ impl GalaxyRenderer {
 mod tests {
     use super::*;
     use crate::galaxy::Galaxy;
+
+    // the landing handover switches from galaxy mode's camera to the first-person planet camera:
+    // a different field of view would zoom the planet visibly at that moment
+    #[test]
+    fn galaxy_mode_uses_the_first_person_planet_cameras_field_of_view() {
+        let mut controller = crate::controller::Controller::new();
+        controller.first_person = true;
+        assert!((FOV_Y_RADIANS - controller.fov_y()).abs() < 1e-6);
+    }
 
     #[test]
     fn camera_from_a_captured_flight_is_placed_in_galaxy_space() {
