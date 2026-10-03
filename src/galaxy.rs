@@ -197,9 +197,79 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool) -> Vec3 {
     }
 }
 
+// Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
+// left/right angle from the view direction (positive = right, ±180 = straight behind), pitch the
+// up/down angle (positive = above). Both in degrees, camera-relative, so they follow mouse-look.
+#[derive(Clone, Copy, Debug)]
+pub struct CompassBearing {
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+}
+
+pub fn compass_bearing(rotation: Quat, from: DVec3, to: DVec3) -> CompassBearing {
+    let world = (to - from).as_vec3();
+    let local = rotation.inverse() * world; // camera looks down -Z
+    let horizontal = (local.x * local.x + local.z * local.z).sqrt();
+    CompassBearing {
+        yaw_deg: local.x.atan2(-local.z).to_degrees(),
+        pitch_deg: local.y.atan2(horizontal).to_degrees(),
+    }
+}
+
+// Compact, non-technical distance label for the compass: "850", "12.3k", "250k", "3.4M".
+pub fn format_distance(d: f64) -> String {
+    let d = d.max(0.0);
+    let short = |v: f64, suffix: &str| {
+        if v < 100.0 {
+            format!("{v:.1}{suffix}")
+        } else {
+            format!("{v:.0}{suffix}")
+        }
+    };
+    if d < 1_000.0 {
+        format!("{d:.0}")
+    } else if d < 1_000_000.0 {
+        short(d / 1_000.0, "k")
+    } else {
+        short(d / 1_000_000.0, "M")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compass_bearing_straight_ahead_is_zero() {
+        let b = compass_bearing(Quat::IDENTITY, DVec3::ZERO, DVec3::new(0.0, 0.0, -100.0));
+        assert!(b.yaw_deg.abs() < 1e-3 && b.pitch_deg.abs() < 1e-3, "{b:?}");
+    }
+
+    #[test]
+    fn compass_bearing_right_left_behind_above() {
+        let at = |to: DVec3| compass_bearing(Quat::IDENTITY, DVec3::ZERO, to);
+        assert!((at(DVec3::new(100.0, 0.0, 0.0)).yaw_deg - 90.0).abs() < 1e-3);
+        assert!((at(DVec3::new(-100.0, 0.0, 0.0)).yaw_deg + 90.0).abs() < 1e-3);
+        assert!((at(DVec3::new(0.0, 0.0, 100.0)).yaw_deg.abs() - 180.0).abs() < 1e-3);
+        assert!((at(DVec3::new(0.0, 100.0, -100.0)).pitch_deg - 45.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn compass_bearing_follows_camera_rotation() {
+        // turned 90 degrees left (yaw about +Y): a target straight ahead in world space is now to the right
+        let rot = Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2);
+        let b = compass_bearing(rot, DVec3::ZERO, DVec3::new(0.0, 0.0, -100.0));
+        assert!((b.yaw_deg - 90.0).abs() < 1e-3, "{b:?}");
+    }
+
+    #[test]
+    fn format_distance_is_short_and_readable() {
+        assert_eq!(format_distance(0.0), "0");
+        assert_eq!(format_distance(850.4), "850");
+        assert_eq!(format_distance(12_345.0), "12.3k");
+        assert_eq!(format_distance(250_000.0), "250k");
+        assert_eq!(format_distance(3_400_000.0), "3.4M");
+    }
 
     #[test]
     fn generate_produces_seven_planets() {

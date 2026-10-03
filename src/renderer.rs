@@ -1639,6 +1639,18 @@ impl Renderer {
         }
     }
 
+    // shared by render() and render_galaxy() so the counter keeps ticking across a mode switch
+    // instead of freezing at whatever it last read in planet mode
+    fn update_fps(&mut self) {
+        self.frame_count += 1;
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_fps_time).as_secs_f32() >= 1.0 {
+            self.current_fps = self.frame_count;
+            self.frame_count = 0;
+            self.last_fps_time = now;
+        }
+    }
+
     pub fn render(
         &mut self,
         controller: &Controller,
@@ -2038,13 +2050,7 @@ impl Renderer {
         }
 
         // --- FPS CALCULATION ---
-        self.frame_count += 1;
-        let now = std::time::Instant::now();
-        if now.duration_since(self.last_fps_time).as_secs_f32() >= 1.0 {
-            self.current_fps = self.frame_count;
-            self.frame_count = 0;
-            self.last_fps_time = now;
-        }
+        self.update_fps();
 
         // --- PASS 4: TEXT RENDER ---
         // run this pass every frame to show FPS
@@ -2373,6 +2379,8 @@ impl Renderer {
             t,
             screen,
         );
+        self.update_fps();
+        self.render_galaxy_overlay(&view, flight, galaxy, t);
         if let Some(path) = self.screenshot_request.take() {
             crate::screenshot::capture(
                 &self.device,
@@ -2386,5 +2394,197 @@ impl Renderer {
             self.screenshot_flash = Some(std::time::Instant::now());
         }
         self.queue.present(out);
+    }
+
+    // Galaxy-mode HUD, drawn over the finished galaxy frame: the same FPS readout as planet mode,
+    // plus a compass strip across the top showing where the star and each planet are relative to
+    // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
+    fn render_galaxy_overlay(
+        &mut self,
+        view: &wgpu::TextureView,
+        flight: &crate::galaxy::GalaxyFlight,
+        galaxy: &crate::galaxy::Galaxy,
+        t: f64,
+    ) {
+        const COMPASS_HALF_WIDTH: f32 = 240.0; // px, covers ±COMPASS_SPAN_DEG
+        const COMPASS_SPAN_DEG: f32 = 90.0;
+        const COMPASS_TOP: f32 = 10.0;
+        const MARKER_ROW_TOP: f32 = 30.0;
+        const MARKER_ROW_HEIGHT: f32 = 18.0;
+        const MARKER_CHAR_WIDTH: f32 = 8.4; // approx. advance of the 14px monospace font
+        const PITCH_HINT_DEG: f32 = 20.0; // show ^/v once a target is this far above/below
+
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let center_x = width / 2.0;
+        let mut texts: Vec<(String, f32, f32, f32, glyphon::Color)> = Vec::new(); // text, x, y, size, color
+
+        // tick bar: a mark every 15 degrees, the centre one highlighted
+        for i in -6..=6 {
+            let x = center_x + (i as f32 / 6.0) * COMPASS_HALF_WIDTH;
+            let (mark, color) = if i == 0 {
+                ("+", glyphon::Color::rgb(255, 255, 255))
+            } else {
+                ("|", glyphon::Color::rgb(120, 120, 120))
+            };
+            texts.push((mark.to_string(), x - 4.0, COMPASS_TOP, 14.0, color));
+        }
+
+        // markers: (label, x, color), surface distance so "0" means you're touching it
+        let mut markers: Vec<(String, f32, glyphon::Color)> = Vec::new();
+        let mut add_marker = |name: String, pos: glam::DVec3, radius: f64, rgb: [f32; 3]| {
+            let b = crate::galaxy::compass_bearing(flight.rotation, flight.position, pos);
+            let dist = crate::galaxy::format_distance((pos - flight.position).length() - radius);
+            let pitch = if b.pitch_deg > PITCH_HINT_DEG {
+                " ^"
+            } else if b.pitch_deg < -PITCH_HINT_DEG {
+                " v"
+            } else {
+                ""
+            };
+            let (label, frac) = if b.yaw_deg > COMPASS_SPAN_DEG {
+                (format!("{name} {dist}{pitch} >"), 1.0)
+            } else if b.yaw_deg < -COMPASS_SPAN_DEG {
+                (format!("< {name} {dist}{pitch}"), -1.0)
+            } else {
+                (
+                    format!("{name} {dist}{pitch}"),
+                    b.yaw_deg / COMPASS_SPAN_DEG,
+                )
+            };
+            let label_w = label.chars().count() as f32 * MARKER_CHAR_WIDTH;
+            // centre on the bearing, but keep the whole label inside the strip (an edge-pinned one
+            // would otherwise spill half past it, into the FPS readout on the right)
+            let x = (center_x + frac * COMPASS_HALF_WIDTH - label_w / 2.0).clamp(
+                center_x - COMPASS_HALF_WIDTH,
+                center_x + COMPASS_HALF_WIDTH - label_w,
+            );
+            let c = |v: f32| ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8; // brightened for legibility
+            markers.push((
+                label,
+                x,
+                glyphon::Color::rgb(c(rgb[0]), c(rgb[1]), c(rgb[2])),
+            ));
+        };
+        add_marker(
+            "Sun".to_string(),
+            glam::DVec3::ZERO,
+            galaxy.star.radius,
+            [1.0, 0.9, 0.4],
+        );
+        for (i, p) in galaxy.planets.iter().enumerate() {
+            let def = p.planet_type.def();
+            add_marker(
+                format!("#{} {}", i + 1, def.name),
+                p.position_at(t),
+                p.radius as f64,
+                def.palette.ground.color(),
+            );
+        }
+
+        // stack overlapping labels into rows instead of drawing them on top of each other
+        markers.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut row_ends: Vec<f32> = Vec::new();
+        for (label, x, color) in markers {
+            let w = label.chars().count() as f32 * MARKER_CHAR_WIDTH;
+            let row = match row_ends.iter().position(|&end| end + 8.0 <= x) {
+                Some(r) => r,
+                None => {
+                    row_ends.push(f32::NEG_INFINITY);
+                    row_ends.len() - 1
+                }
+            };
+            row_ends[row] = x + w;
+            let y = MARKER_ROW_TOP + row as f32 * MARKER_ROW_HEIGHT;
+            texts.push((label, x, y, 14.0, color));
+        }
+
+        texts.push((
+            format!("FPS: {}", self.current_fps),
+            width - 120.0,
+            10.0,
+            20.0,
+            glyphon::Color::rgb(0, 255, 0),
+        ));
+
+        let buffers: Vec<(Buffer, f32, f32)> = texts
+            .into_iter()
+            .map(|(text, x, y, size, color)| {
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
+                buf.set_size(Some(width), Some(height));
+                buf.set_text(
+                    &text,
+                    &Attrs::new().family(Family::Monospace).color(color),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                (buf, x, y)
+            })
+            .collect();
+        let text_areas: Vec<TextArea> = buffers
+            .iter()
+            .map(|(buf, x, y)| TextArea {
+                buffer: buf,
+                left: *x,
+                top: *y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            })
+            .collect();
+
+        self.text_viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                &self.text_viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )
+            .unwrap();
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Galaxy HUD"),
+            });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Galaxy HUD Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.text_renderer
+                .render(&self.text_atlas, &self.text_viewport, &mut pass)
+                .unwrap();
+        }
+        self.queue.submit(std::iter::once(enc.finish()));
     }
 }
