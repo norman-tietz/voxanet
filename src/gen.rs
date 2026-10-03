@@ -217,6 +217,12 @@ impl CoordSystem {
         r as f32
     }
 
+    // get_layer_radius for a fractional layer (galaxy impostors sample the terrain noise continuously)
+    pub fn get_layer_radius_f(layer: f32, res: u32) -> f32 {
+        let s = res as f64 / 2.0;
+        (s * (Self::K * ((layer as f64 / s) - 1.0)).exp()) as f32
+    }
+
     pub fn get_direction(face: u8, u: u32, v: u32, res: u32) -> Vec3 {
         let rf = res as f64;
 
@@ -1152,6 +1158,17 @@ impl MeshGen {
 #[cfg(test)]
 mod biome_tests {
     use super::*;
+
+    #[test]
+    fn fractional_layer_radius_matches_integer_layers() {
+        for res in [49u32, 200, 337] {
+            for layer in [0u32, res / 4, res / 2, res / 2 + 7, res] {
+                let a = CoordSystem::get_layer_radius(layer, res);
+                let b = CoordSystem::get_layer_radius_f(layer as f32, res);
+                assert!((a - b).abs() < 1e-3, "res {res} layer {layer}: {a} vs {b}");
+            }
+        }
+    }
     use crate::biome::PlanetType;
     use crate::common::PlanetData;
 

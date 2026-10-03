@@ -8,14 +8,14 @@
 
 use crate::common::Vertex;
 use crate::galaxy::GalaxyPlanet;
+use crate::gen::CoordSystem;
 use crate::noise::{NoiseGenerator, TerrainShape};
 use glam::Vec3;
 
-// fractions of this planet's own peak height (shape_relief) above sea level; mirrors
-// material.rs's ROCK_LINE/SNOW_LINE spirit but as new, impostor-specific constants (material.rs's
-// are private and tuned for integer voxel layers, not a continuous float height)
-const ROCK_LINE: f32 = 0.35;
-const SNOW_LINE: f32 = 0.70;
+// fractions of this planet's own peak height (shape_relief) above sea level — the same fractions
+// material.rs's natural_type uses for rock (45%) and snow (62%)
+const ROCK_LINE: f32 = 0.45;
+const SNOW_LINE: f32 = 0.62;
 
 // unit-sphere vertex positions, displaced outward/inward by this planet's own TerrainShape, plus
 // per-vertex biome color and a real face-normal (not a noise-sampled one, so shading matches
@@ -23,13 +23,13 @@ const SNOW_LINE: f32 = 0.70;
 // doesn't have)
 pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Vertex>, Vec<u32>) {
     let (unit_verts, indices) = crate::icosphere::generate(subdivision);
-    let shape = TerrainShape::new((planet.radius * 2.0) as u32);
+    // the same resolution GalaxyPlanet::bake uses, so impostor and voxel world agree to the unit
+    let res = planet.voxel_resolution();
+    let sea_level = (res / 2) as f32;
+    let shape = TerrainShape::new(res);
     let generator = NoiseGenerator::new(planet.noise_seed);
 
-    // TerrainShape::height already returns an offset from sea level in units that are ~1 world
-    // unit thick near the surface (same as the real engine's exponential layers, which are
-    // approximately linear near res/2) — so no extra scale factor is needed, the planet's own
-    // radius plus this value directly gives a world-space displaced position
+    // TerrainShape::height returns an offset in layers from sea level, like the real engine's
     let heights: Vec<f32> = unit_verts
         .iter()
         .map(|&dir| shape.height(&generator, dir))
@@ -39,12 +39,11 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
         .iter()
         .zip(heights.iter())
         .map(|(&dir, &h)| {
-            // mirrors PlanetData::effective_height (src/common.rs): on a liquid-less planet there's
-            // no water mesh to fill the gap visually, so the surface is solid up to sea level — the
-            // *color* logic below still uses the raw height to pick palette.beach for these columns,
-            // same as the real engine's natural_type() does for filled-in liquid-less "ocean"
-            let display_h = if def.liquid.is_none() { h.max(0.0) } else { h };
-            dir * (planet.radius + display_h)
+            // like the engine's distant LOD meshes (MeshGen::generate_lod_mesh): oceans and
+            // liquid-less basins flattened to sea level, layers spaced exponentially
+            // (get_layer_radius). The colour below still uses the raw height, so underwater
+            // columns get the liquid (or, liquid-less, the beach) colour.
+            dir * CoordSystem::get_layer_radius_f(sea_level + h.max(0.0), res)
         })
         .collect();
 
@@ -57,7 +56,7 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
         normals[c] += face_normal;
     }
 
-    let relief = shape_relief(planet.radius);
+    let relief = shape_relief(res as f32 / 2.0);
 
     let verts = (0..positions.len())
         .map(|i| {
@@ -99,6 +98,33 @@ fn shape_relief(radius: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::biome::PlanetType;
+    use crate::gen::CoordSystem;
+
+    // the impostor must have the shape the voxel engine shows from orbit: exponential layers
+    // (CoordSystem::get_layer_radius), radius voxel_resolution()/2, oceans flattened to sea level on
+    // every planet type (generate_lod_mesh flattens them all)
+    #[test]
+    fn vertices_sit_on_the_engines_layers_with_flat_oceans() {
+        for planet_type in PlanetType::ALL {
+            let planet = test_planet(1, planet_type);
+            let res = planet.voxel_resolution();
+            let shape = TerrainShape::new(res);
+            let generator = NoiseGenerator::new(planet.noise_seed);
+            let (unit_verts, _) = crate::icosphere::generate(2);
+            let (verts, _) = generate_planet_mesh(&planet, 2);
+            let sea = (res / 2) as f32;
+            for (dir, v) in unit_verts.iter().zip(&verts) {
+                let h = shape.height(&generator, *dir).max(0.0);
+                let expected = CoordSystem::get_layer_radius_f(sea + h, res);
+                let actual = Vec3::from_array(v.pos).length();
+                assert!(
+                    (actual - expected).abs() < 1e-2,
+                    "{planet_type:?}: {actual} vs {expected}"
+                );
+                assert!(actual >= CoordSystem::get_layer_radius_f(sea, res) - 1e-3);
+            }
+        }
+    }
 
     fn test_planet(noise_seed: u32, planet_type: PlanetType) -> GalaxyPlanet {
         GalaxyPlanet {
