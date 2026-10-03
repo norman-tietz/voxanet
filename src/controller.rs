@@ -119,6 +119,14 @@ impl Controller {
         }
     }
 
+    // Escape: free the cursor without leaving first person (or capture it again). A global key,
+    // handled in main.rs before the console sees input, so it works in every mode.
+    pub fn toggle_mouse_release(&mut self) {
+        if self.first_person {
+            self.mouse_released = !self.mouse_released;
+        }
+    }
+
     pub fn process_mouse_motion(&mut self, delta: (f64, f64)) {
         if self.first_person && !self.mouse_released {
             // accumulate raw mouse delta
@@ -219,13 +227,6 @@ impl Controller {
                             self.cam_dist = 40.0;
                         } else {
                             self.cam_dist = 100.0;
-                        }
-                        return true;
-                    }
-
-                    PhysicalKey::Code(KeyCode::Escape) if pressed => {
-                        if self.first_person {
-                            self.mouse_released = !self.mouse_released;
                         }
                         return true;
                     }

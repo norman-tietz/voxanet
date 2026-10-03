@@ -1651,6 +1651,42 @@ impl Renderer {
         }
     }
 
+    // Screenshot flash (F2 / /screenshot feedback), shared by render() and render_galaxy(): a quick
+    // white fade-out starting the frame *after* a capture (screenshot_flash is only set once the
+    // capture is done), so the flash is visible on screen but never in the PNG. Uploads this
+    // frame's opacity and returns it; draw it with draw_flash as the last thing in the frame.
+    fn update_flash(&mut self, now: std::time::Instant) -> f32 {
+        const FLASH_DURATION: f32 = 0.18;
+        let mut alpha = 0.0f32;
+        if let Some(start) = self.screenshot_flash {
+            let t = now.duration_since(start).as_secs_f32();
+            if t < FLASH_DURATION {
+                alpha = 0.65 * (1.0 - t / FLASH_DURATION);
+            } else {
+                self.screenshot_flash = None;
+            }
+        }
+        self.queue.write_buffer(
+            &self.flash_buf,
+            0,
+            bytemuck::cast_slice(&[LocalUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array(),
+                params: [alpha, 0.0, 0.0, 0.0],
+            }]),
+        );
+        alpha
+    }
+
+    // full-screen triangle over whatever the pass already holds; the pass must target the swapchain
+    // format (flash_pipeline's only colour target) and needs no other bind groups
+    fn draw_flash(&self, pass: &mut wgpu::RenderPass, alpha: f32) {
+        if alpha > 0.001 {
+            pass.set_pipeline(&self.flash_pipeline);
+            pass.set_bind_group(1, &self.flash_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
     pub fn render(
         &mut self,
         controller: &Controller,
@@ -1703,6 +1739,9 @@ impl Renderer {
         // -- Camera Matrix --
         let mvp =
             controller.get_matrix(player, self.config.width as f32, self.config.height as f32);
+
+        // before cull_frustum below, which may keep self borrowed for the rest of the frame
+        let flash_alpha = self.update_flash(std::time::Instant::now());
 
         // --- FRUSTUM CULLING LOGIC ---
         let current_frustum = crate::common::Frustum::from_matrix(mvp);
@@ -1780,26 +1819,6 @@ impl Renderer {
         );
 
         let now = std::time::Instant::now();
-
-        // screenshot flash: quick fade-out starting the frame after a capture (see the capture call below)
-        let mut flash_alpha = 0.0f32;
-        if let Some(start) = self.screenshot_flash {
-            const FLASH_DURATION: f32 = 0.18;
-            let t = now.duration_since(start).as_secs_f32();
-            if t < FLASH_DURATION {
-                flash_alpha = 0.65 * (1.0 - t / FLASH_DURATION);
-            } else {
-                self.screenshot_flash = None;
-            }
-        }
-        self.queue.write_buffer(
-            &self.flash_buf,
-            0,
-            bytemuck::cast_slice(&[LocalUniform {
-                model: glam::Mat4::IDENTITY.to_cols_array(),
-                params: [flash_alpha, 0.0, 0.0, 0.0],
-            }]),
-        );
 
         let dying_status = self.animator.update_dying(now);
         for (key, alpha) in dying_status {
@@ -2320,11 +2339,7 @@ impl Renderer {
 
             // screenshot flash: drawn last (over the text too), so it's visible feedback on screen but,
             // since it's timed to start only after this frame's capture (below), never in the PNG itself
-            if flash_alpha > 0.001 {
-                pass.set_pipeline(&self.flash_pipeline);
-                pass.set_bind_group(1, &self.flash_bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
+            self.draw_flash(&mut pass, flash_alpha);
         }
 
         if let Some(timer) = &mut self.gpu_timer {
@@ -2559,6 +2574,7 @@ impl Renderer {
             )
             .unwrap();
 
+        let flash_alpha = self.update_flash(std::time::Instant::now());
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2584,6 +2600,8 @@ impl Renderer {
             self.text_renderer
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)
                 .unwrap();
+            // drawn last, over the HUD text too, same as planet mode
+            self.draw_flash(&mut pass, flash_alpha);
         }
         self.queue.submit(std::iter::once(enc.finish()));
     }

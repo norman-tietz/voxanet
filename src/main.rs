@@ -227,6 +227,11 @@ impl Game {
                     // first_person && !mouse_released) — otherwise there's no way to turn at all.
                     controller.first_person = true;
                     controller.mouse_released = false;
+                    // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
+                    // input (WASD included) — close it rather than leave it capturing keys invisibly
+                    if console.is_open {
+                        console.toggle();
+                    }
                     console.log(
                         "Entered galaxy mode. /galaxy exit to return.",
                         [1.0, 1.0, 1.0],
@@ -292,6 +297,33 @@ impl Game {
             ..
         } = self;
 
+        // GLOBAL KEYS: work in every mode and even while the console is open (it captures all other
+        // keyboard input, and in galaxy mode it isn't drawn, so an open console is easy to miss)
+        if let WindowEvent::KeyboardInput {
+            event: key_event, ..
+        } = &event
+        {
+            if key_event.state == ElementState::Pressed && !key_event.repeat {
+                match key_event.physical_key {
+                    PhysicalKey::Code(KeyCode::F2) => {
+                        let ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis();
+                        let _ = std::fs::create_dir_all("screenshots");
+                        renderer.request_screenshot(format!("screenshots/voxanet_{ms}.png"));
+                        renderer.window.request_redraw();
+                        return;
+                    }
+                    PhysicalKey::Code(KeyCode::Escape) => {
+                        controller.toggle_mouse_release();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // CONSOLE INPUT INTERCEPTION
         if console.is_open {
             match event {
@@ -342,61 +374,55 @@ impl Game {
                 button,
                 ..
             } => {
-                if matches!(self.mode, GameMode::Planet) {
-                    if controller.first_person && controller.mouse_released {
-                        // recapture takes priority: don't also mine/place on the click that brings the mouse back
-                        controller.mouse_released = false;
-                        let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
-                        renderer.window.set_cursor_visible(false);
+                if controller.first_person && controller.mouse_released {
+                    // recapture takes priority (in every mode): don't also mine/place on the click
+                    // that brings the mouse back
+                    controller.mouse_released = false;
+                    let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
+                    renderer.window.set_cursor_visible(false);
+                } else if matches!(self.mode, GameMode::Planet) {
+                    let is_right = button == MouseButton::Right;
+                    if let Some(id) = controller.cursor_id {
+                        if button == MouseButton::Middle {
+                            // pick the targeted block's type for placing (the bedrock core isn't placeable)
+                            if let Some(ty) = planet.block_type(id).filter(|ty| {
+                                crate::material::placeable(&planet.planet_type.def().palette)
+                                    .contains(ty)
+                            }) {
+                                controller.selected_block = ty;
+                            }
+                        } else if is_right {
+                            let place_info = controller.raycast(
+                                player,
+                                planet,
+                                renderer.config.width as f32,
+                                renderer.config.height as f32,
+                                true,
+                            );
+                            if let Some((place_id, _)) = place_info {
+                                planet.add_block(place_id, controller.selected_block);
+                                renderer.refresh_neighbors(place_id, planet);
+                            }
+                        } else if button == MouseButton::Left {
+                            planet.remove_block(id);
+                            renderer.refresh_neighbors(id, planet);
+                        }
+                        renderer.window.request_redraw();
                     } else {
-                        let is_right = button == MouseButton::Right;
-                        if let Some(id) = controller.cursor_id {
-                            if button == MouseButton::Middle {
-                                // pick the targeted block's type for placing (the bedrock core isn't placeable)
-                                if let Some(ty) = planet.block_type(id).filter(|ty| {
-                                    crate::material::placeable(&planet.planet_type.def().palette)
-                                        .contains(ty)
-                                }) {
-                                    controller.selected_block = ty;
-                                }
-                            } else if is_right {
-                                let place_info = controller.raycast(
-                                    player,
-                                    planet,
-                                    renderer.config.width as f32,
-                                    renderer.config.height as f32,
-                                    true,
-                                );
-                                if let Some((place_id, _)) = place_info {
-                                    planet.add_block(place_id, controller.selected_block);
-                                    renderer.refresh_neighbors(place_id, planet);
-                                }
-                            } else if button == MouseButton::Left {
-                                planet.remove_block(id);
-                                renderer.refresh_neighbors(id, planet);
-                            }
-                            renderer.window.request_redraw();
-                        } else {
-                            if controller.first_person {
-                                controller.mouse_released = false;
-                                let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
-                                renderer.window.set_cursor_visible(false);
-                            }
+                        if controller.first_person {
+                            controller.mouse_released = false;
+                            let _ = renderer.window.set_cursor_grab(CursorGrabMode::Locked);
+                            renderer.window.set_cursor_visible(false);
                         }
                     }
                 }
             }
 
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let PhysicalKey::Code(KeyCode::F2) = event.physical_key {
-                    let ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
-                    let _ = std::fs::create_dir_all("screenshots");
-                    renderer.request_screenshot(format!("screenshots/voxanet_{ms}.png"));
-                    renderer.window.request_redraw();
-                }
+            // planet-only keys: in galaxy mode these would silently regenerate the hidden planet
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(self.mode, GameMode::Planet) =>
+            {
                 if let PhysicalKey::Code(KeyCode::KeyB) = event.physical_key {
                     planet.switch_planet_type(planet.planet_type.next());
                     controller.selected_block =
