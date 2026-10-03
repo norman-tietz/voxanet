@@ -2,19 +2,37 @@ use crate::entity::Player;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GalaxyRequest {
-    Enter,
-    Exit,
-    Goto { planet: usize, radii: f32 }, // 1-based planet number; distance from its centre in its radii
+    Home, // respawn on the start planet
+    Goto {
+        planet: usize,
+        radii: f32,
+    }, // 1-based planet number; distance from its centre in its radii
+    Add {
+        planet_type: crate::biome::PlanetType,
+        radius: f32,
+    }, // debug: append a planet to the galaxy
 }
 
-const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|goto <n> <radii>";
+const GALAXY_USAGE: &str = "Usage: /galaxy home|goto <n> <radii>|add <type> <radius>";
 
 // parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
 // knows how many planets the galaxy has
 fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
     match args {
-        ["enter"] => Ok(GalaxyRequest::Enter),
-        ["exit"] => Ok(GalaxyRequest::Exit),
+        ["home"] => Ok(GalaxyRequest::Home),
+        ["add", planet_type, radius] => {
+            let planet_type = crate::biome::PlanetType::from_name(planet_type);
+            let radius = radius.parse::<f32>().ok().filter(|r| {
+                (crate::galaxy::MIN_ADDED_RADIUS..=crate::galaxy::MAX_ADDED_RADIUS).contains(r)
+            });
+            match (planet_type, radius) {
+                (Some(planet_type), Some(radius)) => Ok(GalaxyRequest::Add {
+                    planet_type,
+                    radius,
+                }),
+                _ => Err("Usage: /galaxy add earthlike|volcanic|ice <radius 20-500>"),
+            }
+        }
         ["goto", n, radii] => {
             let planet = n.parse::<usize>().ok().filter(|&n| n >= 1);
             let radii = radii
@@ -229,7 +247,10 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-                self.log("  /galaxy enter|exit|goto <n> <radii>", [0.8, 0.8, 0.8]);
+                self.log(
+                    "  /galaxy home|goto <n> <radii>|add <type> <radius>",
+                    [0.8, 0.8, 0.8],
+                );
             }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
@@ -366,11 +387,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_enter_and_exit_and_no_longer_land() {
-        assert_eq!(parse_galaxy_command(&["enter"]), Ok(GalaxyRequest::Enter));
-        assert_eq!(parse_galaxy_command(&["exit"]), Ok(GalaxyRequest::Exit));
-        // /galaxy land was milestone-1 scaffolding; the seamless handover replaces it
+    fn parses_home_goto_and_add() {
+        assert_eq!(parse_galaxy_command(&["home"]), Ok(GalaxyRequest::Home));
+        assert_eq!(
+            parse_galaxy_command(&["goto", "2", "3.5"]),
+            Ok(GalaxyRequest::Goto {
+                planet: 2,
+                radii: 3.5
+            })
+        );
+        assert_eq!(
+            parse_galaxy_command(&["add", "Ice", "120"]),
+            Ok(GalaxyRequest::Add {
+                planet_type: crate::biome::PlanetType::Ice,
+                radius: 120.0
+            })
+        );
+        // the home planet is gone: you leave and arrive by flying
+        assert!(parse_galaxy_command(&["enter"]).is_err());
+        assert!(parse_galaxy_command(&["exit"]).is_err());
         assert!(parse_galaxy_command(&["land", "3"]).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_add_arguments() {
+        assert!(parse_galaxy_command(&["add"]).is_err());
+        assert!(parse_galaxy_command(&["add", "ice"]).is_err());
+        assert!(parse_galaxy_command(&["add", "lava", "100"]).is_err());
+        assert!(parse_galaxy_command(&["add", "ice", "10"]).is_err());
+        assert!(parse_galaxy_command(&["add", "ice", "600"]).is_err());
+        assert!(parse_galaxy_command(&["add", "ice", "nan"]).is_err());
     }
 
     #[test]

@@ -454,10 +454,7 @@ impl Game {
                 println!("{text}");
             };
             // remember the way home the first time the player leaves the home planet
-            if *loaded_world == PlanetWorld::Home
-                && *mode == GameMode::Planet
-                && !matches!(request, GalaxyRequest::Exit)
-            {
+            if *loaded_world == PlanetWorld::Home && *mode == GameMode::Planet {
                 *home_return = Some(HomeReturn {
                     position: player.position,
                     resolution: planet.resolution,
@@ -465,35 +462,8 @@ impl Game {
                 });
             }
             match (request, *mode) {
-                (GalaxyRequest::Enter, GameMode::Planet) => {
-                    *mode = GameMode::Galaxy;
-                    *galaxy_flight =
-                        crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
-                    *flight_frame = FlightFrame::Free;
-                    enter_galaxy_controls(controller, console);
-                    say(console, "Entered galaxy mode. /galaxy exit to return.");
-                }
-                (GalaxyRequest::Exit, _) if *loaded_world == PlanetWorld::Home => {
-                    if *mode == GameMode::Galaxy {
-                        if let Some(home) = home_return.take() {
-                            player.position = home.position;
-                            player.velocity = glam::Vec3::ZERO;
-                        }
-                        *mode = GameMode::Planet;
-                        say(console, "Returned to the planet.");
-                    } // already home on the planet: nothing to do
-                }
-                (GalaxyRequest::Exit, _) => {
-                    // the voxel engine holds a galaxy planet: rebuild the home planet first
-                    if let Some(home) = home_return.take() {
-                        let mut data = PlanetData::new(home.resolution);
-                        data.switch_planet_type(home.planet_type);
-                        install_planet(renderer, controller, player, planet, data, home.position);
-                    }
-                    player.handover_altitude = None;
-                    *loaded_world = PlanetWorld::Home;
-                    *mode = GameMode::Planet;
-                    say(console, "Returned to the home planet.");
+                (GalaxyRequest::Home, _) | (GalaxyRequest::Add { .. }, _) => {
+                    console.log("/galaxy home|add: not wired up yet", [1.0, 0.5, 0.0]);
                 }
                 (GalaxyRequest::Goto { planet: n, radii }, _) => match galaxy.planets.get(n - 1) {
                     None => console.log(
