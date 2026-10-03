@@ -142,13 +142,17 @@ impl GalaxyPlanet {
         self.position_at(t) + self.spin(t).inverse() * local
     }
 
-    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn rotation_to_planet_frame(&self, abs_rot: Quat, t: f64) -> Quat {
         self.spin_f32(t) * abs_rot
     }
 
     pub fn rotation_from_planet_frame(&self, local_rot: Quat, t: f64) -> Quat {
         self.spin_f32(t).inverse() * local_rot
+    }
+
+    // planet frame -> galaxy space rotation: how the planet (and so its impostor mesh) is turned at t
+    pub fn orientation(&self, t: f64) -> Quat {
+        self.spin_f32(t).inverse()
     }
 
     // direction toward the star as seen in this planet's frame: what the voxel engine uses as its
@@ -169,6 +173,39 @@ impl GalaxyPlanet {
             crate::common::PlanetData::new_seeded(self.voxel_resolution(), self.noise_seed);
         data.switch_planet_type(self.planet_type);
         data
+    }
+}
+
+// how close flight must come to a planet's centre, in that planet's radii, to be captured into its
+// frame (and how far it must leave again to be released)
+pub const CAPTURE_RADII: f64 = 10.0;
+
+// which frame galaxy flight lives in: galaxy space, or a planet's own frame (spec §1 "captured")
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FlightFrame {
+    Free,
+    Captured(usize), // index into Galaxy::planets
+}
+
+// the frame flight should be in, given its position `pos` in its current frame (galaxy space when
+// Free, the planet frame when Captured)
+pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64) -> FlightFrame {
+    match frame {
+        FlightFrame::Captured(i) => {
+            if pos.length() > CAPTURE_RADII * galaxy.planets[i].radius as f64 {
+                FlightFrame::Free
+            } else {
+                frame
+            }
+        }
+        FlightFrame::Free => galaxy
+            .planets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, (pos - p.position_at(t)).length() / p.radius as f64))
+            .filter(|&(_, radii)| radii < CAPTURE_RADII)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(FlightFrame::Free, |(i, _)| FlightFrame::Captured(i)),
     }
 }
 
@@ -206,6 +243,28 @@ impl GalaxyFlight {
             velocity: DVec3::ZERO,
             rotation: Quat::IDENTITY,
             mouse_sens: 0.002,
+        }
+    }
+
+    // re-expresses position, orientation and velocity in another frame, so capture and release
+    // don't move the view. Velocity is only rotated: the planet's own orbital and spin motion is
+    // neither added nor removed, so on capture the player simply starts co-moving with the planet.
+    pub fn change_frame(&mut self, from: FlightFrame, to: FlightFrame, galaxy: &Galaxy, t: f64) {
+        if from == to {
+            return;
+        }
+        if let FlightFrame::Captured(i) = from {
+            let p = &galaxy.planets[i];
+            self.position = p.from_planet_frame(self.position, t);
+            self.rotation = p.rotation_from_planet_frame(self.rotation, t);
+            // a direction, not a point: rotate without the planet's offset
+            self.velocity = p.from_planet_frame(self.velocity, t) - p.position_at(t);
+        }
+        if let FlightFrame::Captured(i) = to {
+            let p = &galaxy.planets[i];
+            self.position = p.to_planet_frame(self.position, t);
+            self.rotation = p.rotation_to_planet_frame(self.rotation, t);
+            self.velocity = p.to_planet_frame(self.velocity + p.position_at(t), t);
         }
     }
 
@@ -317,6 +376,91 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_inside_ten_radii_and_release_outside() {
+        let g = Galaxy::generate(1);
+        let p = &g.planets[0];
+        let t = 12.0;
+        let near = p.position_at(t) + DVec3::new(9.0 * p.radius as f64, 0.0, 0.0);
+        let far = p.position_at(t) + DVec3::new(11.0 * p.radius as f64, 0.0, 0.0);
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Free, near, t),
+            FlightFrame::Captured(0)
+        );
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Free, far, t),
+            FlightFrame::Free
+        );
+        // captured: the position is planet-frame, so its length is the distance to the centre
+        let inside = DVec3::new(0.0, 9.5 * p.radius as f64, 0.0);
+        let outside = DVec3::new(0.0, 10.5 * p.radius as f64, 0.0);
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Captured(0), inside, t),
+            FlightFrame::Captured(0)
+        );
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Captured(0), outside, t),
+            FlightFrame::Free
+        );
+    }
+
+    #[test]
+    fn capture_picks_the_planet_you_are_near() {
+        let g = Galaxy::generate(1);
+        let t = 300.0;
+        let p = &g.planets[4];
+        let pos = p.position_at(t) + DVec3::new(0.0, 3.0 * p.radius as f64, 0.0);
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Free, pos, t),
+            FlightFrame::Captured(4)
+        );
+    }
+
+    // capture/release must not move the view: the same galaxy-space position and orientation before
+    // and after, whichever way round (the flicker case at exactly 10 radii relies on this)
+    #[test]
+    fn change_frame_keeps_the_absolute_view() {
+        let g = Galaxy::generate(1);
+        let p = &g.planets[0];
+        let t = 77.0;
+        let mut flight = GalaxyFlight::new(p.position_at(t) + DVec3::new(500.0, 200.0, -300.0));
+        flight.rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.4, -0.2, 0.3);
+        flight.velocity = DVec3::new(10.0, -5.0, 2.0);
+        let (abs_pos, abs_rot, abs_vel) = (flight.position, flight.rotation, flight.velocity);
+
+        flight.change_frame(FlightFrame::Free, FlightFrame::Captured(0), &g, t);
+        assert!((p.from_planet_frame(flight.position, t) - abs_pos).length() < 1e-6);
+        assert!(
+            p.rotation_from_planet_frame(flight.rotation, t)
+                .dot(abs_rot)
+                .abs()
+                > 1.0 - 1e-5
+        );
+        assert!(
+            (flight.velocity.length() - abs_vel.length()).abs() < 1e-9,
+            "velocity only rotated"
+        );
+
+        flight.change_frame(FlightFrame::Captured(0), FlightFrame::Free, &g, t);
+        assert!((flight.position - abs_pos).length() < 1e-6);
+        assert!(flight.rotation.dot(abs_rot).abs() > 1.0 - 1e-5);
+        assert!((flight.velocity - abs_vel).length() < 1e-9);
+    }
+
+    #[test]
+    fn orientation_maps_the_planet_frame_into_galaxy_space() {
+        let p = Galaxy::generate(1).planets[2];
+        let local = Vec3::new(30.0, -40.0, 120.0);
+        for t in [0.0, 55.0, 9_000.0] {
+            let rotated = (p.orientation(t) * local).as_dvec3();
+            let expected = p.from_planet_frame(local.as_dvec3(), t) - p.position_at(t);
+            assert!(
+                (rotated - expected).length() < 1e-3,
+                "t={t}: {rotated:?} vs {expected:?}"
+            );
+        }
+    }
 
     // the home planet's sky must turn with its sun: the sun, taken from the planet frame into the
     // sky's frame, stays put — so stars keep their place relative to the sun through the day
