@@ -44,9 +44,13 @@ struct GalaxyBodyUniform {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct GalaxyPlanetUniform {
-    offset: [f32; 4],
-    light_dir: [f32; 4],
-    atmosphere_color: [f32; 4],
+    offset: [f32; 4], // xyz: camera-relative planet centre, w: planet radius (voxel_resolution / 2)
+    light_dir: [f32; 4], // direction from this planet toward the star (galaxy space)
+    sky_zenith: [f32; 4], // the planet type's AtmosphereDef colours (rgb), as the engine's BiomeUniform
+    sky_horizon: [f32; 4],
+    space_color: [f32; 4],
+    cloud_light: [f32; 4],
+    cloud_dark: [f32; 4],
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
@@ -58,7 +62,6 @@ struct PlanetMesh {
 
 const MAX_PLANETS: usize = MAX_BODIES - 1; // the star takes one conceptual slot; planets no longer
                                            // share the body path, but this keeps one shared cap
-const ATMOSPHERE_GLOW_STRENGTH: f32 = 0.6;
 
 // starting points from the galaxy-terrain-impostors design discussion's faceting estimate
 // (~10-13x radius before individual facets become visually obvious at this project's FOV);
@@ -491,7 +494,8 @@ impl GalaxyRenderer {
             0,
             bytemuck::cast_slice(&[GalaxyCameraUniform {
                 view_proj: view_proj.to_cols_array(),
-                screen: [screen.0, screen.1, 0.0, 0.0],
+                // z: cloud animation time, wrapped like the engine's GlobalUniform.screen.w
+                screen: [screen.0, screen.1, (t % 3600.0) as f32, 0.0],
                 ray_dirs,
             }]),
         );
@@ -530,15 +534,20 @@ impl GalaxyRenderer {
             let light_dir = (-body_pos).normalize_or_zero().as_vec3();
             let atmosphere = p.planet_type.def().atmosphere;
             let model = glam::Mat3::from_quat(p.orientation(t));
+            let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
             planet_uniforms.push(GalaxyPlanetUniform {
-                offset: [camera_relative.x, camera_relative.y, camera_relative.z, 0.0],
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-                atmosphere_color: [
-                    atmosphere.sky_zenith[0],
-                    atmosphere.sky_zenith[1],
-                    atmosphere.sky_zenith[2],
-                    ATMOSPHERE_GLOW_STRENGTH,
+                offset: [
+                    camera_relative.x,
+                    camera_relative.y,
+                    camera_relative.z,
+                    p.voxel_resolution() as f32 / 2.0,
                 ],
+                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                sky_zenith: v4(atmosphere.sky_zenith),
+                sky_horizon: v4(atmosphere.sky_horizon_warm),
+                space_color: v4(atmosphere.space_color),
+                cloud_light: v4(atmosphere.cloud_light),
+                cloud_dark: v4(atmosphere.cloud_dark),
                 model: [
                     model.x_axis.extend(0.0).to_array(),
                     model.y_axis.extend(0.0).to_array(),
@@ -711,6 +720,12 @@ impl GalaxyRenderer {
 mod tests {
     use super::*;
     use crate::galaxy::Galaxy;
+
+    // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
+    #[test]
+    fn planet_uniform_matches_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 7 * 16 + 3 * 16);
+    }
 
     #[test]
     fn galaxy_shader_is_valid_wgsl() {

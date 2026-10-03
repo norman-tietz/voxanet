@@ -1,11 +1,12 @@
 // galaxy.wgsl
 // Minimal forward-rendering shader for galaxy mode: a procedural starfield background plus
-// flat/Lambertian-shaded icosphere placeholders for the star and each planet. Deliberately
-// standalone — does not share code with shader.wgsl (the deferred voxel pipeline's shader).
+// icosphere bodies for the star and each planet. Planet impostors share the sky, cloud, fog and
+// tone-mapping maths with the voxel engine through atmosphere.wgsl (prepended at compile time,
+// galaxy_render.rs GALAXY_SHADER), so they look the same at the landing handover.
 
 struct Camera {
     view_proj: mat4x4<f32>, // camera-relative: positions are pre-translated so the camera is at the origin
-    screen: vec4<f32>,      // x, y: width/height in pixels
+    screen: vec4<f32>,      // x, y: width/height in pixels, z: cloud animation time (seconds, wrapped at 3600)
     ray_dirs: array<vec4<f32>, 3>, // camera basis corners for the starfield background
 }
 
@@ -48,21 +49,44 @@ fn fs_body(in: VertexOut) -> @location(0) vec4<f32> {
 }
 
 struct PlanetUniform {
-    offset: vec4<f32>,         // camera-relative position (xyz), unused (w)
-    light_dir: vec4<f32>,      // direction from this planet toward the star (xyz), unused (w)
-    atmosphere_color: vec4<f32>, // rgb: limb-glow tint (the planet type's sky_zenith), w: glow strength
-    model: mat3x3<f32>,        // planet frame -> galaxy space rotation: the planet's spin at this time
+    offset: vec4<f32>,      // xyz: camera-relative planet centre, w: planet radius (voxel resolution / 2)
+    light_dir: vec4<f32>,   // direction from this planet toward the star (galaxy space)
+    sky_zenith: vec4<f32>,  // the planet type's atmosphere colours (rgb), as the engine's Biome uniform
+    sky_horizon: vec4<f32>,
+    space_color: vec4<f32>,
+    cloud_light: vec4<f32>,
+    cloud_dark: vec4<f32>,
+    model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
 @group(1) @binding(0) var<uniform> planet: PlanetUniform;
 
+fn planet_atmosphere() -> Atmosphere {
+    return Atmosphere(
+        planet.offset.w,
+        planet.sky_zenith.rgb,
+        planet.sky_horizon.rgb,
+        planet.space_color.rgb,
+        planet.cloud_light.rgb,
+        planet.cloud_dark.rgb,
+    );
+}
+
+// the camera (at the galaxy-space origin, camera-relative rendering) and the sun, in this planet's
+// own frame — where the voxel engine does all its lighting, clouds and sky
+fn planet_frame_camera() -> vec3<f32> {
+    return transpose(planet.model) * (-planet.offset.xyz);
+}
+
+fn planet_frame_light() -> vec3<f32> {
+    return normalize(transpose(planet.model) * planet.light_dir.xyz);
+}
+
 struct PlanetVertexOut {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) world_pos: vec3<f32>,
-    @location(1) world_normal: vec3<f32>,
+    @location(0) local_pos: vec3<f32>,    // planet frame (the mesh is built there)
+    @location(1) local_normal: vec3<f32>,
     @location(2) color: vec3<f32>,
-    @location(3) @interpolate(flat) light_dir: vec3<f32>,
-    @location(4) @interpolate(flat) atmosphere_color: vec4<f32>,
 }
 
 @vertex
@@ -74,27 +98,39 @@ fn vs_planet(
     let world_pos = planet.offset.xyz + planet.model * pos;
     var out: PlanetVertexOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.world_pos = world_pos;
-    out.world_normal = planet.model * normal;
+    out.local_pos = pos;
+    out.local_normal = normal;
     out.color = color;
-    out.light_dir = planet.light_dir.xyz;
-    out.atmosphere_color = planet.atmosphere_color;
     return out;
 }
 
+// the voxel engine's shade() (shader.wgsl) without what an impostor can't have: ray-traced shadows,
+// caustics and the per-voxel grain — sun, sky ambient, rim, cloud shadow and air fog are the same
 @fragment
 fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.world_normal);
-    let ndotl = max(dot(n, in.light_dir), 0.05);
-    var color = in.color * ndotl;
+    let a = planet_atmosphere();
+    let cam = planet_frame_camera();
+    let L = planet_frame_light();
+    let t = camera.screen.z;
+    let N = normalize(in.local_normal);
+    let V = normalize(cam - in.local_pos);
 
-    // the camera sits at the origin in this camera-relative scheme (see Camera.view_proj's
-    // comment), so the direction back to it is simply the negated world position
-    let view_dir = normalize(-in.world_pos);
-    let fresnel = pow(1.0 - max(dot(n, view_dir), 0.0), 3.0);
-    color += in.atmosphere_color.rgb * fresnel * in.atmosphere_color.w;
+    let albedo = pow(in.color, vec3<f32>(2.2));
+    let NdotL = max(dot(N, L), 0.0);
+    let direct = SUN_COLOR * NdotL * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
+    let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
+    let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi);
+    let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2;
+    var color = atmo_air_fog(albedo * (direct + ambient + rim), in.local_pos, cam, L, a);
 
-    return vec4<f32>(color, 1.0);
+    // clouds in front of the surface, like the engine's shade_pixel
+    let ray_dir = normalize(in.local_pos - cam);
+    let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
+    if (cloud_t > 0.0 && cloud_t < distance(cam, in.local_pos)) {
+        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
+        color = mix(color, cl.rgb, cl.a);
+    }
+    return vec4<f32>(aces_and_gamma(color), 1.0);
 }
 
 // deterministic hash for the starfield, independent of shader.wgsl's hash31 (kept standalone).
