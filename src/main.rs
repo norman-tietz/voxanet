@@ -141,6 +141,39 @@ fn enter_galaxy_controls(controller: &mut Controller, console: &mut Console) {
     }
 }
 
+// a galaxy planet baked on a background thread: its voxel world plus the near impostor built from it
+struct BakedPlanet {
+    index: usize,
+    data: PlanetData,
+    near_verts: Vec<crate::common::Vertex>,
+    near_indices: Vec<u32>,
+}
+
+fn start_bake(
+    galaxy: &crate::galaxy::Galaxy,
+    index: usize,
+) -> std::sync::mpsc::Receiver<BakedPlanet> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = galaxy.planets[index];
+    std::thread::spawn(move || {
+        let data = target.bake();
+        let (near_verts, near_indices) = crate::galaxy_terrain::near_impostor_mesh(&data);
+        let _ = tx.send(BakedPlanet {
+            index,
+            data,
+            near_verts,
+            near_indices,
+        });
+    });
+    rx
+}
+
+// a finished bake is only installed while flight is still captured by that planet in galaxy mode —
+// the player may have left orbit, gone home or landed elsewhere since it started
+fn bake_still_wanted(mode: GameMode, frame: FlightFrame, index: usize) -> bool {
+    mode == GameMode::Galaxy && frame == FlightFrame::Captured(index)
+}
+
 struct Game {
     renderer: Renderer,
     controller: Controller,
@@ -153,6 +186,9 @@ struct Game {
     galaxy: crate::galaxy::Galaxy,
     galaxy_flight: crate::galaxy::GalaxyFlight,
     flight_frame: FlightFrame, // galaxy space, or captured by a planet (galaxy.rs)
+    bake_rx: Option<std::sync::mpsc::Receiver<BakedPlanet>>, // the running background bake, if any
+    baking: Option<usize>,     // which planet it is for
+    voxel_ready_announced: bool, // "voxel world ready" printed for the loaded galaxy planet
     clock: Instant,            // shared game clock: galaxy orbits and planet day/night
     loaded_world: PlanetWorld,
     home_return: Option<HomeReturn>, // set when the player leaves the home planet
@@ -195,6 +231,9 @@ impl Game {
             galaxy: crate::galaxy::Galaxy::generate(1),
             galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
             flight_frame: FlightFrame::Free,
+            bake_rx: None,
+            baking: None,
+            voxel_ready_announced: false,
             clock: Instant::now(),
             loaded_world: PlanetWorld::Home,
             home_return: None,
@@ -215,6 +254,9 @@ impl Game {
             galaxy,
             galaxy_flight,
             flight_frame,
+            bake_rx,
+            baking,
+            voxel_ready_announced,
             clock,
             loaded_world,
             home_return,
@@ -280,6 +322,39 @@ impl Game {
                         crate::galaxy::ROLL_LEVEL_RATE * dt,
                     );
                 }
+                if let FlightFrame::Captured(i) = *flight_frame {
+                    // capture bakes the planet's voxel world in the background, unless it's loaded
+                    if *loaded_world != PlanetWorld::Galaxy(i) && *baking != Some(i) {
+                        *bake_rx = Some(start_bake(galaxy, i));
+                        *baking = Some(i);
+                    }
+                    // once loaded, the voxel engine streams from the flight's planet-frame position,
+                    // so its meshes are ready by the time the landing handover needs them
+                    if *loaded_world == PlanetWorld::Galaxy(i) {
+                        renderer.update_view(galaxy_flight.position.as_vec3(), planet);
+                        if !*voxel_ready_announced && renderer.view_covered() {
+                            println!("Voxel world for #{} ready", i + 1);
+                            *voxel_ready_announced = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // a background bake finished: install it if flight is still captured by that planet
+        let finished = bake_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(baked) = finished {
+            *bake_rx = None;
+            *baking = None;
+            if bake_still_wanted(*mode, *flight_frame, baked.index) {
+                *planet = baked.data;
+                controller.selected_block =
+                    crate::material::placeable(&planet.planet_type.def().palette)[0];
+                *loaded_world = PlanetWorld::Galaxy(baked.index);
+                renderer.force_reload_all(planet, galaxy_flight.position.as_vec3());
+                renderer.set_near_impostor(baked.index, &baked.near_verts, &baked.near_indices);
+                *voxel_ready_announced = false;
+                println!("Baked #{} (res {})", baked.index + 1, planet.resolution);
             }
         }
 
@@ -729,5 +804,32 @@ impl ApplicationHandler for App {
         let Some(game) = &mut self.game else { return };
         game.tick();
         game.renderer.window.request_redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a bake finishes on another thread some time after capture; by then the player may have flown
+    // out of orbit, gone home, landed elsewhere or been captured by another planet
+    #[test]
+    fn late_bakes_are_dropped_unless_still_captured_by_that_planet() {
+        assert!(bake_still_wanted(
+            GameMode::Galaxy,
+            FlightFrame::Captured(2),
+            2
+        ));
+        assert!(!bake_still_wanted(
+            GameMode::Galaxy,
+            FlightFrame::Captured(3),
+            2
+        ));
+        assert!(!bake_still_wanted(GameMode::Galaxy, FlightFrame::Free, 2));
+        assert!(!bake_still_wanted(
+            GameMode::Planet,
+            FlightFrame::Captured(2),
+            2
+        ));
     }
 }

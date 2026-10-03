@@ -87,6 +87,29 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     (verts, indices)
 }
 
+// the near impostor: once a planet is baked, the voxel engine's own distant-terrain meshes for the
+// six whole cube faces (MeshGen::generate_lod_mesh on the quadtree's root nodes) — exactly the shape
+// and colours the engine shows from orbit, so the handover to the voxel engine doesn't pop. Built on
+// the bake thread; the LOD skirts hang below the surface but are hidden inside the closed planet.
+pub fn near_impostor_mesh(data: &crate::common::PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+    let size = data.resolution.next_power_of_two();
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+    for face in 0..6u8 {
+        let key = crate::common::LodKey {
+            face,
+            x: 0,
+            y: 0,
+            size,
+        };
+        let (v, i) = crate::gen::MeshGen::generate_lod_mesh(key, data);
+        let base = verts.len() as u32;
+        verts.extend(v);
+        indices.extend(i.into_iter().map(|k| k + base));
+    }
+    (verts, indices)
+}
+
 // same formula TerrainShape::new uses internally (its own `relief` field is private) — kept here
 // as the single place both this function and any future caller derive "this planet's peak height"
 // from, without needing to widen TerrainShape's field visibility too
@@ -99,6 +122,37 @@ mod tests {
     use super::*;
     use crate::biome::PlanetType;
     use crate::gen::CoordSystem;
+
+    // the near impostor is exactly the engine's own whole-face distant-terrain meshes, so the later
+    // handover to the voxel engine can't change the planet's shape or colours
+    #[test]
+    fn near_impostor_is_the_engines_whole_face_lod_meshes() {
+        let mut p = test_planet(3, PlanetType::EarthLike);
+        p.radius = 40.0; // smallest size: keeps the bake quick in a debug test build
+        let data = p.bake();
+        let (verts, indices) = near_impostor_mesh(&data);
+        let size = data.resolution.next_power_of_two();
+        let mut expected = Vec::new();
+        for face in 0..6u8 {
+            let key = crate::common::LodKey {
+                face,
+                x: 0,
+                y: 0,
+                size,
+            };
+            expected.extend(crate::gen::MeshGen::generate_lod_mesh(key, &data).0);
+        }
+        assert_eq!(verts.len(), expected.len());
+        assert!(verts
+            .iter()
+            .zip(&expected)
+            .all(|(a, b)| a.pos == b.pos && a.color == b.color));
+        assert!(
+            indices.iter().all(|&k| (k as usize) < verts.len()),
+            "index out of range"
+        );
+        assert_eq!(indices.len() % 3, 0);
+    }
 
     // the impostor must have the shape the voxel engine shows from orbit: exponential layers
     // (CoordSystem::get_layer_radius), radius voxel_resolution()/2, oceans flattened to sea level on

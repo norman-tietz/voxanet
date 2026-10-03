@@ -169,6 +169,7 @@ pub struct Renderer {
     // that must be dropped, or a mesh of the old resolution would be kept for good (a hole into the planet)
     generation: u64,
     pending_lods: HashSet<LodKey>,
+    view_missing: usize, // required meshes not loaded yet, as of the last update_view
 
     // --- FPS ---
     last_fps_time: std::time::Instant,
@@ -782,6 +783,7 @@ impl Renderer {
             lod_rx,
             generation: 0,
             pending_lods: HashSet::new(),
+            view_missing: usize::MAX,
 
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
@@ -995,6 +997,7 @@ impl Renderer {
                     .map(|k| (k.face, k.x, k.y, k.size)),
             )
             .collect();
+        self.view_missing = missing.len();
         let uncovered = |face: u8, x: u32, y: u32, size: u32| {
             missing.iter().any(|&(f, mx, my, ms)| {
                 f == face && x < mx + ms && mx < x + size && y < my + ms && my < y + size
@@ -1317,6 +1320,17 @@ impl Renderer {
         self.player_chunk_pos = None;
         self.rt_dirty = true;
         self.update_view(player_pos, planet);
+    }
+
+    // true once every mesh the current view requires is loaded (as of the last update_view): the
+    // voxel world can be shown without holes — the landing handover waits for this
+    pub fn view_covered(&self) -> bool {
+        self.view_missing == 0
+    }
+
+    pub fn set_near_impostor(&mut self, planet_index: usize, verts: &[Vertex], indices: &[u32]) {
+        self.galaxy
+            .set_near_impostor(&self.device, planet_index, verts, indices);
     }
 
     pub fn refresh_neighbors(&mut self, id: BlockId, planet: &PlanetData) {

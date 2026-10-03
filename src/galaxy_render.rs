@@ -177,6 +177,7 @@ pub struct GalaxyRenderer {
     planet_uniform_bind: wgpu::BindGroup,
     planet_uniform_stride: u64,
     planet_meshes: std::collections::HashMap<(usize, u32), PlanetMesh>, // (planet index, subdivision)
+    near_impostor: Option<(usize, PlanetMesh)>, // (planet index, mesh) — see set_near_impostor
 }
 
 impl GalaxyRenderer {
@@ -391,7 +392,10 @@ impl GalaxyRenderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                // no culling, like the voxel engine's own geometry pass: the near impostor is the engine's LOD
+                // meshes, whose triangle winding isn't consistent (back-face culling punched holes at
+                // cube-face corners and seams); the depth test hides the far side of the closed sphere
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil.clone()),
@@ -446,6 +450,7 @@ impl GalaxyRenderer {
             planet_uniform_bind,
             planet_uniform_stride,
             planet_meshes: std::collections::HashMap::new(),
+            near_impostor: None,
         }
     }
 
@@ -509,7 +514,7 @@ impl GalaxyRenderer {
             let body_pos = p.position_at(t);
             let camera_relative = (body_pos - camera.position).as_vec3(); // already computed here
                                                                           // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
-            if content.draws_planet(i) {
+            if content.draws_planet(i) && !self.has_near_impostor(i) {
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 self.ensure_planet_mesh(device, i, p, subdivision);
             }
@@ -594,7 +599,11 @@ impl GalaxyRenderer {
                 let body_pos = p.position_at(t);
                 let camera_relative = (body_pos - camera.position).as_vec3();
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
-                if let Some(mesh) = self.planet_meshes.get(&(i, subdivision)) {
+                let mesh = match &self.near_impostor {
+                    Some((n, near)) if *n == i => Some(near),
+                    _ => self.planet_meshes.get(&(i, subdivision)),
+                };
+                if let Some(mesh) = mesh {
                     pass.set_bind_group(
                         1,
                         &self.planet_uniform_bind,
@@ -607,6 +616,39 @@ impl GalaxyRenderer {
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
+    // mesh (galaxy_terrain::near_impostor_mesh) once that planet is baked; one planet at a time
+    pub fn set_near_impostor(
+        &mut self,
+        device: &wgpu::Device,
+        planet_index: usize,
+        verts: &[crate::common::Vertex],
+        indices: &[u32],
+    ) {
+        let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Galaxy Near Impostor Vertices"),
+            contents: bytemuck::cast_slice(verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Galaxy Near Impostor Indices"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.near_impostor = Some((
+            planet_index,
+            PlanetMesh {
+                v_buf,
+                i_buf,
+                num_indices: indices.len() as u32,
+            },
+        ));
+    }
+
+    fn has_near_impostor(&self, i: usize) -> bool {
+        matches!(self.near_impostor, Some((n, _)) if n == i)
     }
 
     fn ensure_planet_mesh(
