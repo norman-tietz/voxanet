@@ -170,8 +170,6 @@ pub struct Renderer {
     generation: u64,
     pending_lods: HashSet<LodKey>,
 
-    start_time: std::time::Instant, // clock of the water animation (GlobalUniform.screen.w)
-
     // --- FPS ---
     last_fps_time: std::time::Instant,
     frame_count: u32,
@@ -785,7 +783,6 @@ impl Renderer {
             generation: 0,
             pending_lods: HashSet::new(),
 
-            start_time: std::time::Instant::now(),
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
             current_fps: 0,
@@ -1693,6 +1690,8 @@ impl Renderer {
         player: &Player,
         planet: &PlanetData,
         console: &Console,
+        time: f64,     // shared game clock in seconds (Game::clock)
+        sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs galaxy planet)
     ) {
         self.update_console_mesh(console.height_fraction);
 
@@ -1726,15 +1725,10 @@ impl Renderer {
 
         self.update_rt_window(player.position, planet);
 
-        // directional sun: a fixed direction in absolute space, rotated around the planet's spin
-        // axis (world +Y, matching the "North Pole" convention Game::new's spawn search already
-        // uses) at a rate set by the active planet type's own day length. Everything downstream
-        // (shade(), caustics, cloud_shadow, both shadow paths) already re-reads sun_dir fresh every
-        // frame, so a time-varying value is a drop-in — nothing else needs to change for day/night.
-        let time = self.start_time.elapsed().as_secs_f32() % 3600.0;
-        let spin_angle = (time / planet.planet_type.def().day_length_secs) * std::f32::consts::TAU;
-        let sun_dir = glam::Quat::from_axis_angle(glam::Vec3::Y, spin_angle)
-            * glam::Vec3::new(0.5, 0.2, 0.4).normalize();
+        // the sun direction comes from the game (galaxy::home_sun_dir on the home planet, the real
+        // star on a galaxy planet); everything downstream (shade(), caustics, cloud_shadow, both
+        // shadow paths) re-reads it fresh every frame. The water animation clock wraps hourly as before.
+        let time = (time % 3600.0) as f32;
 
         // -- Camera Matrix --
         let mvp =

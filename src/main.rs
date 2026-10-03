@@ -107,7 +107,7 @@ struct Game {
     mode: GameMode,
     galaxy: crate::galaxy::Galaxy,
     galaxy_flight: crate::galaxy::GalaxyFlight,
-    galaxy_start_time: Instant,
+    clock: Instant, // shared game clock: galaxy orbits and planet day/night
 }
 
 impl Game {
@@ -146,7 +146,7 @@ impl Game {
             mode: GameMode::Planet,
             galaxy: crate::galaxy::Galaxy::generate(1),
             galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
-            galaxy_start_time: Instant::now(),
+            clock: Instant::now(),
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -163,7 +163,7 @@ impl Game {
             mode,
             galaxy: _,
             galaxy_flight,
-            galaxy_start_time: _,
+            clock: _,
         } = self;
 
         let now = Instant::now();
@@ -471,13 +471,21 @@ impl Game {
                 }
             }
 
-            WindowEvent::RedrawRequested => match &self.mode {
-                GameMode::Planet => renderer.render(controller, player, planet, console),
-                GameMode::Galaxy { .. } => {
-                    let t = self.galaxy_start_time.elapsed().as_secs_f64();
-                    renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t);
+            WindowEvent::RedrawRequested => {
+                let t = self.clock.elapsed().as_secs_f64();
+                match &self.mode {
+                    GameMode::Planet => {
+                        let sun = crate::galaxy::home_sun_dir(
+                            t,
+                            planet.planet_type.def().day_length_secs,
+                        );
+                        renderer.render(controller, player, planet, console, t, sun)
+                    }
+                    GameMode::Galaxy { .. } => {
+                        renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t)
+                    }
                 }
-            },
+            }
             _ => {}
         }
     }
