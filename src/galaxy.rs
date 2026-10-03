@@ -70,8 +70,13 @@ fn planet_radius_for(seed: u64, index: usize) -> f32 {
     let mut h = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(index as u64);
+    // full MurmurHash3 fmix64 (two multiply-xorshift rounds): the single-round version this used
+    // to be doesn't avalanche small sequential `index` values enough — an entire galaxy's planets
+    // came out clustered within a few units of each other instead of spanning the intended range
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
     h ^= h >> 33;
     let t = (h >> 11) as f64 / (1u64 << 53) as f64; // 0..1, using the top 53 bits
     MIN_PLANET_RADIUS + (t as f32) * (MAX_PLANET_RADIUS - MIN_PLANET_RADIUS)
@@ -83,8 +88,12 @@ fn noise_seed_for(seed: u64, index: usize) -> u32 {
     let mut h = seed
         .wrapping_mul(0xD6E8_FEB8_6659_FD93)
         .wrapping_add(index as u64);
+    // full MurmurHash3 fmix64 — see planet_radius_for's comment; same weak-avalanche issue would
+    // otherwise apply here too
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
     h ^= h >> 33;
     (h & 0xFFFF_FFFF) as u32
 }
@@ -247,6 +256,26 @@ mod tests {
                 (40.0..=250.0).contains(&p.radius),
                 "radius {} out of range",
                 p.radius
+            );
+        }
+    }
+
+    // regression test for a real bug: the hash's finalizer was missing a round and didn't
+    // avalanche small sequential `index` values enough, so an entire galaxy's planets came out
+    // clustered within a few units of each other (observed: 160-164 across all 7 planets) instead
+    // of spanning anywhere near the intended 40-250 range. "in range" alone doesn't catch this —
+    // a tightly clustered set of values is still technically in range.
+    #[test]
+    fn generate_planet_radii_are_well_spread_not_clustered() {
+        for seed in [1, 2, 7, 42] {
+            let g = Galaxy::generate(seed);
+            let radii: Vec<f32> = g.planets.iter().map(|p| p.radius).collect();
+            let min = radii.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = radii.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                max - min > 50.0,
+                "seed {seed}: radii spread only {:.1} ({radii:?}) — looks clustered, not well distributed",
+                max - min
             );
         }
     }
