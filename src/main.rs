@@ -168,10 +168,16 @@ fn start_bake(
     rx
 }
 
-// a finished bake is only installed while flight is still captured by that planet in galaxy mode —
-// the player may have left orbit, gone home or landed elsewhere since it started
+// a finished bake is installed unless the player has since gone home, landed (both leave galaxy
+// mode) or been captured by another planet; having merely left orbit again keeps it (spec §1:
+// re-capturing the same planet doesn't re-bake). Capturing another planet also replaces bake_rx,
+// so an older bake can't arrive after that.
 fn bake_still_wanted(mode: GameMode, frame: FlightFrame, index: usize) -> bool {
-    mode == GameMode::Galaxy && frame == FlightFrame::Captured(index)
+    mode == GameMode::Galaxy
+        && match frame {
+            FlightFrame::Free => true,
+            FlightFrame::Captured(i) => i == index,
+        }
 }
 
 struct Game {
@@ -296,7 +302,17 @@ impl Game {
             }
             GameMode::Galaxy => {
                 let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
-                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint);
+                // turning and climbing follow galaxy space's +Y in free flight, the local radial up
+                // while captured (the planet's spin axis would pitch the view at its equator)
+                let up = match *flight_frame {
+                    FlightFrame::Free => glam::Vec3::Y,
+                    FlightFrame::Captured(_) => galaxy_flight
+                        .position
+                        .as_vec3()
+                        .try_normalize()
+                        .unwrap_or(glam::Vec3::Y),
+                };
+                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, up);
                 let t = clock.elapsed().as_secs_f64();
                 // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
                 let next = crate::galaxy::next_flight_frame(
@@ -341,7 +357,8 @@ impl Game {
             }
         }
 
-        // a background bake finished: install it if flight is still captured by that planet
+        // a background bake finished: install it unless the player went home, landed or got
+        // captured by another planet meanwhile
         let finished = bake_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(baked) = finished {
             *bake_rx = None;
@@ -351,7 +368,13 @@ impl Game {
                 controller.selected_block =
                     crate::material::placeable(&planet.planet_type.def().palette)[0];
                 *loaded_world = PlanetWorld::Galaxy(baked.index);
-                renderer.force_reload_all(planet, galaxy_flight.position.as_vec3());
+                // the engine streams in the planet frame; free flight is in galaxy space
+                let local = match *flight_frame {
+                    FlightFrame::Captured(_) => galaxy_flight.position,
+                    FlightFrame::Free => galaxy.planets[baked.index]
+                        .to_planet_frame(galaxy_flight.position, clock.elapsed().as_secs_f64()),
+                };
+                renderer.force_reload_all(planet, local.as_vec3());
                 renderer.set_near_impostor(baked.index, &baked.near_verts, &baked.near_indices);
                 *voxel_ready_announced = false;
                 println!("Baked #{} (res {})", baked.index + 1, planet.resolution);
@@ -814,7 +837,7 @@ mod tests {
     // a bake finishes on another thread some time after capture; by then the player may have flown
     // out of orbit, gone home, landed elsewhere or been captured by another planet
     #[test]
-    fn late_bakes_are_dropped_unless_still_captured_by_that_planet() {
+    fn late_bakes_are_dropped_only_after_going_home_landing_or_another_capture() {
         assert!(bake_still_wanted(
             GameMode::Galaxy,
             FlightFrame::Captured(2),
@@ -825,11 +848,13 @@ mod tests {
             FlightFrame::Captured(3),
             2
         ));
-        assert!(!bake_still_wanted(GameMode::Galaxy, FlightFrame::Free, 2));
         assert!(!bake_still_wanted(
             GameMode::Planet,
             FlightFrame::Captured(2),
             2
         ));
+        // spec §1: leaving orbit before landing keeps the bake — a bake finishing while flight is
+        // free again (nobody else captured it meanwhile) is still installed, so re-capture won't re-bake
+        assert!(bake_still_wanted(GameMode::Galaxy, FlightFrame::Free, 2));
     }
 }

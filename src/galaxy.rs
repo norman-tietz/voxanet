@@ -177,8 +177,10 @@ impl GalaxyPlanet {
 }
 
 // how close flight must come to a planet's centre, in that planet's radii, to be captured into its
-// frame (and how far it must leave again to be released)
+// frame, and how far it must leave again to be released — the gap is hysteresis, so hovering at the
+// boundary can't flip-flop between co-moving with the planet and not
 pub const CAPTURE_RADII: f64 = 10.0;
+pub const RELEASE_RADII: f64 = 11.0;
 
 // which frame galaxy flight lives in: galaxy space, or a planet's own frame (spec §1 "captured")
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -192,7 +194,7 @@ pub enum FlightFrame {
 pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64) -> FlightFrame {
     match frame {
         FlightFrame::Captured(i) => {
-            if pos.length() > CAPTURE_RADII * galaxy.planets[i].radius as f64 {
+            if pos.length() > RELEASE_RADII * galaxy.planets[i].radius as f64 {
                 FlightFrame::Free
             } else {
                 frame
@@ -268,6 +270,9 @@ impl GalaxyFlight {
         }
     }
 
+    // `up`: what "up" means for turning left/right and for climbing (Space) / descending (Shift) —
+    // galaxy space's +Y in free flight, the local radial up while captured by a planet
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         dt: f32,
@@ -276,10 +281,11 @@ impl GalaxyFlight {
         down: bool,
         mouse_delta: (f32, f32),
         sprint: bool,
+        up: Vec3,
     ) {
         let yaw_delta = -mouse_delta.0 * self.mouse_sens;
         if yaw_delta.abs() > 1e-6 {
-            self.rotation = Quat::from_axis_angle(Vec3::Y, yaw_delta) * self.rotation;
+            self.rotation = Quat::from_axis_angle(up, yaw_delta) * self.rotation;
         }
         let pitch_delta = -mouse_delta.1 * self.mouse_sens;
         if pitch_delta.abs() > 1e-6 {
@@ -291,7 +297,7 @@ impl GalaxyFlight {
         } else {
             Vec3::ZERO
         };
-        let dir = compose_fly_direction(forward, jump, down);
+        let dir = compose_fly_direction(forward, jump, down, up);
 
         let target_speed = if sprint {
             GALAXY_BOOST_SPEED
@@ -320,13 +326,13 @@ fn accelerate_toward(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
 
 // Pure: composes the desired flight direction from forward-thrust (already rotated into world
 // space by the caller) and vertical climb/descend keys, normalized. Factored out for testability.
-fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool) -> Vec3 {
+fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) -> Vec3 {
     let mut dir = forward;
     if climb {
-        dir += Vec3::Y;
+        dir += up;
     }
     if descend {
-        dir -= Vec3::Y;
+        dir -= up;
     }
     if dir.length() > 0.01 {
         dir.normalize()
@@ -399,6 +405,38 @@ pub fn format_distance(d: f64) -> String {
 mod tests {
     use super::*;
 
+    // captured over a planet's equator (local up = +X here), levelled, looking along the horizon:
+    // sideways mouse must turn the view around the local up — before, it turned around the spin
+    // axis (Y), which there pitched the view instead, so the player couldn't turn left or right
+    #[test]
+    fn captured_yaw_turns_about_the_local_up() {
+        let up = Vec3::X;
+        // camera right = -Y, camera up = +X (radial), looking along -Z
+        let rot = Quat::from_mat3(&glam::Mat3::from_cols(Vec3::NEG_Y, Vec3::X, Vec3::Z));
+        let mut flight = GalaxyFlight::new(DVec3::new(600.0, 0.0, 0.0));
+        flight.rotation = rot;
+        let before = flight.rotation * Vec3::NEG_Z;
+        flight.update(1.0 / 60.0, Vec3::ZERO, false, false, (80.0, 0.0), false, up);
+        let after = flight.rotation * Vec3::NEG_Z;
+        assert!(
+            after.dot(up).abs() < 1e-4,
+            "view tipped off the horizon: {after:?}"
+        );
+        assert!(before.dot(after) < 0.999, "view didn't turn");
+    }
+
+    #[test]
+    fn climbing_follows_the_given_up() {
+        assert_eq!(
+            compose_fly_direction(Vec3::ZERO, true, false, Vec3::X),
+            Vec3::X
+        );
+        assert_eq!(
+            compose_fly_direction(Vec3::ZERO, false, true, Vec3::Z),
+            -Vec3::Z
+        );
+    }
+
     fn roll_of(rotation: Quat, up: Vec3) -> f32 {
         // how far the camera's right axis tips out of the horizontal plane
         (rotation * Vec3::X).dot(up).asin().abs()
@@ -464,13 +502,25 @@ mod tests {
         );
         // captured: the position is planet-frame, so its length is the distance to the centre
         let inside = DVec3::new(0.0, 9.5 * p.radius as f64, 0.0);
-        let outside = DVec3::new(0.0, 10.5 * p.radius as f64, 0.0);
+        let outside = DVec3::new(0.0, 11.5 * p.radius as f64, 0.0);
         assert_eq!(
             next_flight_frame(&g, FlightFrame::Captured(0), inside, t),
             FlightFrame::Captured(0)
         );
         assert_eq!(
             next_flight_frame(&g, FlightFrame::Captured(0), outside, t),
+            FlightFrame::Free
+        );
+        // hysteresis: between capture (10) and release (11) radii, the current frame stays, so
+        // hovering at the boundary can't flip-flop between co-moving and not
+        let between = DVec3::new(0.0, 10.5 * p.radius as f64, 0.0);
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Captured(0), between, t),
+            FlightFrame::Captured(0)
+        );
+        let between_abs = p.position_at(t) + between;
+        assert_eq!(
+            next_flight_frame(&g, FlightFrame::Free, between_abs, t),
             FlightFrame::Free
         );
     }
@@ -865,22 +915,31 @@ mod tests {
 
     #[test]
     fn compose_fly_direction_climb_only_is_straight_up() {
-        assert_eq!(compose_fly_direction(Vec3::ZERO, true, false), Vec3::Y);
+        assert_eq!(
+            compose_fly_direction(Vec3::ZERO, true, false, Vec3::Y),
+            Vec3::Y
+        );
     }
 
     #[test]
     fn compose_fly_direction_descend_only_is_straight_down() {
-        assert_eq!(compose_fly_direction(Vec3::ZERO, false, true), -Vec3::Y);
+        assert_eq!(
+            compose_fly_direction(Vec3::ZERO, false, true, Vec3::Y),
+            -Vec3::Y
+        );
     }
 
     #[test]
     fn compose_fly_direction_climb_and_descend_cancel_to_zero() {
-        assert_eq!(compose_fly_direction(Vec3::ZERO, true, true), Vec3::ZERO);
+        assert_eq!(
+            compose_fly_direction(Vec3::ZERO, true, true, Vec3::Y),
+            Vec3::ZERO
+        );
     }
 
     #[test]
     fn compose_fly_direction_forward_only_is_normalized() {
-        let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false);
+        let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false, Vec3::Y);
         assert!((result.length() - 1.0).abs() < 1e-6);
         assert_eq!(result, Vec3::X);
     }
@@ -896,6 +955,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
+                Vec3::Y,
             );
         }
         // forward is -Z at identity rotation (matches Player's convention); after 2s should have
