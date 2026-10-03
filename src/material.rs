@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn earth_like_palette_reproduces_grass_sand_stone_snow() {
         // a tiny deterministic terrain: res 16 is enough to hit every band at some column
-        let terrain = PlanetTerrain::new(16);
+        let terrain = PlanetTerrain::new(16, crate::noise::HOME_SEED);
         let palette = earth_palette();
         let mut seen = std::collections::HashSet::new();
         for u in 0..16 {
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn ice_palette_never_produces_grass() {
-        let terrain = PlanetTerrain::new(16);
+        let terrain = PlanetTerrain::new(16, crate::noise::HOME_SEED);
         let palette = ice_palette();
         for u in 0..16 {
             for v in 0..16 {

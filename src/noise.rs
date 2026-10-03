@@ -69,6 +69,9 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 
 // --- PLANET TERRAIN DATA ---
 
+// the home planet's noise seed (the value every planet used before galaxy planets had their own)
+pub const HOME_SEED: u32 = 42;
+
 pub struct PlanetTerrain {
     // Flattened height map
     heights: Arc<Vec<u16>>,
@@ -78,9 +81,9 @@ pub struct PlanetTerrain {
 }
 
 impl PlanetTerrain {
-    pub fn new(resolution: u32) -> Self {
+    pub fn new(resolution: u32, seed: u32) -> Self {
         use rayon::prelude::*;
-        let generator = NoiseGenerator::new(42); // Seed 42
+        let generator = NoiseGenerator::new(seed);
         let shape = TerrainShape::new(resolution);
         let sea_level = resolution / 2;
         let mut heights = vec![0u16; (6 * resolution * resolution) as usize];
@@ -280,4 +283,34 @@ fn grad(hash: u8, x: f32, y: f32, z: f32) -> f32 {
         }
     };
     (if (h & 1) == 0 { u } else { -u }) + (if (h & 2) == 0 { v } else { -v })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // FNV-1a over every column height: a cheap fingerprint of a whole terrain
+    fn fingerprint(t: &PlanetTerrain) -> u64 {
+        t.heights.iter().fold(0xcbf2_9ce4_8422_2325u64, |a, &h| {
+            (a ^ h as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    // the value was measured on the code before seeds existed (hardcoded NoiseGenerator::new(42)):
+    // the home planet must come out bit-identical
+    #[test]
+    fn home_seed_reproduces_the_original_terrain() {
+        assert_eq!(
+            fingerprint(&PlanetTerrain::new(64, HOME_SEED)),
+            0x8940_2259_76b1_98a6
+        );
+    }
+
+    #[test]
+    fn different_seeds_give_different_terrain() {
+        assert_ne!(
+            fingerprint(&PlanetTerrain::new(64, 1)),
+            fingerprint(&PlanetTerrain::new(64, 2))
+        );
+    }
 }
