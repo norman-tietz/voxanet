@@ -130,7 +130,6 @@ impl GalaxyPlanet {
     }
 
     // f32 version for orientations (Quat); the angle is reduced first so f32 keeps its precision
-    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     fn spin_f32(&self, t: f64) -> Quat {
         Quat::from_axis_angle(Vec3::Y, (self.spin_angle(t) % std::f64::consts::TAU) as f32)
     }
@@ -139,7 +138,6 @@ impl GalaxyPlanet {
         self.spin(t) * (abs - self.position_at(t))
     }
 
-    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn from_planet_frame(&self, local: DVec3, t: f64) -> DVec3 {
         self.position_at(t) + self.spin(t).inverse() * local
     }
@@ -149,7 +147,6 @@ impl GalaxyPlanet {
         self.spin_f32(t) * abs_rot
     }
 
-    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn rotation_from_planet_frame(&self, local_rot: Quat, t: f64) -> Quat {
         self.spin_f32(t).inverse() * local_rot
     }
@@ -181,6 +178,14 @@ pub fn home_sun_dir(t: f64, day_length_secs: f32) -> Vec3 {
     let time = (t % 3600.0) as f32;
     let spin_angle = (time / day_length_secs) * std::f32::consts::TAU;
     Quat::from_axis_angle(Vec3::Y, spin_angle) * Vec3::new(0.5, 0.2, 0.4).normalize()
+}
+
+// home planet frame -> sky frame: undoes the same daily turn home_sun_dir applies, so the sun (and
+// with it the starfield backdrop) holds still in the sky's frame while the planet turns under it
+pub fn home_sky_rotation(t: f64, day_length_secs: f32) -> Quat {
+    let time = (t % 3600.0) as f32;
+    let spin_angle = (time / day_length_secs) * std::f32::consts::TAU;
+    Quat::from_axis_angle(Vec3::Y, -spin_angle)
 }
 
 const GALAXY_CRUISE_SPEED: f32 = 500.0;
@@ -312,6 +317,18 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the home planet's sky must turn with its sun: the sun, taken from the planet frame into the
+    // sky's frame, stays put — so stars keep their place relative to the sun through the day
+    #[test]
+    fn home_sky_rotation_holds_the_sun_still() {
+        let day = 120.0;
+        let base = Vec3::new(0.5, 0.2, 0.4).normalize();
+        for t in [0.0, 17.0, 61.5, 3_600.0 + 17.0] {
+            let sun_in_sky = home_sky_rotation(t, day) * home_sun_dir(t, day);
+            assert!((sun_in_sky - base).length() < 1e-5, "t={t}: {sun_in_sky:?}");
+        }
+    }
 
     fn inner_planet() -> GalaxyPlanet {
         Galaxy::generate(1).planets[0]

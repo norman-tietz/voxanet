@@ -5,9 +5,9 @@
 // sub-project #2 replaces these placeholder spheres with real terrain-shaped impostors.
 
 use crate::deferred::DEPTH_FORMAT;
-use crate::galaxy::{Galaxy, GalaxyFlight};
+use crate::galaxy::{Galaxy, GalaxyFlight, GalaxyPlanet};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
 const ICOSPHERE_SUBDIVISIONS: u32 = 2;
@@ -63,6 +63,74 @@ fn subdivision_for_distance(distance: f32, radius: f32) -> u32 {
         4
     } else {
         5
+    }
+}
+
+// where the galaxy is seen from: a position in galaxy space, an orientation (looking down local -Z)
+// and a vertical field of view. Galaxy mode uses the flight; planet mode uses the planet camera
+// converted into galaxy space, so the backdrop behind the voxel world lines up with it exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct GalaxyCamera {
+    pub position: DVec3,
+    pub rotation: Quat,
+    pub fov_y: f32,
+}
+
+impl GalaxyCamera {
+    pub fn from_flight(flight: &GalaxyFlight) -> Self {
+        Self {
+            position: flight.position,
+            rotation: flight.rotation,
+            fov_y: FOV_Y_RADIANS,
+        }
+    }
+
+    // the planet camera (eye and orientation in the planet frame) on a galaxy planet
+    pub fn on_galaxy_planet(
+        planet: &GalaxyPlanet,
+        eye: Vec3,
+        rotation: Quat,
+        fov_y: f32,
+        t: f64,
+    ) -> Self {
+        Self {
+            position: planet.from_planet_frame(eye.as_dvec3(), t),
+            rotation: planet.rotation_from_planet_frame(rotation, t),
+            fov_y,
+        }
+    }
+
+    // the home planet isn't part of the galaxy, so only the starfield is drawn and only the direction
+    // matters; it turns with the home sun (galaxy::home_sky_rotation)
+    pub fn on_home_planet(rotation: Quat, fov_y: f32, t: f64, day_length_secs: f32) -> Self {
+        Self {
+            position: DVec3::ZERO,
+            rotation: crate::galaxy::home_sky_rotation(t, day_length_secs) * rotation,
+            fov_y,
+        }
+    }
+}
+
+// which parts of the galaxy to draw: everything in galaxy mode; behind a galaxy planet's voxel world
+// everything except that planet (the voxel engine draws it); behind the home planet only the stars
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GalaxyContent {
+    Everything,
+    AllButPlanet(usize),
+    StarfieldOnly,
+}
+
+impl GalaxyContent {
+    pub fn draws_star(self) -> bool {
+        !matches!(self, Self::StarfieldOnly)
+    }
+
+    pub fn draws_planet(self, i: usize) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::AllButPlanet(skip) => i != skip,
+            Self::StarfieldOnly => false,
+        }
     }
 }
 
@@ -360,21 +428,22 @@ impl GalaxyRenderer {
         queue: &wgpu::Queue,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        flight: &GalaxyFlight,
+        camera: &GalaxyCamera,
+        content: GalaxyContent,
         galaxy: &Galaxy,
         t: f64,
         screen: (f32, f32),
     ) {
         let proj = glam::camera::rh::proj::directx::perspective(
-            FOV_Y_RADIANS,
+            camera.fov_y,
             screen.0 / screen.1,
             NEAR_PLANE,
             FAR_PLANE,
         );
-        let view = Mat4::from_quat(flight.rotation).inverse();
+        let view = Mat4::from_quat(camera.rotation).inverse();
         let view_proj = proj * view;
 
-        let ray_dirs = Self::ray_dirs(flight.rotation, FOV_Y_RADIANS, screen.0 / screen.1);
+        let ray_dirs = Self::ray_dirs(camera.rotation, camera.fov_y, screen.0 / screen.1);
         queue.write_buffer(
             &self.camera_buf,
             0,
@@ -386,29 +455,36 @@ impl GalaxyRenderer {
         );
 
         let mut bodies = Vec::with_capacity(1 + galaxy.planets.len());
-        let star_camera_relative = (-flight.position).as_vec3();
-        bodies.push(GalaxyBodyUniform {
-            offset: [
-                star_camera_relative.x,
-                star_camera_relative.y,
-                star_camera_relative.z,
-                galaxy.star.radius as f32,
-            ],
-            color: [1.6, 1.4, 0.9, 1.0],
-            light_dir: [0.0, 1.0, 0.0, 0.0],
-        });
+        if content.draws_star() {
+            let star_camera_relative = (galaxy.star.position() - camera.position).as_vec3();
+            bodies.push(GalaxyBodyUniform {
+                offset: [
+                    star_camera_relative.x,
+                    star_camera_relative.y,
+                    star_camera_relative.z,
+                    galaxy.star.radius as f32,
+                ],
+                color: [1.6, 1.4, 0.9, 1.0],
+                light_dir: [0.0, 1.0, 0.0, 0.0],
+            });
+        }
         debug_assert!(
             bodies.len() <= MAX_BODIES,
             "galaxy has more bodies than the storage buffer was sized for"
         );
-        queue.write_buffer(&self.body_buf, 0, bytemuck::cast_slice(&bodies));
+        if !bodies.is_empty() {
+            queue.write_buffer(&self.body_buf, 0, bytemuck::cast_slice(&bodies));
+        }
 
         let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
         for (i, p) in galaxy.planets.iter().enumerate() {
             let body_pos = p.position_at(t);
-            let camera_relative = (body_pos - flight.position).as_vec3(); // already computed here
-            let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
-            self.ensure_planet_mesh(device, i, p, subdivision);
+            let camera_relative = (body_pos - camera.position).as_vec3(); // already computed here
+                                                                          // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
+            if content.draws_planet(i) {
+                let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
+                self.ensure_planet_mesh(device, i, p, subdivision);
+            }
             let light_dir = (-body_pos).normalize_or_zero().as_vec3();
             let atmosphere = p.planet_type.def().atmosphere;
             planet_uniforms.push(GalaxyPlanetUniform {
@@ -468,16 +544,21 @@ impl GalaxyRenderer {
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
 
-            pass.set_pipeline(&self.body_pipeline);
-            pass.set_vertex_buffer(0, self.v_buf.slice(..));
-            pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.num_indices, 0, 0..(bodies.len() as u32));
+            if !bodies.is_empty() {
+                pass.set_pipeline(&self.body_pipeline);
+                pass.set_vertex_buffer(0, self.v_buf.slice(..));
+                pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.num_indices, 0, 0..(bodies.len() as u32));
+            }
 
             pass.set_pipeline(&self.planet_pipeline);
             pass.set_bind_group(0, &self.camera_bind, &[]);
             for (i, p) in galaxy.planets.iter().enumerate() {
+                if !content.draws_planet(i) {
+                    continue;
+                }
                 let body_pos = p.position_at(t);
-                let camera_relative = (body_pos - flight.position).as_vec3();
+                let camera_relative = (body_pos - camera.position).as_vec3();
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 if let Some(mesh) = self.planet_meshes.get(&(i, subdivision)) {
                     pass.set_bind_group(
@@ -545,6 +626,40 @@ impl GalaxyRenderer {
 mod tests {
     use super::*;
     use crate::galaxy::Galaxy;
+
+    #[test]
+    fn content_selects_star_and_planets() {
+        assert!(GalaxyContent::Everything.draws_star());
+        assert!(GalaxyContent::Everything.draws_planet(3));
+        assert!(GalaxyContent::AllButPlanet(2).draws_star());
+        assert!(GalaxyContent::AllButPlanet(2).draws_planet(1));
+        assert!(!GalaxyContent::AllButPlanet(2).draws_planet(2));
+        assert!(!GalaxyContent::StarfieldOnly.draws_star());
+        assert!(!GalaxyContent::StarfieldOnly.draws_planet(0));
+    }
+
+    // standing on a galaxy planet, the backdrop camera sits where the planet frame puts the eye in
+    // galaxy space, turned the same way
+    #[test]
+    fn camera_on_a_galaxy_planet_is_placed_in_galaxy_space() {
+        let g = Galaxy::generate(1);
+        let p = &g.planets[0];
+        let eye = Vec3::new(0.0, 175.0, 0.0);
+        let rot = Quat::from_axis_angle(Vec3::X, 0.4);
+        let t = 42.0;
+        let cam = GalaxyCamera::on_galaxy_planet(p, eye, rot, 1.2, t);
+        assert!((cam.position - p.from_planet_frame(eye.as_dvec3(), t)).length() < 1e-6);
+        assert!(cam.rotation.dot(p.rotation_from_planet_frame(rot, t)).abs() > 1.0 - 1e-6);
+        assert_eq!(cam.fov_y, 1.2);
+    }
+
+    #[test]
+    fn camera_from_flight_uses_galaxy_modes_fov() {
+        let flight = GalaxyFlight::new(glam::DVec3::new(1.0, 2.0, 3.0));
+        let cam = GalaxyCamera::from_flight(&flight);
+        assert_eq!(cam.position, flight.position);
+        assert_eq!(cam.fov_y, FOV_Y_RADIANS);
+    }
 
     // integration: Galaxy + GalaxyFlight together, at the same default entry point `Game::new` /
     // the `/galaxy enter` handler use (src/main.rs), should keep every body within the render
