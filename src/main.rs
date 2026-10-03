@@ -91,9 +91,42 @@ struct App {
     initial_biome: crate::biome::PlanetType, // from --biome, see parse_biome_arg()
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum GameMode {
     Planet,
-    Galaxy { return_point: glam::Vec3 },
+    Galaxy,
+}
+
+// which world the voxel engine's `planet` currently holds — tracked separately from GameMode, since
+// later milestones preload a galaxy planet while still flying in galaxy mode
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PlanetWorld {
+    Home,
+    Galaxy(usize), // index into Galaxy::planets
+}
+
+// where /galaxy exit puts the player back, and how to rebuild the home planet if it was replaced
+struct HomeReturn {
+    position: glam::Vec3,
+    resolution: u32,
+    planet_type: crate::biome::PlanetType,
+}
+
+// swaps a different planet into the voxel engine and puts the player at `player_pos` on it: the
+// same steps the B key takes (placeable block for the new palette, full mesh reload)
+fn install_planet(
+    renderer: &mut Renderer,
+    controller: &mut Controller,
+    player: &mut Player,
+    planet: &mut PlanetData,
+    new_planet: PlanetData,
+    player_pos: glam::Vec3,
+) {
+    *planet = new_planet;
+    controller.selected_block = crate::material::placeable(&planet.planet_type.def().palette)[0];
+    player.spawn(player_pos);
+    renderer.force_reload_all(planet, player.position);
+    renderer.log_memory(planet);
 }
 
 struct Game {
@@ -108,6 +141,8 @@ struct Game {
     galaxy: crate::galaxy::Galaxy,
     galaxy_flight: crate::galaxy::GalaxyFlight,
     clock: Instant, // shared game clock: galaxy orbits and planet day/night
+    loaded_world: PlanetWorld,
+    home_return: Option<HomeReturn>, // set when the player leaves the home planet
 }
 
 impl Game {
@@ -147,6 +182,8 @@ impl Game {
             galaxy: crate::galaxy::Galaxy::generate(1),
             galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
             clock: Instant::now(),
+            loaded_world: PlanetWorld::Home,
+            home_return: None,
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -161,9 +198,11 @@ impl Game {
             last_time,
             current_cursor_locked,
             mode,
-            galaxy: _,
+            galaxy,
             galaxy_flight,
-            clock: _,
+            clock,
+            loaded_world,
+            home_return,
         } = self;
 
         let now = Instant::now();
@@ -198,7 +237,7 @@ impl Game {
                 renderer.update_cursor(planet, controller.cursor_id);
                 renderer.update_view(player.position, planet);
             }
-            GameMode::Galaxy { .. } => {
+            GameMode::Galaxy => {
                 let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
                 galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint);
             }
@@ -215,47 +254,91 @@ impl Game {
             controller.cam_dist = if fp { 40.0 } else { 100.0 };
         }
         if let Some(request) = console.galaxy_request.take() {
-            let enter = match request {
-                crate::cmd::GalaxyRequest::Enter => Some(true),
-                crate::cmd::GalaxyRequest::Exit => Some(false),
-                crate::cmd::GalaxyRequest::Land(_) => {
-                    console.log("/galaxy land: not wired up yet", [1.0, 0.5, 0.0]);
-                    None
-                }
+            use crate::cmd::GalaxyRequest;
+            let say = |console: &mut Console, text: &str| {
+                console.log(text, [1.0, 1.0, 1.0]);
+                println!("{text}");
             };
-            if let Some(enter) = enter {
-                match (&*mode, enter) {
-                    (GameMode::Planet, true) => {
-                        *mode = GameMode::Galaxy {
-                            return_point: player.position,
-                        };
-                        *galaxy_flight =
-                            crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
-                        // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
-                        // player entered while in third person (Controller::raw_input gates it on
-                        // first_person && !mouse_released) — otherwise there's no way to turn at all.
-                        controller.first_person = true;
-                        controller.mouse_released = false;
-                        // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
-                        // input (WASD included) — close it rather than leave it capturing keys invisibly
-                        if console.is_open {
-                            console.toggle();
-                        }
-                        console.log(
-                            "Entered galaxy mode. /galaxy exit to return.",
-                            [1.0, 1.0, 1.0],
-                        );
-                        println!("Entered galaxy mode. /galaxy exit to return.");
+            // remember the way home the first time the player leaves the home planet
+            if *loaded_world == PlanetWorld::Home
+                && *mode == GameMode::Planet
+                && !matches!(request, GalaxyRequest::Exit)
+            {
+                *home_return = Some(HomeReturn {
+                    position: player.position,
+                    resolution: planet.resolution,
+                    planet_type: planet.planet_type,
+                });
+            }
+            match (request, *mode) {
+                (GalaxyRequest::Enter, GameMode::Planet) => {
+                    *mode = GameMode::Galaxy;
+                    *galaxy_flight =
+                        crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0));
+                    // galaxy mode has no Q/E key-yaw, so make sure mouse-look is active even if the
+                    // player entered while in third person (Controller::raw_input gates it on
+                    // first_person && !mouse_released) — otherwise there's no way to turn at all.
+                    controller.first_person = true;
+                    controller.mouse_released = false;
+                    // the console isn't drawn in galaxy mode, and an open one swallows all keyboard
+                    // input (WASD included) — close it rather than leave it capturing keys invisibly
+                    if console.is_open {
+                        console.toggle();
                     }
-                    (GameMode::Galaxy { return_point }, false) => {
-                        player.position = *return_point;
-                        player.velocity = glam::Vec3::ZERO;
-                        *mode = GameMode::Planet;
-                        console.log("Returned to the planet.", [1.0, 1.0, 1.0]);
-                        println!("Returned to the planet.");
-                    }
-                    _ => {} // already in the requested mode; no-op
+                    say(console, "Entered galaxy mode. /galaxy exit to return.");
                 }
+                (GalaxyRequest::Exit, _) if *loaded_world == PlanetWorld::Home => {
+                    if *mode == GameMode::Galaxy {
+                        if let Some(home) = home_return.take() {
+                            player.position = home.position;
+                            player.velocity = glam::Vec3::ZERO;
+                        }
+                        *mode = GameMode::Planet;
+                        say(console, "Returned to the planet.");
+                    } // already home on the planet: nothing to do
+                }
+                (GalaxyRequest::Exit, _) => {
+                    // the voxel engine holds a galaxy planet: rebuild the home planet first
+                    if let Some(home) = home_return.take() {
+                        let mut data = PlanetData::new(home.resolution);
+                        data.switch_planet_type(home.planet_type);
+                        install_planet(renderer, controller, player, planet, data, home.position);
+                    }
+                    *loaded_world = PlanetWorld::Home;
+                    *mode = GameMode::Planet;
+                    say(console, "Returned to the home planet.");
+                }
+                (GalaxyRequest::Land(n), _) => match galaxy.planets.get(n - 1) {
+                    None => console.log(
+                        &format!(
+                            "No planet #{n}: this galaxy has 1..={}",
+                            galaxy.planets.len()
+                        ),
+                        [1.0, 0.5, 0.0],
+                    ),
+                    Some(target) => {
+                        // TEMPORARY (milestone 1): a hard cut onto the surface, to validate the
+                        // seeded bake and the real-star sun before the seamless descent exists
+                        let t = clock.elapsed().as_secs_f64();
+                        let data = target.bake();
+                        // land at local noon: the surface point facing the star
+                        let noon = target.sun_dir_in_planet_frame(galaxy.star.position(), t);
+                        let dir = data.safe_spawn_direction(noon);
+                        let pos = dir * spawn_radius(&data, dir, 10.0);
+                        install_planet(renderer, controller, player, planet, data, pos);
+                        *loaded_world = PlanetWorld::Galaxy(n - 1);
+                        *mode = GameMode::Planet;
+                        say(
+                            console,
+                            &format!(
+                                "Landed on #{n} {} (res {}). /galaxy exit to go home.",
+                                target.planet_type.def().name,
+                                target.voxel_resolution()
+                            ),
+                        );
+                    }
+                },
+                _ => {} // already in the requested mode; no-op
             }
         }
         // dev convenience: polled instead of a console command so screenshots can be scripted without
@@ -485,13 +568,17 @@ impl Game {
                 let t = self.clock.elapsed().as_secs_f64();
                 match &self.mode {
                     GameMode::Planet => {
-                        let sun = crate::galaxy::home_sun_dir(
-                            t,
-                            planet.planet_type.def().day_length_secs,
-                        );
+                        let sun = match self.loaded_world {
+                            PlanetWorld::Home => crate::galaxy::home_sun_dir(
+                                t,
+                                planet.planet_type.def().day_length_secs,
+                            ),
+                            PlanetWorld::Galaxy(i) => self.galaxy.planets[i]
+                                .sun_dir_in_planet_frame(self.galaxy.star.position(), t),
+                        };
                         renderer.render(controller, player, planet, console, t, sun)
                     }
-                    GameMode::Galaxy { .. } => {
+                    GameMode::Galaxy => {
                         renderer.render_galaxy(&self.galaxy_flight, &self.galaxy, t)
                     }
                 }

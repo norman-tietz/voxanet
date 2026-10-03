@@ -130,6 +130,7 @@ impl GalaxyPlanet {
     }
 
     // f32 version for orientations (Quat); the angle is reduced first so f32 keeps its precision
+    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     fn spin_f32(&self, t: f64) -> Quat {
         Quat::from_axis_angle(Vec3::Y, (self.spin_angle(t) % std::f64::consts::TAU) as f32)
     }
@@ -138,14 +139,17 @@ impl GalaxyPlanet {
         self.spin(t) * (abs - self.position_at(t))
     }
 
+    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn from_planet_frame(&self, local: DVec3, t: f64) -> DVec3 {
         self.position_at(t) + self.spin(t).inverse() * local
     }
 
+    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn rotation_to_planet_frame(&self, abs_rot: Quat, t: f64) -> Quat {
         self.spin_f32(t) * abs_rot
     }
 
+    #[allow(dead_code)] // first used by galaxy-landing milestone 3 (captured flight)
     pub fn rotation_from_planet_frame(&self, local_rot: Quat, t: f64) -> Quat {
         self.spin_f32(t).inverse() * local_rot
     }
