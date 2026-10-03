@@ -23,7 +23,7 @@ const ICOSPHERE_SUBDIVISIONS: u32 = 2;
 const FOV_Y_RADIANS: f32 = 80.0 * std::f32::consts::PI / 180.0;
 const NEAR_PLANE: f32 = 1.0;
 const FAR_PLANE: f32 = 200_000.0; // comfortably past the outermost orbit (galaxy.rs)
-const MAX_BODIES: usize = 16; // star + up to 15 planets; galaxy.rs generates 7 today
+const MAX_BODIES: usize = MAX_PLANETS + 1; // the star + every planet the galaxy can hold
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -60,8 +60,7 @@ struct PlanetMesh {
     num_indices: u32,
 }
 
-const MAX_PLANETS: usize = MAX_BODIES - 1; // the star takes one conceptual slot; planets no longer
-                                           // share the body path, but this keeps one shared cap
+use crate::galaxy::MAX_PLANETS; // galaxy.rs caps generated + added planets at this many
 
 // starting points from the galaxy-terrain-impostors design discussion's faceting estimate
 // (~10-13x radius before individual facets become visually obvious at this project's FOV);

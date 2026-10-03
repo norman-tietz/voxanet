@@ -19,6 +19,16 @@ pub enum PlanetType {
 impl PlanetType {
     pub const ALL: [PlanetType; 3] = [PlanetType::EarthLike, PlanetType::Volcanic, PlanetType::Ice];
 
+    // matches a planet type's name case-insensitively, ignoring spaces and hyphens ("Earth-like",
+    // "earthlike", "EARTHLIKE"); used by --biome and /galaxy add
+    pub fn from_name(name: &str) -> Option<PlanetType> {
+        let normalize = |s: &str| s.to_lowercase().replace(['-', ' '], "");
+        let wanted = normalize(name);
+        PlanetType::ALL
+            .into_iter()
+            .find(|t| normalize(t.def().name) == wanted)
+    }
+
     pub fn next(self) -> PlanetType {
         let i = Self::ALL.iter().position(|&t| t == self).unwrap();
         Self::ALL[(i + 1) % Self::ALL.len()]
@@ -143,6 +153,25 @@ pub struct PlanetTypeDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --biome and /galaxy add accept the same spellings
+    #[test]
+    fn planet_type_names_parse_like_the_biome_flag() {
+        assert_eq!(
+            PlanetType::from_name("Earth-like"),
+            Some(PlanetType::EarthLike)
+        );
+        assert_eq!(
+            PlanetType::from_name("earthlike"),
+            Some(PlanetType::EarthLike)
+        );
+        assert_eq!(
+            PlanetType::from_name("VOLCANIC"),
+            Some(PlanetType::Volcanic)
+        );
+        assert_eq!(PlanetType::from_name("ice"), Some(PlanetType::Ice));
+        assert_eq!(PlanetType::from_name("lava"), None);
+    }
 
     #[test]
     fn next_wraps_through_all_three_types() {

@@ -32,6 +32,7 @@ pub struct GalaxyPlanet {
 pub struct Galaxy {
     pub star: Star,
     pub planets: Vec<GalaxyPlanet>,
+    pub seed: u64, // generation seed: planets added later (/galaxy add) are seeded from it too
 }
 
 const PLANET_COUNT: usize = 7;
@@ -41,6 +42,12 @@ const INNER_ORBIT_PERIOD_SECS: f64 = 180.0;
 const STAR_RADIUS: f64 = 3_000.0;
 const MIN_PLANET_RADIUS: f32 = 40.0;
 const MAX_PLANET_RADIUS: f32 = 250.0;
+// most planets a galaxy can hold (generated + /galaxy add): the galaxy renderer sizes its per-planet
+// uniform buffer for this many
+pub const MAX_PLANETS: usize = 15;
+// /galaxy add accepts radii in this range (bake time grows with the square of the radius)
+pub const MIN_ADDED_RADIUS: f32 = 20.0;
+pub const MAX_ADDED_RADIUS: f32 = 500.0;
 
 impl Galaxy {
     pub fn generate(seed: u64) -> Self {
@@ -62,7 +69,43 @@ impl Galaxy {
                 radius: STAR_RADIUS,
             },
             planets,
+            seed,
         }
+    }
+
+    // the planet a new game starts on: the first one of the preferred type (--biome), else #1
+    pub fn start_planet_index(&self, preferred: PlanetType) -> usize {
+        self.planets
+            .iter()
+            .position(|p| p.planet_type == preferred)
+            .unwrap_or(0)
+    }
+
+    // debug (/galaxy add): appends a planet of the given type and radius on the next orbit outward,
+    // shaped like the generated ones (same orbit progression, phase spread and seeded terrain);
+    // returns its index
+    pub fn add_planet(
+        &mut self,
+        planet_type: PlanetType,
+        radius: f32,
+    ) -> Result<usize, &'static str> {
+        if self.planets.len() >= MAX_PLANETS {
+            return Err("The galaxy is full (15 planets).");
+        }
+        if !(MIN_ADDED_RADIUS..=MAX_ADDED_RADIUS).contains(&radius) {
+            return Err("Planet radius must be 20-500.");
+        }
+        let i = self.planets.len();
+        let orbit_radius = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(i as i32);
+        self.planets.push(GalaxyPlanet {
+            orbit_radius,
+            orbit_speed: orbit_speed_for(orbit_radius),
+            orbit_phase: std::f64::consts::TAU * (i as f64) / (PLANET_COUNT as f64),
+            radius,
+            planet_type,
+            noise_seed: noise_seed_for(self.seed, i),
+        });
+        Ok(i)
     }
 }
 
@@ -404,6 +447,51 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_planet_is_the_first_of_the_preferred_type() {
+        let mut g = Galaxy::generate(1);
+        assert_eq!(g.start_planet_index(PlanetType::EarthLike), 0);
+        assert_eq!(g.start_planet_index(PlanetType::Volcanic), 1);
+        assert_eq!(g.start_planet_index(PlanetType::Ice), 2);
+        g.planets.retain(|p| p.planet_type != PlanetType::Ice);
+        assert_eq!(
+            g.start_planet_index(PlanetType::Ice),
+            0,
+            "no planet of that type: #1"
+        );
+    }
+
+    #[test]
+    fn added_planet_continues_the_orbit_progression_and_is_deterministic() {
+        let mut a = Galaxy::generate(1);
+        let i = a.add_planet(PlanetType::Ice, 120.0).unwrap();
+        assert_eq!(i, 7);
+        let p = a.planets[7];
+        let expected_orbit = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(7);
+        assert!((p.orbit_radius - expected_orbit).abs() < 1e-6);
+        assert_eq!(p.planet_type, PlanetType::Ice);
+        assert_eq!(p.radius, 120.0);
+        assert_eq!(p.noise_seed, noise_seed_for(1, 7));
+        let mut b = Galaxy::generate(1);
+        b.add_planet(PlanetType::Ice, 120.0).unwrap();
+        assert_eq!(a.planets[7], b.planets[7]);
+    }
+
+    #[test]
+    fn adding_beyond_the_cap_or_out_of_range_fails() {
+        let mut g = Galaxy::generate(1);
+        assert!(g.add_planet(PlanetType::Ice, 10.0).is_err());
+        assert!(g.add_planet(PlanetType::Ice, 600.0).is_err());
+        while g.planets.len() < MAX_PLANETS {
+            g.add_planet(PlanetType::EarthLike, 50.0).unwrap();
+        }
+        assert!(
+            g.add_planet(PlanetType::EarthLike, 50.0).is_err(),
+            "full at MAX_PLANETS"
+        );
+        assert_eq!(g.planets.len(), MAX_PLANETS);
+    }
 
     // captured over a planet's equator (local up = +X here), levelled, looking along the horizon:
     // sideways mouse must turn the view around the local up — before, it turned around the spin

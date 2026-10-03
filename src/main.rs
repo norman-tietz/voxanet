@@ -43,25 +43,20 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // against each PlanetType's def().name with spaces/hyphens stripped, so "Earth-like", "earthlike" and
 // "EARTHLIKE" all match. Unrecognized values fall back to earth-like with a warning.
 fn parse_biome_arg() -> crate::biome::PlanetType {
-    let normalize = |s: &str| s.to_lowercase().replace(['-', ' '], "");
     let Some(requested) = std::env::args().skip_while(|a| a != "--biome").nth(1) else {
         return crate::biome::PlanetType::EarthLike;
     };
-    let wanted = normalize(&requested);
-    crate::biome::PlanetType::ALL
-        .into_iter()
-        .find(|t| normalize(t.def().name) == wanted)
-        .unwrap_or_else(|| {
-            let names: Vec<_> = crate::biome::PlanetType::ALL
-                .iter()
-                .map(|t| t.def().name)
-                .collect();
-            eprintln!(
-                "Unknown --biome '{requested}', valid options: {}. Using Earth-like.",
-                names.join(", ")
-            );
-            crate::biome::PlanetType::EarthLike
-        })
+    crate::biome::PlanetType::from_name(&requested).unwrap_or_else(|| {
+        let names: Vec<_> = crate::biome::PlanetType::ALL
+            .iter()
+            .map(|t| t.def().name)
+            .collect();
+        eprintln!(
+            "Unknown --biome '{requested}', valid options: {}. Using Earth-like.",
+            names.join(", ")
+        );
+        crate::biome::PlanetType::EarthLike
+    })
 }
 
 // the world-space distance from the planet center to just above the ground along `dir`, using the
