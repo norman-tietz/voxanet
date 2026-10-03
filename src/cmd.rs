@@ -39,6 +39,8 @@ pub struct Console {
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
+    command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
+    history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
     history_capacity: usize,
 }
@@ -54,6 +56,8 @@ impl Console {
             screenshot_request: None,
             view_request: None,
             galaxy_request: None,
+            command_history: Vec::new(),
+            history_cursor: None,
             history_capacity: 50,
         }
     }
@@ -62,6 +66,7 @@ impl Console {
         self.is_open = !self.is_open;
         if self.is_open {
             self.input_buffer.clear();
+            self.history_cursor = None;
         }
     }
 
@@ -73,6 +78,46 @@ impl Console {
             self.history.remove(0);
         }
         self.history.push((text.to_string(), color));
+    }
+
+    // keeps a submitted command for up/down (not twice in a row; at most history_capacity) and ends
+    // any browsing, so the next up starts again from the newest
+    fn remember_command(&mut self, cmd: &str) {
+        if self.command_history.last().map(String::as_str) != Some(cmd) {
+            if self.command_history.len() >= self.history_capacity {
+                self.command_history.remove(0);
+            }
+            self.command_history.push(cmd.to_string());
+        }
+        self.history_cursor = None;
+    }
+
+    // up: replace the input line with the next-older submitted command (stays at the oldest)
+    pub fn history_up(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        let i = match self.history_cursor {
+            None => self.command_history.len() - 1,
+            Some(i) => i.saturating_sub(1),
+        };
+        self.history_cursor = Some(i);
+        self.input_buffer = self.command_history[i].clone();
+    }
+
+    // down: the next-newer command; past the newest, an empty line again
+    pub fn history_down(&mut self) {
+        match self.history_cursor {
+            None => {}
+            Some(i) if i + 1 < self.command_history.len() => {
+                self.history_cursor = Some(i + 1);
+                self.input_buffer = self.command_history[i + 1].clone();
+            }
+            Some(_) => {
+                self.history_cursor = None;
+                self.input_buffer.clear();
+            }
+        }
     }
 
     pub fn handle_char(&mut self, c: char) {
@@ -98,6 +143,7 @@ impl Console {
         }
 
         let cmd = self.input_buffer.clone();
+        self.remember_command(&cmd);
         self.log(&format!("> {}", cmd), [1.0, 1.0, 1.0]); // log
 
         self.process_command(&cmd, player);
@@ -241,6 +287,60 @@ impl Console {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn console_with(commands: &[&str]) -> Console {
+        let mut c = Console::new();
+        let mut p = Player::new();
+        c.is_open = true;
+        for cmd in commands {
+            c.input_buffer = cmd.to_string();
+            c.submit(&mut p);
+        }
+        c
+    }
+
+    #[test]
+    fn up_and_down_step_through_submitted_commands() {
+        let mut c = console_with(&["/a", "/b", "/c"]);
+        c.history_up();
+        assert_eq!(c.input_buffer, "/c");
+        c.history_up();
+        assert_eq!(c.input_buffer, "/b");
+        c.history_up();
+        c.history_up();
+        assert_eq!(c.input_buffer, "/a", "stops at the oldest");
+        c.history_down();
+        assert_eq!(c.input_buffer, "/b");
+        c.history_down();
+        c.history_down();
+        assert_eq!(c.input_buffer, "", "past the newest: an empty line");
+    }
+
+    #[test]
+    fn repeated_commands_are_stored_once_and_submitting_resets_browsing() {
+        let mut c = console_with(&["/a", "/a", "/b"]);
+        c.history_up();
+        c.history_up();
+        assert_eq!(c.input_buffer, "/a");
+        c.history_up();
+        assert_eq!(c.input_buffer, "/a", "only two entries: /a, /b");
+        c.input_buffer = "/x".to_string();
+        c.submit(&mut Player::new());
+        c.history_up();
+        assert_eq!(c.input_buffer, "/x", "browsing restarts from the newest");
+    }
+
+    #[test]
+    fn history_with_nothing_submitted_does_nothing() {
+        let mut c = Console::new();
+        c.is_open = true;
+        c.history_up();
+        c.history_down();
+        assert_eq!(c.input_buffer, "");
+        let mut c = console_with(&["/a"]);
+        c.history_down(); // down before any up
+        assert_eq!(c.input_buffer, "");
+    }
 
     #[test]
     fn parses_goto() {

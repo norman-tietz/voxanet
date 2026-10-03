@@ -213,7 +213,10 @@ impl Game {
 
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
-        console.log("Press ` to open console.", [1.0, 1.0, 1.0]);
+        console.log(
+            "Press the key left of 1 (` or ^) to open the console.",
+            [1.0, 1.0, 1.0],
+        );
         console.log(
             &format!("Planet type: {}", planet.planet_type.def().name),
             [1.0, 1.0, 1.0],
@@ -616,6 +619,8 @@ impl Game {
                             PhysicalKey::Code(KeyCode::Backquote) => console.toggle(),
                             PhysicalKey::Code(KeyCode::Enter) => console.submit(player),
                             PhysicalKey::Code(KeyCode::Backspace) => console.handle_backspace(),
+                            PhysicalKey::Code(KeyCode::ArrowUp) => console.history_up(),
+                            PhysicalKey::Code(KeyCode::ArrowDown) => console.history_down(),
                             _ => {
                                 if let Some(txt) = &key_event.text {
                                     // Append text to console buffer

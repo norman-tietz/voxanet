@@ -211,6 +211,20 @@ fn status_alpha(age_secs: f32) -> f32 {
     ((STATUS_SECONDS - age_secs) / STATUS_FADE_SECONDS).clamp(0.0, 1.0)
 }
 
+// the debug console drops down over this fraction of the screen height when fully open
+const CONSOLE_SCREEN_FRACTION: f32 = 0.25;
+
+// how far the console reaches down at `height_fraction` (0..1, its slide animation): in pixels from
+// the top for the text layout, and as the NDC y of the background panel's bottom edge (+1 = top) —
+// both from here, so panel and text can't disagree
+fn console_height_px(screen_height: f32, height_fraction: f32) -> f32 {
+    screen_height * CONSOLE_SCREEN_FRACTION * height_fraction
+}
+
+fn console_bottom_ndc(height_fraction: f32) -> f32 {
+    1.0 - 2.0 * CONSOLE_SCREEN_FRACTION * height_fraction
+}
+
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let instance = wgpu::Instance::default();
@@ -925,8 +939,7 @@ impl Renderer {
             return;
         }
 
-        let height = t * 1.0;
-        let bottom_y = 1.0 - height;
+        let bottom_y = console_bottom_ndc(t);
 
         let color = [0.1, 0.1, 0.15];
         let normal = [0.0, 0.0, 1.0];
@@ -2122,7 +2135,7 @@ impl Renderer {
             let mut text_buffers = Vec::new();
             if console.height_fraction > 0.0 {
                 let console_pixel_height =
-                    (self.config.height as f32 / 2.0) * console.height_fraction;
+                    console_height_px(self.config.height as f32, console.height_fraction);
                 let start_y = console_pixel_height - 40.0;
                 let line_height = 20.0;
 
@@ -2698,6 +2711,19 @@ impl Renderer {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn console_covers_a_quarter_of_the_screen() {
+        assert_eq!(console_height_px(800.0, 1.0), 200.0);
+        assert_eq!(console_height_px(800.0, 0.0), 0.0);
+        // the background panel's bottom edge (NDC, +1 = top) sits on the same screen row as the
+        // text layout's bottom (pixels down from the top), at any point of the slide animation
+        for t in [0.3, 0.6, 1.0] {
+            let px = console_height_px(800.0, t);
+            let ndc = console_bottom_ndc(t);
+            assert!(((1.0 - ndc) / 2.0 * 800.0 - px).abs() < 1e-3, "t={t}");
+        }
+    }
 
     // validates WGSL the way wgpu does at pipeline creation, so a shader mistake fails `cargo test`
     // instead of panicking at startup
