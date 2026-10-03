@@ -254,22 +254,6 @@ pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64
     }
 }
 
-// The home planet's sun (it isn't part of the galaxy, so there's no real star): a fixed direction
-// rotated about +Y once per day. Moved here unchanged from Renderer::render, including the hour wrap.
-pub fn home_sun_dir(t: f64, day_length_secs: f32) -> Vec3 {
-    let time = (t % 3600.0) as f32;
-    let spin_angle = (time / day_length_secs) * std::f32::consts::TAU;
-    Quat::from_axis_angle(Vec3::Y, spin_angle) * Vec3::new(0.5, 0.2, 0.4).normalize()
-}
-
-// home planet frame -> sky frame: undoes the same daily turn home_sun_dir applies, so the sun (and
-// with it the starfield backdrop) holds still in the sky's frame while the planet turns under it
-pub fn home_sky_rotation(t: f64, day_length_secs: f32) -> Quat {
-    let time = (t % 3600.0) as f32;
-    let spin_angle = (time / day_length_secs) * std::f32::consts::TAU;
-    Quat::from_axis_angle(Vec3::Y, -spin_angle)
-}
-
 pub const GALAXY_CRUISE_SPEED: f32 = 500.0;
 pub const GALAXY_BOOST_SPEED: f32 = 2000.0;
 const GALAXY_ACCEL: f32 = 800.0; // units/s^2
@@ -670,18 +654,6 @@ mod tests {
         }
     }
 
-    // the home planet's sky must turn with its sun: the sun, taken from the planet frame into the
-    // sky's frame, stays put — so stars keep their place relative to the sun through the day
-    #[test]
-    fn home_sky_rotation_holds_the_sun_still() {
-        let day = 120.0;
-        let base = Vec3::new(0.5, 0.2, 0.4).normalize();
-        for t in [0.0, 17.0, 61.5, 3_600.0 + 17.0] {
-            let sun_in_sky = home_sky_rotation(t, day) * home_sun_dir(t, day);
-            assert!((sun_in_sky - base).length() < 1e-5, "t={t}: {sun_in_sky:?}");
-        }
-    }
-
     fn inner_planet() -> GalaxyPlanet {
         Galaxy::generate(1).planets[0]
     }
@@ -792,32 +764,6 @@ mod tests {
         assert_eq!(data.resolution, 80);
         assert_eq!(data.seed, p.noise_seed);
         assert_eq!(data.planet_type, p.planet_type);
-    }
-
-    #[test]
-    fn home_sun_starts_at_the_original_direction_and_turns_about_y() {
-        let day = 120.0;
-        let start = home_sun_dir(0.0, day);
-        assert!((start - Vec3::new(0.5, 0.2, 0.4).normalize()).length() < 1e-6);
-        let quarter = home_sun_dir(30.0, day);
-        assert!(
-            (quarter.y - start.y).abs() < 1e-6,
-            "elevation must not change"
-        );
-        let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize();
-        assert!(
-            flat(start).dot(flat(quarter)).abs() < 1e-5,
-            "a quarter day turns 90 degrees"
-        );
-    }
-
-    #[test]
-    fn home_sun_repeats_after_the_hour_wrap() {
-        for day in [60.0, 120.0, 240.0] {
-            let a = home_sun_dir(17.3, day);
-            let b = home_sun_dir(3_600.0 + 17.3, day);
-            assert!((a - b).length() < 1e-4, "day {day}: {a:?} vs {b:?}");
-        }
     }
 
     #[test]

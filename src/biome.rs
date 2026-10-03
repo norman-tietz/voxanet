@@ -29,11 +29,6 @@ impl PlanetType {
             .find(|t| normalize(t.def().name) == wanted)
     }
 
-    pub fn next(self) -> PlanetType {
-        let i = Self::ALL.iter().position(|&t| t == self).unwrap();
-        Self::ALL[(i + 1) % Self::ALL.len()]
-    }
-
     pub fn def(self) -> PlanetTypeDef {
         match self {
             PlanetType::EarthLike => PlanetTypeDef {
@@ -171,13 +166,6 @@ mod tests {
         );
         assert_eq!(PlanetType::from_name("ice"), Some(PlanetType::Ice));
         assert_eq!(PlanetType::from_name("lava"), None);
-    }
-
-    #[test]
-    fn next_wraps_through_all_three_types() {
-        assert_eq!(PlanetType::EarthLike.next(), PlanetType::Volcanic);
-        assert_eq!(PlanetType::Volcanic.next(), PlanetType::Ice);
-        assert_eq!(PlanetType::Ice.next(), PlanetType::EarthLike);
     }
 
     #[test]

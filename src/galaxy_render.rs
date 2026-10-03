@@ -130,37 +130,21 @@ impl GalaxyCamera {
             fov_y,
         }
     }
-
-    // the home planet isn't part of the galaxy, so only the starfield is drawn and only the direction
-    // matters; it turns with the home sun (galaxy::home_sky_rotation)
-    pub fn on_home_planet(rotation: Quat, fov_y: f32, t: f64, day_length_secs: f32) -> Self {
-        Self {
-            position: DVec3::ZERO,
-            rotation: crate::galaxy::home_sky_rotation(t, day_length_secs) * rotation,
-            fov_y,
-        }
-    }
 }
 
-// which parts of the galaxy to draw: everything in galaxy mode; behind a galaxy planet's voxel world
-// everything except that planet (the voxel engine draws it); behind the home planet only the stars
+// which parts of the galaxy to draw: everything in galaxy mode; behind a planet's voxel world
+// everything except that planet (the voxel engine draws it)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GalaxyContent {
     Everything,
     AllButPlanet(usize),
-    StarfieldOnly,
 }
 
 impl GalaxyContent {
-    pub fn draws_star(self) -> bool {
-        !matches!(self, Self::StarfieldOnly)
-    }
-
     pub fn draws_planet(self, i: usize) -> bool {
         match self {
             Self::Everything => true,
             Self::AllButPlanet(skip) => i != skip,
-            Self::StarfieldOnly => false,
         }
     }
 }
@@ -549,7 +533,8 @@ impl GalaxyRenderer {
         );
 
         let mut bodies = Vec::with_capacity(1 + galaxy.planets.len());
-        if content.draws_star() {
+        {
+            // the star is always part of the view (only planets can be left out)
             let star_camera_relative = (galaxy.star.position() - camera.position).as_vec3();
             bodies.push(GalaxyBodyUniform {
                 offset: [
@@ -833,13 +818,9 @@ mod tests {
 
     #[test]
     fn content_selects_star_and_planets() {
-        assert!(GalaxyContent::Everything.draws_star());
         assert!(GalaxyContent::Everything.draws_planet(3));
-        assert!(GalaxyContent::AllButPlanet(2).draws_star());
         assert!(GalaxyContent::AllButPlanet(2).draws_planet(1));
         assert!(!GalaxyContent::AllButPlanet(2).draws_planet(2));
-        assert!(!GalaxyContent::StarfieldOnly.draws_star());
-        assert!(!GalaxyContent::StarfieldOnly.draws_planet(0));
     }
 
     // standing on a galaxy planet, the backdrop camera sits where the planet frame puts the eye in

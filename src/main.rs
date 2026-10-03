@@ -36,7 +36,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 // --biome <name> picks the starting planet type (default earth-like); matched case-insensitively
@@ -94,38 +94,6 @@ enum GameMode {
     Galaxy,
 }
 
-// which world the voxel engine's `planet` currently holds — tracked separately from GameMode, since
-// later milestones preload a galaxy planet while still flying in galaxy mode
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum PlanetWorld {
-    Home,
-    Galaxy(usize), // index into Galaxy::planets
-}
-
-// where /galaxy exit puts the player back, and how to rebuild the home planet if it was replaced
-struct HomeReturn {
-    position: glam::Vec3,
-    resolution: u32,
-    planet_type: crate::biome::PlanetType,
-}
-
-// swaps a different planet into the voxel engine and puts the player at `player_pos` on it: the
-// same steps the B key takes (placeable block for the new palette, full mesh reload)
-fn install_planet(
-    renderer: &mut Renderer,
-    controller: &mut Controller,
-    player: &mut Player,
-    planet: &mut PlanetData,
-    new_planet: PlanetData,
-    player_pos: glam::Vec3,
-) {
-    *planet = new_planet;
-    controller.selected_block = crate::material::placeable(&planet.planet_type.def().palette)[0];
-    player.spawn(player_pos);
-    renderer.force_reload_all(planet, player.position);
-    renderer.log_memory(planet);
-}
-
 // galaxy mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
 // third person (Controller::raw_input gates it on first_person && !mouse_released); and the console
 // isn't drawn in galaxy mode, while an open one swallows all keyboard input (WASD included)
@@ -145,6 +113,19 @@ struct BakedPlanet {
     near_indices: Vec<u32>,
 }
 
+// bakes a galaxy planet's voxel world and its near impostor: synchronously at start-up and for
+// /galaxy home, on a background thread on capture (start_bake)
+fn bake_planet(galaxy: &crate::galaxy::Galaxy, index: usize) -> BakedPlanet {
+    let data = galaxy.planets[index].bake();
+    let (near_verts, near_indices) = crate::galaxy_terrain::near_impostor_mesh(&data);
+    BakedPlanet {
+        index,
+        data,
+        near_verts,
+        near_indices,
+    }
+}
+
 fn start_bake(
     galaxy: &crate::galaxy::Galaxy,
     index: usize,
@@ -162,6 +143,35 @@ fn start_bake(
         });
     });
     rx
+}
+
+// makes a baked galaxy planet the voxel engine's world: palette, full mesh reload streaming from
+// `stream_from` (planet frame), near impostor for the galaxy renderer
+fn install_world(
+    renderer: &mut Renderer,
+    controller: &mut Controller,
+    planet: &mut PlanetData,
+    baked: BakedPlanet,
+    stream_from: glam::Vec3,
+) {
+    *planet = baked.data;
+    controller.selected_block = crate::material::placeable(&planet.planet_type.def().palette)[0];
+    renderer.force_reload_all(planet, stream_from);
+    renderer.set_near_impostor(baked.index, &baked.near_verts, &baked.near_indices);
+    renderer.log_memory(planet);
+}
+
+// where a player stands at local noon on galaxy planet `index` (whose voxel world is `planet`):
+// the surface point facing the star, moved to dry land if that is lava
+fn noon_spawn(
+    planet: &PlanetData,
+    galaxy: &crate::galaxy::Galaxy,
+    index: usize,
+    t: f64,
+) -> glam::Vec3 {
+    let noon = galaxy.planets[index].sun_dir_in_planet_frame(galaxy.star.position(), t);
+    let dir = planet.safe_spawn_direction(noon);
+    dir * spawn_radius(planet, dir, 10.0)
 }
 
 // a finished bake is installed unless the player has since gone home, landed (both leave galaxy
@@ -192,19 +202,28 @@ struct Game {
     baking: Option<usize>,     // which planet it is for
     voxel_ready_announced: bool, // "voxel world ready" printed for the loaded galaxy planet
     clock: Instant,            // shared game clock: galaxy orbits and planet day/night
-    loaded_world: PlanetWorld,
-    home_return: Option<HomeReturn>, // set when the player leaves the home planet
+    loaded_world: usize,       // the galaxy planet the voxel engine holds (always one)
+    start_planet: usize,       // where the game starts and /galaxy home returns to
 }
 
 impl Game {
     fn new(window: Arc<Window>, initial_biome: crate::biome::PlanetType) -> Self {
-        let renderer = pollster::block_on(Renderer::new(window));
+        let mut renderer = pollster::block_on(Renderer::new(window));
         let mut controller = Controller::new();
         let mut player = Player::new();
-        let mut planet = PlanetData::new(49); // Keep high resolution
-        planet.switch_planet_type(initial_biome); // no-op if already Earth-like (the default)
-        controller.selected_block =
-            crate::material::placeable(&planet.planet_type.def().palette)[0];
+        let galaxy = crate::galaxy::Galaxy::generate(1);
+        let start_planet = galaxy.start_planet_index(initial_biome);
+        let clock = Instant::now();
+
+        // every planet lives in the galaxy: start on one of them, standing at local noon
+        let mut planet = PlanetData::new(8); // placeholder, replaced right below
+        let baked = bake_planet(&galaxy, start_planet);
+        let spawn = noon_spawn(&baked.data, &galaxy, start_planet, 0.0);
+        install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
+        player.spawn(spawn);
+        player.handover_altitude = Some(crate::landing::handover_altitude(
+            galaxy.planets[start_planet].radius,
+        ));
 
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
@@ -213,16 +232,13 @@ impl Game {
             [1.0, 1.0, 1.0],
         );
         console.log(
-            &format!("Planet type: {}", planet.planet_type.def().name),
+            &format!(
+                "Starting on #{} {}.",
+                start_planet + 1,
+                planet.planet_type.def().name
+            ),
             [1.0, 1.0, 1.0],
         );
-
-        // initialize player spawn: search for dry land along +Y ("North Pole") first, same safety
-        // rule the B key uses, so e.g. --biome volcanic never starts the player inside lava
-        let spawn_dir = planet.safe_spawn_direction(glam::Vec3::Y);
-        let spawn_h = spawn_radius(&planet, spawn_dir, 10.0);
-
-        player.spawn(spawn_dir * spawn_h);
 
         Self {
             renderer,
@@ -233,15 +249,15 @@ impl Game {
             last_time: Instant::now(),
             current_cursor_locked: false,
             mode: GameMode::Planet,
-            galaxy: crate::galaxy::Galaxy::generate(1),
+            galaxy,
             galaxy_flight: crate::galaxy::GalaxyFlight::new(glam::DVec3::new(0.0, 0.0, 120_000.0)),
             flight_frame: FlightFrame::Free,
             bake_rx: None,
             baking: None,
             voxel_ready_announced: false,
-            clock: Instant::now(),
-            loaded_world: PlanetWorld::Home,
-            home_return: None,
+            clock,
+            loaded_world: start_planet,
+            start_planet,
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -264,7 +280,7 @@ impl Game {
             voxel_ready_announced,
             clock,
             loaded_world,
-            home_return,
+            start_planet,
         } = self;
 
         let now = Instant::now();
@@ -302,12 +318,10 @@ impl Game {
                 renderer.update_cursor(planet, controller.cursor_id);
                 renderer.update_view(player.position, planet);
 
-                // high enough above a galaxy planet: hand back to captured galaxy flight
-                if let PlanetWorld::Galaxy(i) = *loaded_world {
-                    let radius = galaxy.planets[i].radius;
-                    if crate::landing::should_lift_off(player.position.length() / radius) {
-                        lift_off_from = Some(i);
-                    }
+                // high enough above the planet: hand back to captured galaxy flight
+                let radius = galaxy.planets[*loaded_world].radius;
+                if crate::landing::should_lift_off(player.position.length() / radius) {
+                    lift_off_from = Some(*loaded_world);
                 }
             }
             GameMode::Galaxy => {
@@ -355,13 +369,13 @@ impl Game {
                         galaxy.planets[i].radius as f64,
                     );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
-                    if *loaded_world != PlanetWorld::Galaxy(i) && *baking != Some(i) {
+                    if *loaded_world != i && *baking != Some(i) {
                         *bake_rx = Some(start_bake(galaxy, i));
                         *baking = Some(i);
                     }
                     // once loaded, the voxel engine streams from the flight's planet-frame position,
                     // so its meshes are ready by the time the landing handover needs them
-                    if *loaded_world == PlanetWorld::Galaxy(i) {
+                    if *loaded_world == i {
                         renderer.update_view(galaxy_flight.position.as_vec3(), planet);
                         if !*voxel_ready_announced && renderer.view_covered() {
                             println!("Voxel world for #{} ready", i + 1);
@@ -420,20 +434,17 @@ impl Game {
             *bake_rx = None;
             *baking = None;
             if bake_still_wanted(*mode, *flight_frame, baked.index) {
-                *planet = baked.data;
-                controller.selected_block =
-                    crate::material::placeable(&planet.planet_type.def().palette)[0];
-                *loaded_world = PlanetWorld::Galaxy(baked.index);
                 // the engine streams in the planet frame; free flight is in galaxy space
                 let local = match *flight_frame {
                     FlightFrame::Captured(_) => galaxy_flight.position,
                     FlightFrame::Free => galaxy.planets[baked.index]
                         .to_planet_frame(galaxy_flight.position, clock.elapsed().as_secs_f64()),
                 };
-                renderer.force_reload_all(planet, local.as_vec3());
-                renderer.set_near_impostor(baked.index, &baked.near_verts, &baked.near_indices);
+                let index = baked.index;
+                install_world(renderer, controller, planet, baked, local.as_vec3());
+                *loaded_world = index;
                 *voxel_ready_announced = false;
-                println!("Baked #{} (res {})", baked.index + 1, planet.resolution);
+                println!("Baked #{} (res {})", index + 1, planet.resolution);
             }
         }
 
@@ -453,19 +464,45 @@ impl Game {
                 console.log(text, [1.0, 1.0, 1.0]);
                 println!("{text}");
             };
-            // remember the way home the first time the player leaves the home planet
-            if *loaded_world == PlanetWorld::Home && *mode == GameMode::Planet {
-                *home_return = Some(HomeReturn {
-                    position: player.position,
-                    resolution: planet.resolution,
-                    planet_type: planet.planet_type,
-                });
-            }
-            match (request, *mode) {
-                (GalaxyRequest::Home, _) | (GalaxyRequest::Add { .. }, _) => {
-                    console.log("/galaxy home|add: not wired up yet", [1.0, 0.5, 0.0]);
+            match request {
+                GalaxyRequest::Home => {
+                    // a running bake was for wherever the player was flying: drop it
+                    *bake_rx = None;
+                    *baking = None;
+                    let i = *start_planet;
+                    let t = clock.elapsed().as_secs_f64();
+                    if *loaded_world != i {
+                        let baked = bake_planet(galaxy, i);
+                        let spawn = noon_spawn(&baked.data, galaxy, i, t);
+                        install_world(renderer, controller, planet, baked, spawn);
+                        *loaded_world = i;
+                    }
+                    player.spawn(noon_spawn(planet, galaxy, i, t));
+                    player.handover_altitude =
+                        Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
+                    controller.fly_mode = false;
+                    *flight_frame = FlightFrame::Free;
+                    *mode = GameMode::Planet;
+                    say(
+                        console,
+                        &format!("Back on #{} {}.", i + 1, planet.planet_type.def().name),
+                    );
                 }
-                (GalaxyRequest::Goto { planet: n, radii }, _) => match galaxy.planets.get(n - 1) {
+                GalaxyRequest::Add {
+                    planet_type,
+                    radius,
+                } => match galaxy.add_planet(planet_type, radius) {
+                    Ok(i) => say(
+                        console,
+                        &format!(
+                            "Added #{n} {} (radius {radius}). /galaxy goto {n} 3 to visit.",
+                            planet_type.def().name,
+                            n = i + 1
+                        ),
+                    ),
+                    Err(message) => console.log(message, [1.0, 0.5, 0.0]),
+                },
+                GalaxyRequest::Goto { planet: n, radii } => match galaxy.planets.get(n - 1) {
                     None => console.log(
                         &format!(
                             "No planet #{n}: this galaxy has 1..={}",
@@ -494,7 +531,6 @@ impl Game {
                         );
                     }
                 },
-                _ => {} // already in the requested mode; no-op
             }
         }
         // dev convenience: polled instead of a console command so screenshots can be scripted without
@@ -705,91 +741,27 @@ impl Game {
                         }
                     }
                 }
-                if let PhysicalKey::Code(KeyCode::KeyB) = event.physical_key {
-                    planet.switch_planet_type(planet.planet_type.next());
-                    controller.selected_block =
-                        crate::material::placeable(&planet.planet_type.def().palette)[0];
-
-                    let current_dir = if player.position.length() > 0.1 {
-                        player.position.normalize()
-                    } else {
-                        glam::Vec3::Y
-                    };
-                    let spawn_dir = planet.safe_spawn_direction(current_dir);
-                    let radius = spawn_radius(planet, spawn_dir, 5.0);
-
-                    player.spawn(spawn_dir * radius);
-
-                    renderer.force_reload_all(planet, player.position);
-                    renderer.log_memory(planet);
-                    println!("Switched to planet type: {}", planet.planet_type.def().name);
-                    renderer.window.request_redraw();
-                }
-                if let Key::Character(ref s) = event.logical_key {
-                    if s == "]" || s == "[" {
-                        if s == "]" {
-                            planet.resize(true);
-                        } else {
-                            planet.resize(false);
-                        }
-
-                        let current_dir = if player.position.length() > 0.1 {
-                            player.position.normalize()
-                        } else {
-                            glam::Vec3::Y
-                        };
-                        // same death-loop guard the B key uses: resizing while standing over
-                        // damaging liquid must not respawn the player back inside it
-                        let spawn_dir = planet.safe_spawn_direction(current_dir);
-                        let radius = spawn_radius(planet, spawn_dir, 5.0);
-
-                        player.position = spawn_dir * radius;
-                        player.velocity = glam::Vec3::ZERO;
-
-                        renderer.force_reload_all(planet, player.position);
-                        renderer.log_memory(planet);
-                        renderer.window.request_redraw();
-                    }
-                }
             }
 
             WindowEvent::RedrawRequested => {
                 let t = self.clock.elapsed().as_secs_f64();
                 match &self.mode {
                     GameMode::Planet => {
-                        let sun = match self.loaded_world {
-                            PlanetWorld::Home => crate::galaxy::home_sun_dir(
-                                t,
-                                planet.planet_type.def().day_length_secs,
-                            ),
-                            PlanetWorld::Galaxy(i) => self.galaxy.planets[i]
-                                .sun_dir_in_planet_frame(self.galaxy.star.position(), t),
-                        };
+                        let i = self.loaded_world;
+                        let sun = self.galaxy.planets[i]
+                            .sun_dir_in_planet_frame(self.galaxy.star.position(), t);
                         // the galaxy behind the voxel world, seen from exactly the planet camera
                         use crate::galaxy_render::{Backdrop, GalaxyCamera, GalaxyContent};
                         let (eye, cam_rot) = controller.camera_pose(player);
                         let fov_y = controller.fov_y();
-                        let (camera, content) = match self.loaded_world {
-                            PlanetWorld::Home => (
-                                GalaxyCamera::on_home_planet(
-                                    cam_rot,
-                                    fov_y,
-                                    t,
-                                    planet.planet_type.def().day_length_secs,
-                                ),
-                                GalaxyContent::StarfieldOnly,
-                            ),
-                            PlanetWorld::Galaxy(i) => (
-                                GalaxyCamera::on_galaxy_planet(
-                                    &self.galaxy.planets[i],
-                                    eye,
-                                    cam_rot,
-                                    fov_y,
-                                    t,
-                                ),
-                                GalaxyContent::AllButPlanet(i),
-                            ),
-                        };
+                        let camera = GalaxyCamera::on_galaxy_planet(
+                            &self.galaxy.planets[i],
+                            eye,
+                            cam_rot,
+                            fov_y,
+                            t,
+                        );
+                        let content = GalaxyContent::AllButPlanet(i);
                         let backdrop = Backdrop {
                             galaxy: &self.galaxy,
                             camera,

@@ -84,7 +84,10 @@ pub struct PlanetData {
     pub has_core: bool,
     pub terrain: crate::noise::PlanetTerrain,
     pub planet_type: PlanetType,
-    pub seed: u32, // noise seed; HOME_SEED for the home planet, GalaxyPlanet::noise_seed otherwise
+    // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
+    // nothing reads it at runtime since resizing is gone, kept as a record (and checked by tests)
+    #[allow(dead_code)]
+    pub seed: u32,
 }
 
 impl PlanetData {
@@ -112,25 +115,6 @@ impl PlanetData {
     pub fn switch_planet_type(&mut self, to: PlanetType) {
         self.planet_type = to;
         self.chunks.clear();
-    }
-
-    pub fn resize(&mut self, increase: bool) {
-        if increase {
-            // multiply by 1.2
-            // i use .max(self.resolution + 1) to ensure it always grows by at least 1 block
-            let new_res = (self.resolution as f32 * 1.2) as u32;
-            self.resolution = new_res.max(self.resolution + 1).min(16384);
-        } else {
-            // divide by 1.2
-            let new_res = (self.resolution as f32 / 1.2) as u32;
-            self.resolution = new_res.max(8);
-        }
-
-        self.chunks.clear();
-
-        // regenerate noise map for new resolution
-        println!("Regenerating Terrain for new res {}...", self.resolution);
-        self.terrain = PlanetTerrain::new(self.resolution, self.seed);
     }
 
     fn get_chunk_key(id: BlockId) -> ChunkKey {
@@ -386,27 +370,6 @@ mod tests {
     #[test]
     fn new_uses_the_home_seed() {
         assert_eq!(PlanetData::new(16).seed, crate::noise::HOME_SEED);
-    }
-
-    // a galaxy planet resized with ]/[ must stay the same planet, not fall back to the home noise
-    #[test]
-    fn resize_keeps_the_planet_seed() {
-        let mut planet = PlanetData::new_seeded(32, 7);
-        planet.resize(true);
-        assert_eq!(planet.seed, 7);
-        let fresh = PlanetData::new_seeded(planet.resolution, 7);
-        let res = planet.resolution;
-        let same = (0..6u8).all(|f| {
-            (0..res).all(|u| {
-                (0..res).all(|v| {
-                    planet.terrain.get_height(f, u, v) == fresh.terrain.get_height(f, u, v)
-                })
-            })
-        });
-        assert!(
-            same,
-            "resized planet's terrain differs from a fresh bake with the same seed"
-        );
     }
 
     fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {

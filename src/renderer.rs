@@ -1795,8 +1795,8 @@ impl Renderer {
 
         self.update_rt_window(player.position, planet);
 
-        // the sun direction comes from the game (galaxy::home_sun_dir on the home planet, the real
-        // star on a galaxy planet); everything downstream (shade(), caustics, cloud_shadow, both
+        // the sun direction comes from the game (the real star,
+        // GalaxyPlanet::sun_dir_in_planet_frame); everything downstream (shade(), caustics, cloud_shadow, both
         // shadow paths) re-reads it fresh every frame. The water animation clock wraps hourly as before.
         let time = (time % 3600.0) as f32;
 
