@@ -745,6 +745,12 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let water_dist = length(to_cam);
     let V = to_cam / water_dist;
     let underwater = length(global.camera_pos.xyz) < global.screen.z;
+    // from above the sea, a grazing view ray can pass under the water without reaching the sea floor
+    // and come back up through the surface further on; that far surface, seen from below, would be
+    // drawn too (no depth write, no culling) and, depending on draw order, cover the near one
+    if (!underwater && dot(up, V) < 0.0) {
+        discard;
+    }
 
     // ripples: tilt the normal by the waves' slope along the surface (the mesh itself stays flat)
     let waves = water_waves(in.world_pos, t, water_dist);
@@ -771,7 +777,14 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     var spec = 0.0;
     if (!glowing) {
-        let refl_dir = reflect(-V, N);
+        var refl_dir = reflect(-V, N);
+        // at grazing angles a ripple can tilt the normal past the view direction, reflecting the ray
+        // into the ground, where the sky and cloud lookups return what lies beyond the planet (space,
+        // its far side's clouds): holes into space. Fold such rays back above the horizon, like the
+        // far side of the wave; seen from below the surface, reflecting downward is right
+        if (!underwater) {
+            refl_dir -= up * (2.0 * min(dot(refl_dir, up), 0.0));
+        }
         let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
         let refl = mix(sky_over_black(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
         color = mix(color, refl * 1.2, fresnel);
@@ -779,6 +792,11 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         color += SUN_COLOR * spec * 3.0;
     }
     alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
+    // nothing behind the surface (the view ray leaves the water again without reaching the sea floor):
+    // there's no sea floor to show through, only the backdrop's stars
+    if (floor_dist <= 0.0) {
+        alpha = 1.0;
+    }
 
     // shore foam: a solid line where the water meets land, plus bands that run in toward the shore,
     // broken up by the waves. `depth` is along the view ray; the vertical depth decides the shore.
