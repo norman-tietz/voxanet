@@ -47,6 +47,55 @@ fn fs_body(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb * ndotl, 1.0);
 }
 
+struct PlanetUniform {
+    offset: vec4<f32>,         // camera-relative position (xyz), unused (w)
+    light_dir: vec4<f32>,      // direction from this planet toward the star (xyz), unused (w)
+    atmosphere_color: vec4<f32>, // rgb: limb-glow tint (the planet type's sky_zenith), w: glow strength
+}
+
+@group(1) @binding(0) var<uniform> planet: PlanetUniform;
+
+struct PlanetVertexOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
+    @location(3) @interpolate(flat) light_dir: vec3<f32>,
+    @location(4) @interpolate(flat) atmosphere_color: vec4<f32>,
+}
+
+@vertex
+fn vs_planet(
+    @location(0) pos: vec3<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) normal: vec3<f32>,
+) -> PlanetVertexOut {
+    let world_pos = planet.offset.xyz + pos;
+    var out: PlanetVertexOut;
+    out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.world_pos = world_pos;
+    out.world_normal = normal;
+    out.color = color;
+    out.light_dir = planet.light_dir.xyz;
+    out.atmosphere_color = planet.atmosphere_color;
+    return out;
+}
+
+@fragment
+fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.world_normal);
+    let ndotl = max(dot(n, in.light_dir), 0.05);
+    var color = in.color * ndotl;
+
+    // the camera sits at the origin in this camera-relative scheme (see Camera.view_proj's
+    // comment), so the direction back to it is simply the negated world position
+    let view_dir = normalize(-in.world_pos);
+    let fresnel = pow(1.0 - max(dot(n, view_dir), 0.0), 3.0);
+    color += in.atmosphere_color.rgb * fresnel * in.atmosphere_color.w;
+
+    return vec4<f32>(color, 1.0);
+}
+
 // deterministic hash for the starfield, independent of shader.wgsl's hash31 (kept standalone)
 fn star_hash(p: vec3<f32>) -> f32 {
     let h = dot(p, vec3<f32>(127.1, 311.7, 74.7));

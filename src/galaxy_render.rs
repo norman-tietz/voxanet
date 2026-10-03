@@ -32,6 +32,24 @@ struct GalaxyBodyUniform {
     light_dir: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct GalaxyPlanetUniform {
+    offset: [f32; 4],
+    light_dir: [f32; 4],
+    atmosphere_color: [f32; 4],
+}
+
+struct PlanetMesh {
+    v_buf: wgpu::Buffer,
+    i_buf: wgpu::Buffer,
+    num_indices: u32,
+}
+
+const MAX_PLANETS: usize = MAX_BODIES - 1; // the star takes one conceptual slot; planets no longer
+                                           // share the body path, but this keeps one shared cap
+const ATMOSPHERE_GLOW_STRENGTH: f32 = 0.6;
+
 pub struct GalaxyRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
@@ -42,6 +60,11 @@ pub struct GalaxyRenderer {
     v_buf: wgpu::Buffer,
     i_buf: wgpu::Buffer,
     num_indices: u32,
+    planet_pipeline: wgpu::RenderPipeline,
+    planet_uniform_buf: wgpu::Buffer,
+    planet_uniform_bind: wgpu::BindGroup,
+    planet_uniform_stride: u64,
+    planet_meshes: std::collections::HashMap<(usize, u32), PlanetMesh>, // (planet index, subdivision)
 }
 
 impl GalaxyRenderer {
@@ -173,6 +196,98 @@ impl GalaxyRenderer {
             cache: None,
         });
 
+        let planet_uniform_stride = {
+            let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
+            let unaligned = std::mem::size_of::<GalaxyPlanetUniform>() as u64;
+            unaligned.div_ceil(min_align) * min_align
+        };
+        let planet_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("galaxy_planet_uniform_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let planet_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Galaxy Planet Uniform"),
+            size: planet_uniform_stride * MAX_PLANETS as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let planet_uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("galaxy_planet_uniform_bind"),
+            layout: &planet_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &planet_uniform_buf,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(
+                        std::mem::size_of::<GalaxyPlanetUniform>() as u64
+                    ),
+                }),
+            }],
+        });
+
+        let planet_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("galaxy_planet_pipeline_layout"),
+            bind_group_layouts: &[Some(&camera_layout), Some(&planet_uniform_layout)],
+            immediate_size: 0,
+        });
+
+        let planet_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Galaxy Planet Pipeline"),
+            layout: Some(&planet_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_planet"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::common::Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 24,
+                            shader_location: 2,
+                        },
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_planet"),
+                compilation_options: Default::default(),
+                targets: &[Some(color_target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil.clone()),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // background: depth test on but no depth write, drawn first so it never occludes bodies
         // and is itself never occluded by the depth clear (compare Always, matches a skybox)
         let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -214,12 +329,17 @@ impl GalaxyRenderer {
             v_buf,
             i_buf,
             num_indices: indices.len() as u32,
+            planet_pipeline,
+            planet_uniform_buf,
+            planet_uniform_bind,
+            planet_uniform_stride,
+            planet_meshes: std::collections::HashMap::new(),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_view: &wgpu::TextureView,
@@ -261,27 +381,38 @@ impl GalaxyRenderer {
             color: [1.6, 1.4, 0.9, 1.0],
             light_dir: [0.0, 1.0, 0.0, 0.0],
         });
-        for p in &galaxy.planets {
-            let body_pos = p.position_at(t);
-            let camera_relative = (body_pos - flight.position).as_vec3();
-            let light_dir = (-body_pos).normalize_or_zero().as_vec3();
-            let color = p.planet_type.def().palette.ground.color();
-            bodies.push(GalaxyBodyUniform {
-                offset: [
-                    camera_relative.x,
-                    camera_relative.y,
-                    camera_relative.z,
-                    p.radius,
-                ],
-                color: [color[0], color[1], color[2], 0.0],
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-            });
-        }
         debug_assert!(
             bodies.len() <= MAX_BODIES,
             "galaxy has more bodies than the storage buffer was sized for"
         );
         queue.write_buffer(&self.body_buf, 0, bytemuck::cast_slice(&bodies));
+
+        let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
+        for (i, p) in galaxy.planets.iter().enumerate() {
+            self.ensure_planet_mesh(device, i, p, ICOSPHERE_SUBDIVISIONS);
+            let body_pos = p.position_at(t);
+            let camera_relative = (body_pos - flight.position).as_vec3();
+            let light_dir = (-body_pos).normalize_or_zero().as_vec3();
+            let atmosphere = p.planet_type.def().atmosphere;
+            planet_uniforms.push(GalaxyPlanetUniform {
+                offset: [camera_relative.x, camera_relative.y, camera_relative.z, 0.0],
+                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                atmosphere_color: [
+                    atmosphere.sky_zenith[0],
+                    atmosphere.sky_zenith[1],
+                    atmosphere.sky_zenith[2],
+                    ATMOSPHERE_GLOW_STRENGTH,
+                ],
+            });
+        }
+        // every slot written before the pass begins — see this task's write-ordering design note
+        for (i, u) in planet_uniforms.iter().enumerate() {
+            queue.write_buffer(
+                &self.planet_uniform_buf,
+                i as u64 * self.planet_uniform_stride,
+                bytemuck::cast_slice(&[*u]),
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
@@ -324,8 +455,54 @@ impl GalaxyRenderer {
             pass.set_vertex_buffer(0, self.v_buf.slice(..));
             pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.num_indices, 0, 0..(bodies.len() as u32));
+
+            pass.set_pipeline(&self.planet_pipeline);
+            pass.set_bind_group(0, &self.camera_bind, &[]);
+            for i in 0..galaxy.planets.len() {
+                if let Some(mesh) = self.planet_meshes.get(&(i, ICOSPHERE_SUBDIVISIONS)) {
+                    pass.set_bind_group(
+                        1,
+                        &self.planet_uniform_bind,
+                        &[(i as u64 * self.planet_uniform_stride) as u32],
+                    );
+                    pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
+                    pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+                }
+            }
         }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    fn ensure_planet_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        index: usize,
+        planet: &crate::galaxy::GalaxyPlanet,
+        subdivision: u32,
+    ) {
+        if self.planet_meshes.contains_key(&(index, subdivision)) {
+            return;
+        }
+        let (verts, indices) = crate::galaxy_terrain::generate_planet_mesh(planet, subdivision);
+        let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Galaxy Planet Vertices"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Galaxy Planet Indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.planet_meshes.insert(
+            (index, subdivision),
+            PlanetMesh {
+                v_buf,
+                i_buf,
+                num_indices: indices.len() as u32,
+            },
+        );
     }
 
     fn ray_dirs(rotation: Quat, fov_y: f32, aspect: f32) -> [[f32; 4]; 3] {
