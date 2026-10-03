@@ -297,8 +297,9 @@ impl GalaxyFlight {
         }
     }
 
-    // `up`: what "up" means for turning left/right and for climbing (Space) / descending (Shift) —
-    // galaxy space's +Y in free flight, the local radial up while captured by a planet
+    // `up`: the local radial up while captured by a planet (turning left/right and climbing with
+    // Space / descending with Shift follow it, like the planet camera), None in free flight, where
+    // space has no up and both follow the camera's own up instead
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -308,12 +309,14 @@ impl GalaxyFlight {
         down: bool,
         mouse_delta: (f32, f32),
         sprint: bool,
-        up: Vec3,
+        up: Option<Vec3>,
     ) {
         let yaw_delta = -mouse_delta.0 * self.mouse_sens;
         if yaw_delta.abs() > 1e-6 {
-            self.rotation = Quat::from_axis_angle(up, yaw_delta) * self.rotation;
+            self.rotation =
+                Quat::from_axis_angle(yaw_axis(self.rotation, up), yaw_delta) * self.rotation;
         }
+        let up = up.unwrap_or(self.rotation * Vec3::Y);
         let pitch_delta = -mouse_delta.1 * self.mouse_sens;
         if pitch_delta.abs() > 1e-6 {
             self.rotation *= Quat::from_axis_angle(Vec3::X, pitch_delta);
@@ -343,6 +346,24 @@ impl GalaxyFlight {
 
         self.position += self.velocity * dt as f64;
     }
+}
+
+// the axis sideways mouse turns the view about. It must agree with the camera's own up, or the turn
+// comes out as a pitch (camera on its side) or mirrored (upside down). Free flight: the camera's up.
+// Captured: the planet's local up, like the planet camera, once roll is about level; while it's
+// still rolled (just captured, level_roll eases it at ROLL_LEVEL_RATE) it blends toward the camera's
+// up, and on the side of the local up the camera's up is on, so a turn is never inverted.
+fn yaw_axis(rotation: Quat, up: Option<Vec3>) -> Vec3 {
+    let camera_up = rotation * Vec3::Y;
+    let Some(up) = up else {
+        return camera_up;
+    };
+    let horizon_up = if camera_up.dot(up) >= 0.0 { up } else { -up };
+    // how far the camera's right axis tips out of the horizontal plane: 0 level, 1 on its side
+    let tilt = (rotation * Vec3::X).dot(up).abs();
+    let t = ((tilt - 0.3) / 0.5).clamp(0.0, 1.0);
+    let rolled = t * t * (3.0 - 2.0 * t); // smoothstep
+    horizon_up.lerp(camera_up, rolled).normalize()
 }
 
 // Pure: blends current velocity toward target, clamped by max acceleration this tick. Factored out
@@ -488,13 +509,76 @@ mod tests {
         let mut flight = GalaxyFlight::new(DVec3::new(600.0, 0.0, 0.0));
         flight.rotation = rot;
         let before = flight.rotation * Vec3::NEG_Z;
-        flight.update(1.0 / 60.0, Vec3::ZERO, false, false, (80.0, 0.0), false, up);
+        flight.update(
+            1.0 / 60.0,
+            Vec3::ZERO,
+            false,
+            false,
+            (80.0, 0.0),
+            false,
+            Some(up),
+        );
         let after = flight.rotation * Vec3::NEG_Z;
         assert!(
             after.dot(up).abs() < 1e-4,
             "view tipped off the horizon: {after:?}"
         );
         assert!(before.dot(after) < 0.999, "view didn't turn");
+    }
+
+    // after mouse-right, how far the view turned toward where the camera's right was, and how far it
+    // tipped toward the camera's up (a pure turn: first > 0, second ~ 0)
+    fn turn_of(flight: &mut GalaxyFlight, up: Option<Vec3>) -> (f32, f32) {
+        let (before, right, cam_up) = (
+            flight.rotation * Vec3::NEG_Z,
+            flight.rotation * Vec3::X,
+            flight.rotation * Vec3::Y,
+        );
+        flight.update(1.0 / 60.0, Vec3::ZERO, false, false, (80.0, 0.0), false, up);
+        let after = flight.rotation * Vec3::NEG_Z;
+        ((after - before).dot(right), (after - before).dot(cam_up))
+    }
+
+    // free flight has no up: whatever the roll after leaving orbit (level, on its side, upside down
+    // relative to galaxy +Y), sideways mouse turns the view sideways — before, it turned about +Y,
+    // which pitched the view or mirrored the turn
+    #[test]
+    fn free_flight_mouse_turns_sideways_at_any_roll() {
+        for roll in [0.0f32, 1.0, 1.5708, 2.5, 3.14159] {
+            let mut flight = GalaxyFlight::new(DVec3::ZERO);
+            flight.rotation = Quat::from_rotation_y(0.4) * Quat::from_rotation_z(roll);
+            let (sideways, tipped) = turn_of(&mut flight, None);
+            assert!(
+                sideways > 0.1,
+                "roll {roll}: turned {sideways} toward the right"
+            );
+            assert!(tipped.abs() < 1e-3, "roll {roll}: view tipped by {tipped}");
+        }
+    }
+
+    // just captured with the camera upside down or on its side relative to the planet's local up
+    // (roll only eases level at ROLL_LEVEL_RATE): mouse-right still turns right, never mirrored
+    #[test]
+    fn captured_yaw_is_never_inverted_while_roll_levels() {
+        let up = Some(Vec3::Y);
+        for roll in [1.5708f32, 2.5, 3.14159, -2.0] {
+            let mut flight = GalaxyFlight::new(DVec3::new(0.0, 600.0, 0.0));
+            flight.rotation = Quat::from_rotation_z(roll);
+            let (sideways, _) = turn_of(&mut flight, up);
+            assert!(
+                sideways > 0.1,
+                "roll {roll}: turned {sideways} toward the right"
+            );
+        }
+    }
+
+    // free flight: Space/Shift climb and descend along the camera's own up
+    #[test]
+    fn free_flight_climbs_along_the_camera_up() {
+        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+        flight.rotation = Quat::from_rotation_z(3.14159); // upside down relative to galaxy +Y
+        flight.update(1.0, Vec3::ZERO, true, false, (0.0, 0.0), false, None);
+        assert!(flight.velocity.y < -1.0, "{:?}", flight.velocity);
     }
 
     #[test]
@@ -989,7 +1073,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
-                Vec3::Y,
+                None,
             );
         }
         // forward is -Z at identity rotation (matches Player's convention); after 2s should have

@@ -331,12 +331,8 @@ impl Game {
                 // turning and climbing follow galaxy space's +Y in free flight, the local radial up
                 // while captured (the planet's spin axis would pitch the view at its equator)
                 let up = match *flight_frame {
-                    FlightFrame::Free => glam::Vec3::Y,
-                    FlightFrame::Captured(_) => galaxy_flight
-                        .position
-                        .as_vec3()
-                        .try_normalize()
-                        .unwrap_or(glam::Vec3::Y),
+                    FlightFrame::Free => None,
+                    FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
                 };
                 galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, up);
                 let t = clock.elapsed().as_secs_f64();

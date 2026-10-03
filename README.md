@@ -74,7 +74,7 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 |-------|--------|
 | Mouse | Look / steer |
 | `W` `A` `S` `D` | Fly forward/left/back/right |
-| `Space` / `Left Shift` (hold) | Climb / descend (relative to the planet you are orbiting) |
+| `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
 
 Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
