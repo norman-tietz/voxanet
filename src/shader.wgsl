@@ -544,12 +544,44 @@ fn clouds(origin: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4<f
 
 // atmosphere seen beyond the clouds: a stylised gradient from deep space into a blue dome that warms
 // toward the sun, plus a glow where the view ray grazes the planet's limb (seen from orbit/third person)
-fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+// sun elevation (sine) at which the sky is fully transparent / fully opaque; the band between is twilight
+const SKY_NIGHT_ELEVATION: f32 = -0.25;
+const SKY_DAY_ELEVATION: f32 = 0.15;
+// atmosphere_limb values between which the sky goes from fully transparent (space) to fully opaque.
+// limb is ~0.7-0.9 for a camera standing on terrain (0.1-0.2 planet radii up), so it can't be used
+// as the opacity directly — stars would show through the daytime sky. 0.6 ~ 0.3 radii up, 0.15 ~ 1.1.
+const SKY_SPACE_LIMB: f32 = 0.15;
+const SKY_OPAQUE_LIMB: f32 = 0.6;
+
+// how much atmosphere the ray crosses: 1 when it skims the ground, falling to 0 out in space
+fn atmosphere_limb(ray_dir: vec3<f32>, cam_pos: vec3<f32>) -> f32 {
     let planet_r = global.camera_pos.w;
     let atmo_r = planet_r * CLOUD_ALT * 1.2;
     let s_star = max(-dot(cam_pos, ray_dir), 0.0);
     let closest = length(cam_pos + ray_dir * s_star);
-    let limb = clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
+    return clamp(exp(-max(closest - planet_r, 0.0) / max(atmo_r - planet_r, 1.0)), 0.0, 1.0);
+}
+
+// how opaque the sky is along the ray, for blending it over the galaxy backdrop (Renderer::render):
+// thick, sunlit atmosphere = 1; open space and the night side = 0. Daylight is the sun's elevation at
+// the ray's closest point to the planet (for a camera on the ground looking up: the camera itself).
+fn sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> f32 {
+    let s_star = max(-dot(cam_pos, ray_dir), 0.0);
+    let closest_point = cam_pos + ray_dir * s_star;
+    let up = closest_point / max(length(closest_point), 1e-4);
+    let day = smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L));
+    let thick = smoothstep(SKY_SPACE_LIMB, SKY_OPAQUE_LIMB, atmosphere_limb(ray_dir, cam_pos));
+    return thick * day;
+}
+
+// the sky as it looks over a black background — for fog and water reflections, which can't see the
+// backdrop: at night and in space they fade toward dark like the sky itself, not toward blue
+fn sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+    return sky_gradient(ray_dir, cam_pos, L) * sky_opacity(ray_dir, cam_pos, L);
+}
+
+fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+    let limb = atmosphere_limb(ray_dir, cam_pos);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
     let dome = mix(biome.sky_zenith.rgb * 0.7, biome.sky_horizon.rgb, sun_glow);
 
@@ -633,7 +665,7 @@ fn fog(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     // between distant terrain and open sky
     let L = normalize(global.sun_dir.xyz);
     let ray_dir = normalize(world_pos - global.camera_pos.xyz);
-    let fog_col = sky_gradient(ray_dir, global.camera_pos.xyz, L);
+    let fog_col = sky_over_black(ray_dir, global.camera_pos.xyz, L);
     final_color = mix(final_color, fog_col, clamp(fog_factor, 0.0, 1.0));
 
     return final_color;
@@ -708,15 +740,20 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 // shades one pixel (G-buffer sample, sky/cloud compositing), without post-processing — factored
 // out of fs_light so radial motion blur can average several taps before the one final
-// post_process() call (tonemapping several already-tonemapped samples would double-compress them)
-fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec3<f32> {
+// post_process() call (tonemapping several already-tonemapped samples would double-compress them).
+// Returns premultiplied colour and coverage: terrain is opaque, the sky only as opaque as
+// sky_opacity, so the galaxy backdrop shows through where the atmosphere is thin or dark.
+fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<f32> {
     let dist = textureLoad(d_dist, px, 0).r;
     let uv = (vec2<f32>(px) + 0.5) / global.screen.xy;
     let ray_dir = normalize(global.ray_dirs[0].xyz + uv.x * global.ray_dirs[1].xyz + uv.y * global.ray_dirs[2].xyz);
 
     var color: vec3<f32>;
+    var alpha = 1.0;
     if (dist <= 0.0) {
-        color = sky_gradient(ray_dir, cam_pos, L); // sky: no geometry behind the cloud shell
+        // sky: no geometry behind the cloud shell
+        alpha = sky_opacity(ray_dir, cam_pos, L);
+        color = sky_gradient(ray_dir, cam_pos, L) * alpha;
     } else {
         let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
         let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
@@ -724,14 +761,16 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec3<
     }
 
     // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky
-    // pixels; also from orbit, looking down at the cloud layer over the ground)
+    // pixels; also from orbit, looking down at the cloud layer over the ground); "over" in
+    // premultiplied form, which for opaque terrain is the same mix as before
     let cloud_r = global.camera_pos.w * CLOUD_ALT;
     let cloud_t = sphere_hit(cam_pos, ray_dir, cloud_r);
     if (cloud_t > 0.0 && (dist <= 0.0 || cloud_t < dist)) {
         let cl = cloud_shade(cam_pos + ray_dir * cloud_t, ray_dir, t, L);
-        color = mix(color, cl.rgb, cl.a);
+        color = cl.rgb * cl.a + color * (1.0 - cl.a);
+        alpha = cl.a + alpha * (1.0 - cl.a);
     }
-    return color;
+    return vec4<f32>(color, alpha);
 }
 
 @fragment
@@ -766,7 +805,10 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         color = sum / count;
     }
 
-    return vec4<f32>(post_process(color), 1.0);
+    // un-premultiply for tone mapping; the lighting pass alpha-blends the result over the backdrop
+    let alpha = color.a;
+    let rgb = color.rgb / max(alpha, 1e-4);
+    return vec4<f32>(post_process(rgb), alpha);
 }
 
 // full-screen white flash drawn over everything (text included) right after F2/`/screenshot` captures a
@@ -879,7 +921,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     if (!glowing) {
         let refl_dir = reflect(-V, N);
         let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
-        let refl = mix(sky_gradient(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
+        let refl = mix(sky_over_black(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
         color = mix(color, refl * 1.2, fresnel);
         spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
         color += SUN_COLOR * spec * 3.0;
@@ -935,4 +977,4 @@ fn cs_gbuf_down(@builtin(global_invocation_id) id: vec3<u32>) {
     let world_pos = world_from_pixel(vec2<f32>(src) + 0.5, dist);
     textureStore(down_pos, vec2<i32>(id.xy), vec4<f32>(world_pos, dist));
     textureStore(down_nrm, vec2<i32>(id.xy), vec4<f32>(textureLoad(d_normal, src, 0).xyz * 2.0 - 1.0, 0.0));
-}
+}
