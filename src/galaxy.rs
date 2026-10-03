@@ -18,6 +18,8 @@ pub struct GalaxyPlanet {
     pub orbit_phase: f64, // starting angle, radians
     pub radius: f32,
     pub planet_type: PlanetType,
+    pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/galaxy_terrain.rs);
+                         // independent of planet_radius_for's hash so radius and terrain shape don't correlate
 }
 
 pub struct Galaxy {
@@ -44,6 +46,7 @@ impl Galaxy {
                     orbit_phase: std::f64::consts::TAU * (i as f64) / (PLANET_COUNT as f64),
                     radius: planet_radius_for(seed, i),
                     planet_type: PlanetType::ALL[i % PlanetType::ALL.len()],
+                    noise_seed: noise_seed_for(seed, i),
                 }
             })
             .collect();
@@ -72,6 +75,18 @@ fn planet_radius_for(seed: u64, index: usize) -> f32 {
     h ^= h >> 33;
     let t = (h >> 11) as f64 / (1u64 << 53) as f64; // 0..1, using the top 53 bits
     MIN_PLANET_RADIUS + (t as f32) * (MAX_PLANET_RADIUS - MIN_PLANET_RADIUS)
+}
+
+// deterministic pseudo-random seed per (galaxy seed, index), independent of planet_radius_for's
+// hash (different multiplier constant) so a planet's size and its terrain shape don't correlate
+fn noise_seed_for(seed: u64, index: usize) -> u32 {
+    let mut h = seed
+        .wrapping_mul(0xD6E8_FEB8_6659_FD93)
+        .wrapping_add(index as u64);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    (h & 0xFFFF_FFFF) as u32
 }
 
 impl GalaxyPlanet {
@@ -207,6 +222,7 @@ mod tests {
             assert_eq!(pa.orbit_phase, pb.orbit_phase);
             assert_eq!(pa.radius, pb.radius);
             assert_eq!(pa.planet_type, pb.planet_type);
+            assert_eq!(pa.noise_seed, pb.noise_seed);
         }
     }
 
@@ -349,5 +365,39 @@ mod tests {
         );
         assert!((flight.position.x).abs() < 1e-6);
         assert!((flight.position.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn noise_seeds_are_distinct_across_all_planets() {
+        let g = Galaxy::generate(1);
+        let mut seeds: Vec<u32> = g.planets.iter().map(|p| p.noise_seed).collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(
+            seeds.len(),
+            g.planets.len(),
+            "duplicate noise seeds would give identical terrain on different planets"
+        );
+    }
+
+    #[test]
+    fn noise_seed_is_deterministic_for_a_fixed_seed() {
+        let a = Galaxy::generate(42);
+        let b = Galaxy::generate(42);
+        for (pa, pb) in a.planets.iter().zip(b.planets.iter()) {
+            assert_eq!(pa.noise_seed, pb.noise_seed);
+        }
+    }
+
+    #[test]
+    fn noise_seed_differs_from_planet_radius_hash() {
+        // sanity check that the two per-planet hashes aren't accidentally the same function
+        // reused (which would correlate radius and terrain shape in a confusing way)
+        let g = Galaxy::generate(1);
+        let p = &g.planets[0];
+        assert_ne!(
+            p.noise_seed as f32, p.radius,
+            "noise_seed and radius should come from independent hashes"
+        );
     }
 }
