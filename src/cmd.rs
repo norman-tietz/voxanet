@@ -5,9 +5,10 @@ pub enum GalaxyRequest {
     Enter,
     Exit,
     Land(usize), // TEMPORARY (removed with the seamless handover): 1-based planet number, as in the HUD
+    Goto { planet: usize, radii: f32 }, // 1-based planet number; distance from its centre in its radii
 }
 
-const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|land <planet number>";
+const GALAXY_USAGE: &str = "Usage: /galaxy enter|exit|land <n>|goto <n> <radii>";
 
 // parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
 // knows how many planets the galaxy has
@@ -19,6 +20,17 @@ fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
             Ok(n) if n >= 1 => Ok(GalaxyRequest::Land(n)),
             _ => Err("Planet number must be 1 or more, e.g. /galaxy land 3"),
         },
+        ["goto", n, radii] => {
+            let planet = n.parse::<usize>().ok().filter(|&n| n >= 1);
+            let radii = radii
+                .parse::<f32>()
+                .ok()
+                .filter(|r| r.is_finite() && *r > 1.0);
+            match (planet, radii) {
+                (Some(planet), Some(radii)) => Ok(GalaxyRequest::Goto { planet, radii }),
+                _ => Err("Usage: /galaxy goto <planet number> <distance in radii, more than 1>"),
+            }
+        }
         _ => Err(GALAXY_USAGE),
     }
 }
@@ -176,7 +188,10 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-                self.log("  /galaxy enter|exit|land <n>", [0.8, 0.8, 0.8]);
+                self.log(
+                    "  /galaxy enter|exit|land <n>|goto <n> <radii>",
+                    [0.8, 0.8, 0.8],
+                );
             }
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
@@ -234,6 +249,29 @@ impl Console {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_goto() {
+        assert_eq!(
+            parse_galaxy_command(&["goto", "2", "3.5"]),
+            Ok(GalaxyRequest::Goto {
+                planet: 2,
+                radii: 3.5
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_bad_goto_arguments() {
+        assert!(parse_galaxy_command(&["goto"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "2"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "0", "3"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "x", "3"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "2", "1"]).is_err()); // inside / on the surface
+        assert!(parse_galaxy_command(&["goto", "2", "0.5"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "2", "nan"]).is_err());
+        assert!(parse_galaxy_command(&["goto", "2", "inf"]).is_err());
+    }
 
     #[test]
     fn parses_enter_exit_and_land() {
