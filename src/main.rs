@@ -676,6 +676,37 @@ impl Game {
                 if event.state == ElementState::Pressed
                     && matches!(self.mode, GameMode::Planet) =>
             {
+                // F: land while flying (refused over lava), take off while walking or swimming
+                if let PhysicalKey::Code(KeyCode::KeyF) = event.physical_key {
+                    if controller.first_person {
+                        let over_lava =
+                            crate::landing::over_damaging_liquid(planet, player.position);
+                        match crate::landing::f_action(
+                            controller.fly_mode,
+                            player.landing,
+                            over_lava,
+                        ) {
+                            crate::landing::FAction::StartLanding => {
+                                player.landing = true;
+                                console.log("Landing...", [1.0, 1.0, 1.0]);
+                            }
+                            crate::landing::FAction::CancelLanding => {
+                                player.landing = false;
+                                console.log("Landing cancelled.", [1.0, 1.0, 1.0]);
+                            }
+                            crate::landing::FAction::RefuseLanding => {
+                                console.log("Can't land here: lava below.", [1.0, 0.5, 0.0]);
+                            }
+                            crate::landing::FAction::TakeOff => {
+                                controller.fly_mode = true;
+                                player.landing = false;
+                                let up = player.position.normalize_or_zero();
+                                player.position += up * crate::landing::TAKEOFF_LIFT;
+                                player.velocity = glam::Vec3::ZERO;
+                            }
+                        }
+                    }
+                }
                 if let PhysicalKey::Code(KeyCode::KeyB) = event.physical_key {
                     planet.switch_planet_type(planet.planet_type.next());
                     controller.selected_block =

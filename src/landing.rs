@@ -64,9 +64,174 @@ pub fn flight_pose_from_player(position: Vec3, rotation: Quat, cam_pitch: f32) -
     )
 }
 
+// altitude above sea level at which the landing/liftoff handover happens (LAND_HANDOVER_RADII from
+// the centre is this many radii above the surface)
+pub fn handover_altitude(planet_radius: f32) -> f32 {
+    (LAND_HANDOVER_RADII as f32 - 1.0) * planet_radius
+}
+
+// fly speed on a planet: today's (move_speed, or ×10 with boost) near the ground, growing with
+// altitude to exactly galaxy flight's cruise/boost speed at the handover altitude, so speed doesn't
+// jump at the handover. `handover_altitude` is None on the home planet (no handover, no scaling).
+pub fn fly_speed(base: f32, sprint: bool, altitude: f32, handover_altitude: Option<f32>) -> f32 {
+    let (near_ground, at_handover) = if sprint {
+        (base * 10.0, crate::galaxy::GALAXY_BOOST_SPEED)
+    } else {
+        (base, crate::galaxy::GALAXY_CRUISE_SPEED)
+    };
+    match handover_altitude {
+        None => near_ground,
+        Some(h) => near_ground.max(at_handover * (altitude / h).max(0.0)),
+    }
+}
+
+// F-landing descent speed: proportional to altitude (fast high up, easing in near the ground),
+// never below LAND_MIN_DESCENT so it still finishes
+const LAND_DESCENT_RATE: f32 = 0.8; // 1/s: altitude roughly halves every ~0.9 s
+const LAND_MIN_DESCENT: f32 = 3.0; // world units/s
+
+pub fn landing_descent_speed(altitude: f32) -> f32 {
+    (altitude * LAND_DESCENT_RATE).max(LAND_MIN_DESCENT)
+}
+
+// the fly terrain floor (FLY_HOVER_CLEARANCE above the ground, entity.rs) counts as touched down
+// within this margin; so do feet in water (the player then swims)
+const TOUCHDOWN_MARGIN: f32 = 0.5;
+
+pub fn touched_down(radius: f32, floor: f32, feet_in_water: bool) -> bool {
+    feet_in_water || radius - floor < TOUCHDOWN_MARGIN
+}
+
+// how far take-off lifts the player off the ground (fly mode velocity follows input every tick, so
+// the "small upward push" is a position nudge, not a velocity impulse)
+pub const TAKEOFF_LIFT: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FAction {
+    StartLanding,
+    CancelLanding,
+    RefuseLanding,
+    TakeOff,
+}
+
+// F: flying -> land (or cancel a landing in progress; refused over damaging liquid);
+// walking/swimming -> take off
+pub fn f_action(flying: bool, landing: bool, over_damaging_liquid: bool) -> FAction {
+    match (flying, landing) {
+        (true, true) => FAction::CancelLanding,
+        (true, false) if over_damaging_liquid => FAction::RefuseLanding,
+        (true, false) => FAction::StartLanding,
+        (false, _) => FAction::TakeOff,
+    }
+}
+
+// whether the column straight below `position` is under a damaging liquid (lava): landing there
+// would kill the player
+pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) -> bool {
+    let damaging = planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
+    if !damaging {
+        return false;
+    }
+    let res = planet.resolution;
+    let probe = position.normalize_or_zero() * (res as f32 / 2.0);
+    crate::gen::CoordSystem::pos_to_id(probe, res).is_some_and(|id| {
+        planet.terrain.get_height(id.face, id.u, id.v) < planet.terrain.sea_level()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fly_speed_matches_galaxy_cruise_at_the_handover_altitude() {
+        let h = handover_altitude(168.5);
+        assert!((h - 337.0).abs() < 1e-3, "2 radii above sea level: {h}");
+        assert!(
+            (fly_speed(5.0, false, h, Some(h)) - crate::galaxy::GALAXY_CRUISE_SPEED).abs() < 1e-3
+        );
+        assert!(
+            (fly_speed(5.0, true, h, Some(h)) - crate::galaxy::GALAXY_BOOST_SPEED).abs() < 1e-3
+        );
+        // near the ground: today's speeds
+        assert_eq!(fly_speed(5.0, false, 1.0, Some(h)), 5.0);
+        assert_eq!(fly_speed(5.0, true, 1.0, Some(h)), 50.0);
+        // grows with altitude
+        assert!(fly_speed(5.0, false, 200.0, Some(h)) > fly_speed(5.0, false, 100.0, Some(h)));
+    }
+
+    #[test]
+    fn home_planet_fly_speed_is_unchanged() {
+        assert_eq!(fly_speed(5.0, false, 300.0, None), 5.0);
+        assert_eq!(fly_speed(5.0, true, 300.0, None), 50.0);
+    }
+
+    #[test]
+    fn landing_descends_fast_when_high_and_slow_near_the_ground() {
+        assert!(landing_descent_speed(300.0) > 100.0);
+        assert!(landing_descent_speed(300.0) > landing_descent_speed(30.0));
+        assert_eq!(
+            landing_descent_speed(0.5),
+            landing_descent_speed(0.0),
+            "minimum near ground"
+        );
+        assert!(landing_descent_speed(0.0) > 0.0);
+    }
+
+    #[test]
+    fn touchdown_at_the_fly_floor_or_in_water() {
+        assert!(touched_down(103.3, 103.0, false));
+        assert!(!touched_down(110.0, 103.0, false));
+        assert!(touched_down(110.0, 103.0, true));
+    }
+
+    #[test]
+    fn f_lands_cancels_refuses_or_takes_off() {
+        assert_eq!(f_action(true, false, false), FAction::StartLanding);
+        assert_eq!(f_action(true, true, false), FAction::CancelLanding);
+        assert_eq!(
+            f_action(true, true, true),
+            FAction::CancelLanding,
+            "cancel is always allowed"
+        );
+        assert_eq!(f_action(true, false, true), FAction::RefuseLanding);
+        assert_eq!(f_action(false, false, false), FAction::TakeOff);
+        assert_eq!(f_action(false, false, true), FAction::TakeOff);
+    }
+
+    // landing straight down into lava would kill the player; into water is fine (they swim)
+    #[test]
+    fn only_damaging_liquid_below_refuses_a_landing() {
+        use crate::biome::PlanetType;
+        let res = 32;
+        let find = |planet: &crate::common::PlanetData, want_sea: bool| {
+            let sea = planet.terrain.sea_level();
+            (0..6u8)
+                .flat_map(|f| (0..res).flat_map(move |u| (0..res).map(move |v| (f, u, v))))
+                .find(|&(f, u, v)| (planet.terrain.get_height(f, u, v) < sea) == want_sea)
+                // a column's centre (get_direction gives its corner, which can resolve to a neighbour)
+                .map(|(f, u, v)| {
+                    crate::gen::CoordSystem::get_block_center(f, u, v, res / 2, res).normalize()
+                        * 40.0
+                })
+                .unwrap()
+        };
+        let mut volcanic = crate::common::PlanetData::new(res);
+        volcanic.switch_planet_type(PlanetType::Volcanic);
+        assert!(
+            over_damaging_liquid(&volcanic, find(&volcanic, true)),
+            "over lava"
+        );
+        assert!(
+            !over_damaging_liquid(&volcanic, find(&volcanic, false)),
+            "over dry land"
+        );
+        let earth = crate::common::PlanetData::new(res);
+        assert!(
+            !over_damaging_liquid(&earth, find(&earth, true)),
+            "over water"
+        );
+    }
 
     fn view_dir(rotation: Quat, cam_pitch: f32) -> Vec3 {
         (rotation * Quat::from_axis_angle(Vec3::X, cam_pitch)) * Vec3::NEG_Z

@@ -227,8 +227,8 @@ pub fn home_sky_rotation(t: f64, day_length_secs: f32) -> Quat {
     Quat::from_axis_angle(Vec3::Y, -spin_angle)
 }
 
-const GALAXY_CRUISE_SPEED: f32 = 500.0;
-const GALAXY_BOOST_SPEED: f32 = 2000.0;
+pub const GALAXY_CRUISE_SPEED: f32 = 500.0;
+pub const GALAXY_BOOST_SPEED: f32 = 2000.0;
 const GALAXY_ACCEL: f32 = 800.0; // units/s^2
 
 pub struct GalaxyFlight {

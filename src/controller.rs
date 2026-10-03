@@ -96,7 +96,7 @@ impl Controller {
             turn -= TURN_SPEED * dt;
         } // E
 
-        player.update(
+        let touched_down = player.update(
             dt,
             planet,
             input,
@@ -107,6 +107,9 @@ impl Controller {
             self.fly_mode,
             sprint,
         );
+        if touched_down {
+            self.fly_mode = false; // walking (or swimming) from here
+        }
     }
 
     pub fn get_camera_pos(&self, player: &Player) -> Vec3 {
@@ -231,13 +234,6 @@ impl Controller {
                         return true;
                     }
 
-                    PhysicalKey::Code(KeyCode::KeyF) if pressed => {
-                        if self.first_person {
-                            self.fly_mode = !self.fly_mode;
-                            println!("Fly Mode: {}", self.fly_mode);
-                        }
-                        return true;
-                    }
                     _ => {}
                 }
             }

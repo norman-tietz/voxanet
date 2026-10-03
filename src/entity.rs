@@ -108,6 +108,8 @@ pub struct Player {
     pub health: f32,
     pub max_health: f32,
     pub spawn_point: Vec3,
+    pub landing: bool, // F pressed while flying: auto-descending until touchdown (landing.rs)
+    pub handover_altitude: Option<f32>, // on a galaxy planet: fly speed scales up to this altitude
 
     // Configuration
     pub move_speed: f32,
@@ -127,6 +129,8 @@ impl Player {
             health: MAX_HEALTH,
             max_health: MAX_HEALTH,
             spawn_point: Vec3::new(0.0, 200.0, 0.0),
+            landing: false,
+            handover_altitude: None,
             move_speed: 5.0,
             jump_force: 8.0,
             mouse_sens: 0.002,
@@ -139,11 +143,13 @@ impl Player {
         self.grounded = false;
         self.health = self.max_health;
         self.spawn_point = pos;
+        self.landing = false;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
 
     // turn: keyboard yaw in radians for this step, positive turns left
+    // returns true when an F-landing touched down this tick (the caller turns fly mode off)
     pub fn update(
         &mut self,
         dt: f32,
@@ -155,7 +161,7 @@ impl Player {
         turn: f32,
         flying: bool,
         sprint: bool,
-    ) {
+    ) -> bool {
         let up = Physics::get_up_vector(self.position);
 
         // --- ROTATION (YAW) ---
@@ -189,21 +195,20 @@ impl Player {
             self.spawn(spawn_point);
             // position/rotation/velocity were just reset: `up` and `depth` above were computed at
             // the pre-respawn location and must not drive this tick's swim/movement logic
-            return;
+            return false;
         }
 
         if !flying && depth > SWIM_DEPTH {
             self.swim(dt, planet, input, jump, down, depth, up);
             self.rotation = Physics::align_to_planet(self.rotation, up);
-            return;
+            return false;
         }
 
-        let effective_speed = if sprint {
-            if flying {
-                self.move_speed * 10.0
-            } else {
-                self.move_speed * 2.0
-            }
+        let effective_speed = if flying {
+            let altitude = self.position.length() - planet.resolution as f32 / 2.0;
+            crate::landing::fly_speed(self.move_speed, sprint, altitude, self.handover_altitude)
+        } else if sprint {
+            self.move_speed * 2.0
         } else {
             self.move_speed
         };
@@ -231,6 +236,13 @@ impl Player {
             } else {
                 Vec3::ZERO
             };
+            // F-landing: straight down along local down, fast high up and slowing near the ground;
+            // WASD still steers sideways (spec §4)
+            if self.landing {
+                let altitude = self.position.length() - planet.resolution as f32 / 2.0;
+                let horizontal = self.velocity - up * self.velocity.dot(up);
+                self.velocity = horizontal - up * crate::landing::landing_descent_speed(altitude);
+            }
 
             // terrain floor, clamped before solving movement so a fast descent (sprinting down,
             // or diving via pitch) can't tunnel through the floor within a single tick — unlike the
@@ -322,10 +334,22 @@ impl Player {
                     self.velocity -= up * vert;
                 }
             }
+            if self.landing
+                && crate::landing::touched_down(
+                    self.position.length(),
+                    floor,
+                    planet.water_depth(self.position).is_some_and(|d| d > 0.0),
+                )
+            {
+                self.landing = false;
+                self.rotation = Physics::align_to_planet(self.rotation, up);
+                return true;
+            }
         }
 
         // --- ALIGN TO SURFACE ---
         self.rotation = Physics::align_to_planet(self.rotation, up);
+        false
     }
 
     fn swim(
