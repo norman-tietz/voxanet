@@ -198,9 +198,17 @@ pub struct Renderer {
     flash_pipeline: wgpu::RenderPipeline,
     flash_buf: wgpu::Buffer,
     flash_bind: wgpu::BindGroup,
+    heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
+    heat_bind: wgpu::BindGroup,
     status: Option<(String, std::time::Instant)>, // timed HUD status line, see show_status
     screenshot_flash: Option<std::time::Instant>, // set right after a capture, so the flash itself is never in the PNG
 }
+
+// the star heat glow (galaxy mode): opacity at full heat (the view still shows through) and colour
+const HEAT_GLOW_OPACITY: f32 = 0.85;
+const HEAT_GLOW_COLOR: [f32; 3] = [1.0, 0.62, 0.28];
+// the HUD warns from this heat on
+const HEAT_WARNING: f32 = 0.35;
 
 // timed HUD status line (Renderer::show_status): fully visible, then fading out over the last
 // STATUS_FADE_SECONDS
@@ -511,6 +519,20 @@ impl Renderer {
             label: None,
         });
 
+        let heat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Heat Glow Uniform"),
+            contents: bytemuck::cast_slice(&[default_local]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let heat_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: heat_buf.as_entire_binding(),
+            }],
+            label: None,
+        });
+
         // --- PIPELINES ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
@@ -777,6 +799,8 @@ impl Renderer {
             flash_pipeline,
             flash_buf,
             flash_bind,
+            heat_buf,
+            heat_bind,
             screenshot_flash: None,
             status: None,
             deferred,
@@ -1720,7 +1744,27 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[LocalUniform {
                 model: glam::Mat4::IDENTITY.to_cols_array(),
-                params: [alpha, 0.0, 0.0, 0.0],
+                params: [alpha, 1.0, 1.0, 1.0],
+            }]),
+        );
+        alpha
+    }
+
+    // the star's heat glow in galaxy mode (galaxy::star_heat): a warm full-screen tint over the view,
+    // drawn under the HUD text; uploads this frame's opacity and returns it
+    fn update_heat_glow(&mut self, heat: f32) -> f32 {
+        let alpha = HEAT_GLOW_OPACITY * heat;
+        self.queue.write_buffer(
+            &self.heat_buf,
+            0,
+            bytemuck::cast_slice(&[LocalUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array(),
+                params: [
+                    alpha,
+                    HEAT_GLOW_COLOR[0],
+                    HEAT_GLOW_COLOR[1],
+                    HEAT_GLOW_COLOR[2],
+                ],
             }]),
         );
         alpha
@@ -1729,9 +1773,13 @@ impl Renderer {
     // full-screen triangle over whatever the pass already holds; the pass must target the swapchain
     // format (flash_pipeline's only colour target) and needs no other bind groups
     fn draw_flash(&self, pass: &mut wgpu::RenderPass, alpha: f32) {
+        self.draw_full_screen(pass, &self.flash_bind, alpha);
+    }
+
+    fn draw_full_screen(&self, pass: &mut wgpu::RenderPass, bind: &wgpu::BindGroup, alpha: f32) {
         if alpha > 0.001 {
             pass.set_pipeline(&self.flash_pipeline);
-            pass.set_bind_group(1, &self.flash_bind, &[]);
+            pass.set_bind_group(1, bind, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -2496,7 +2544,11 @@ impl Renderer {
             screen,
         );
         self.update_fps();
-        self.render_galaxy_overlay(&view, camera, galaxy, t);
+        let heat = crate::galaxy::star_heat(
+            camera.position.distance(galaxy.star.position()),
+            galaxy.star.radius,
+        );
+        self.render_galaxy_overlay(&view, camera, galaxy, t, heat);
         if let Some(path) = self.screenshot_request.take() {
             crate::screenshot::capture(
                 &self.device,
@@ -2521,6 +2573,7 @@ impl Renderer {
         camera: &crate::galaxy_render::GalaxyCamera,
         galaxy: &crate::galaxy::Galaxy,
         t: f64,
+        heat: f32, // the star's heat at the camera (galaxy::star_heat): glow and warning
     ) {
         const COMPASS_HALF_WIDTH: f32 = 240.0; // px, covers ±COMPASS_SPAN_DEG
         const COMPASS_SPAN_DEG: f32 = 90.0;
@@ -2622,6 +2675,18 @@ impl Renderer {
             20.0,
             glyphon::Color::rgb(0, 255, 0),
         ));
+        if heat >= HEAT_WARNING {
+            // centred below the compass, dark red so it reads against the glow
+            let text = "Too close to the star";
+            let height = self.config.height as f32;
+            texts.push((
+                text.to_string(),
+                (width - text.len() as f32 * 12.6) / 2.0,
+                height * 0.3,
+                22.0,
+                glyphon::Color::rgb(140, 20, 0),
+            ));
+        }
 
         let buffers: Vec<(Buffer, f32, f32)> = texts
             .into_iter()
@@ -2676,6 +2741,7 @@ impl Renderer {
             .unwrap();
 
         let flash_alpha = self.update_flash(std::time::Instant::now());
+        let heat_alpha = self.update_heat_glow(heat);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2698,6 +2764,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // the heat glow under the HUD text, so the warning and compass stay readable
+            self.draw_full_screen(&mut pass, &self.heat_bind, heat_alpha);
             self.text_renderer
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)
                 .unwrap();

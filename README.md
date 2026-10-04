@@ -82,6 +82,8 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
 
+Don't fly into the sun: from about two sun radii in it heats up, the screen glows hotter and hotter, a warning appears, and the heat pushes you back out; you can't get closer than just above its surface.
+
 Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
 
 ### Swimming

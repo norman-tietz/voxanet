@@ -664,10 +664,11 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 // full-screen white flash drawn over everything (text included) right after F2/`/screenshot` captures a
 // frame, so the capture itself is reliably invisible: it only fires once the swapchain image already
-// has the un-flashed frame copied out. `local.params.x` is the flash's current opacity (Renderer::render).
+// has the un-flashed frame copied out. `local.params.x` is the flash's current opacity (Renderer::render),
+// `params.yzw` its colour (white for the flash; the galaxy's star heat glow uses the same pass).
 @fragment
 fn fs_flash() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 1.0, 1.0, local.params.x);
+    return vec4<f32>(local.params.yzw, local.params.x);
 }
 
 // translucent water surface (MeshGen::build_water), drawn after the lighting over the lit sea floor.

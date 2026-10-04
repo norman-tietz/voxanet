@@ -392,6 +392,27 @@ impl Game {
                     FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
                 };
                 galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, keys, up);
+                // the star's heat zone pushes free flight back out and can't be passed (galaxy.rs);
+                // planets orbit outside it, so captured flight never meets it
+                if *flight_frame == FlightFrame::Free {
+                    let star = galaxy.star.position();
+                    let r = galaxy.star.radius;
+                    galaxy_flight.velocity = crate::galaxy::star_heat_push(
+                        galaxy_flight.velocity,
+                        galaxy_flight.position - star,
+                        r,
+                        dt,
+                    );
+                    let kept =
+                        crate::galaxy::keep_off_star(galaxy_flight.position - star, r) + star;
+                    if kept != galaxy_flight.position {
+                        // at the limit: no further inward speed
+                        let out = (kept - star).normalize();
+                        let inward = galaxy_flight.velocity.dot(out).min(0.0);
+                        galaxy_flight.velocity -= out * inward;
+                        galaxy_flight.position = kept;
+                    }
+                }
                 let t = clock.elapsed().as_secs_f64();
                 // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
                 let next = crate::galaxy::next_flight_frame(

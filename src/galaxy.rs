@@ -416,6 +416,43 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) ->
     }
 }
 
+// the star's heat zone: from HEAT_ZONE_RADII star radii inward the heat rises (screen glow, HUD
+// warning, an outward push), full at HEAT_LIMIT_RADII, which flight can't pass. The innermost planet
+// orbits outside the zone.
+pub const HEAT_ZONE_RADII: f64 = 2.0;
+pub const HEAT_LIMIT_RADII: f64 = 1.15;
+// outward push at full heat: eased flight pulls toward boost speed at up to ~8000 units/s^2
+// (GALAXY_BOOST_SPEED / FLIGHT_EASE_SECONDS), so this always wins near the limit
+const HEAT_PUSH_ACCEL: f64 = 12_000.0;
+
+// heat 0..1 at `distance` from the star's centre (smooth: 0 at the zone's edge, 1 at the limit)
+pub fn star_heat(distance: f64, star_radius: f64) -> f32 {
+    let t = ((HEAT_ZONE_RADII * star_radius - distance)
+        / ((HEAT_ZONE_RADII - HEAT_LIMIT_RADII) * star_radius))
+        .clamp(0.0, 1.0);
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
+// the velocity after this step's outward heat push (galaxy space, the star at the origin)
+pub fn star_heat_push(velocity: DVec3, position: DVec3, star_radius: f64, dt: f32) -> DVec3 {
+    let heat = star_heat(position.length(), star_radius) as f64;
+    if heat <= 0.0 {
+        return velocity;
+    }
+    velocity + position.normalize_or_zero() * heat * HEAT_PUSH_ACCEL * dt as f64
+}
+
+// flight can't get closer to the star's centre than HEAT_LIMIT_RADII star radii
+pub fn keep_off_star(position: DVec3, star_radius: f64) -> DVec3 {
+    let min = HEAT_LIMIT_RADII * star_radius;
+    let dist = position.length();
+    if dist < min && dist > 1e-9 {
+        position * (min / dist)
+    } else {
+        position
+    }
+}
+
 // Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
 // left/right angle from the view direction (positive = right, ±180 = straight behind), pitch the
 // up/down angle (positive = above). Both in degrees, camera-relative, so they follow mouse-look.
@@ -1120,6 +1157,93 @@ mod tests {
         let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false, Vec3::Y);
         assert!((result.length() - 1.0).abs() < 1e-6);
         assert_eq!(result, Vec3::X);
+    }
+
+    // heat: none outside HEAT_ZONE_RADII (the innermost planet's orbit included), rising toward the
+    // star, full at HEAT_LIMIT_RADII
+    #[test]
+    fn star_heat_rises_toward_the_star() {
+        let galaxy = Galaxy::generate(1);
+        let r = galaxy.star.radius;
+        assert_eq!(star_heat(HEAT_ZONE_RADII * r, r), 0.0);
+        assert_eq!(star_heat(5.0 * r, r), 0.0);
+        let inner_orbit = galaxy
+            .planets
+            .iter()
+            .map(|p| p.orbit_radius - p.radius as f64)
+            .fold(f64::MAX, f64::min);
+        assert_eq!(
+            star_heat(inner_orbit, r),
+            0.0,
+            "the innermost planet sits in the heat zone"
+        );
+        assert_eq!(star_heat(HEAT_LIMIT_RADII * r, r), 1.0);
+        assert_eq!(star_heat(r, r), 1.0);
+        let (a, b) = (star_heat(1.8 * r, r), star_heat(1.4 * r, r));
+        assert!(0.0 < a && a < b && b < 1.0, "{a} {b}");
+    }
+
+    // boosting straight at the star never gets inside the limit, and is pushed back out from it
+    #[test]
+    fn boosting_at_the_star_is_pushed_back() {
+        let galaxy = Galaxy::generate(1);
+        let r = galaxy.star.radius;
+        let mut flight = GalaxyFlight::new(DVec3::new(0.0, 0.0, 1.9 * r));
+        let dt = 1.0 / 60.0;
+        let mut closest = f64::MAX;
+        for _ in 0..600 {
+            // W + boost, looking straight at the star (-Z)
+            flight.update(
+                dt,
+                Vec3::new(0.0, 0.0, -1.0),
+                false,
+                false,
+                (0.0, 0.0),
+                true,
+                FlightKeys::default(),
+                None,
+            );
+            flight.velocity = star_heat_push(flight.velocity, flight.position, r, dt);
+            flight.position = keep_off_star(flight.position, r);
+            closest = closest.min(flight.position.length());
+        }
+        assert!(closest >= HEAT_LIMIT_RADII * r - 1e-6, "got to {closest}");
+        // right at the limit at full boost: pushed outward
+        let mut at_limit = GalaxyFlight::new(DVec3::new(0.0, 0.0, HEAT_LIMIT_RADII * r));
+        at_limit.velocity = DVec3::new(0.0, 0.0, -(GALAXY_BOOST_SPEED as f64));
+        for _ in 0..120 {
+            at_limit.update(
+                dt,
+                Vec3::new(0.0, 0.0, -1.0),
+                false,
+                false,
+                (0.0, 0.0),
+                true,
+                FlightKeys::default(),
+                None,
+            );
+            at_limit.velocity = star_heat_push(at_limit.velocity, at_limit.position, r, dt);
+            at_limit.position = keep_off_star(at_limit.position, r);
+        }
+        assert!(
+            at_limit.velocity.z > 0.0,
+            "not pushed out: {:?}",
+            at_limit.velocity
+        );
+    }
+
+    // flying past the star (not at it) isn't held back outside the zone
+    #[test]
+    fn no_push_outside_the_heat_zone() {
+        let v = DVec3::new(0.0, 0.0, -500.0);
+        assert_eq!(
+            star_heat_push(v, DVec3::new(0.0, 0.0, 3.0 * 3000.0), 3000.0, 0.1),
+            v
+        );
+        assert_eq!(
+            keep_off_star(DVec3::new(0.0, 0.0, 9000.0), 3000.0),
+            DVec3::new(0.0, 0.0, 9000.0)
+        );
     }
 
     // braking from boost speed takes well under a second (it used to glide for 2.5 s)
