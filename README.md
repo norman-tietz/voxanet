@@ -14,6 +14,7 @@ This project is a high-performance voxel engine built from scratch in **Rust**, 
 *   **Dynamic Clouds & Atmosphere:** A procedurally shaded cloud layer wraps the planet with no extra geometry: horizon-grazing view rays cross far more of the layer's thickness, so clouds thicken and brighten near the horizon the way real atmosphere does, while a stylised sky gradient gives a blue dome overhead and a glowing atmospheric limb when the planet is seen from orbit. Clouds drift over time, cast moving shadows on the terrain and ocean below, and are reflected on the water's surface.
 *   **Day and Night:** Each planet turns under its star (a day lasts 1–4 minutes depending on the planet type). At night the sky turns transparent and shows the stars, the sun and the other planets, and the terrain falls back to a dim, cool moonlight.
 *   **Solar System & Seamless Landing:** The planet is one of several in a seeded solar system. Fly up and keep climbing to leave the atmosphere and cross over into space flight; fly at another planet to be captured by its orbit, and descend to land on it, with no loading screen at either handover (its terrain is generated in the background while you approach).
+*   **Living Suns:** Every solar system has one of five star types — red dwarf, orange, yellow, white or blue giant — that sets the sun's size, its colour and the tint of the daylight on its planets. Up close the sun is a round, limb-darkened ball with boiling granulation, drifting sunspots and a glowing corona; from far away it stays a bright, glowing point; seen from a planet's sky it has the same size and look as in space. Looking toward it gives a lens flare, which disappears when a planet, a mountain or your own build hides the sun, and fades under clouds.
 *   **Spherical Terrain:** Generates a massive, round planet using advanced coordinate mapping (Nowell's Algorithm), eliminating the distortion found in standard cube-map projections.
 *   **Multithreaded & Async:** Heavy computational tasks like noise generation and mesh tessellation are offloaded to background thread pools, ensuring a buttery-smooth frame rate.
 *   **Custom Rendering Engine:** Powered by **wgpu**, featuring soft sun shadows, exponential atmospheric fog, and HDR tone mapping for photorealistic visuals.
@@ -31,7 +32,7 @@ cargo run --release
 
 Use `--release`, because terrain generation and meshing are much slower in debug builds.
 
-The game starts on planet #1 (Earth-like) at local noon. To start on the first planet of another type, pass `--biome earthlike|volcanic|ice`, e.g. `cargo run --release -- --biome ice`.
+The game starts on planet #1 (Earth-like) at local noon. To start on the first planet of another type, pass `--biome earthlike|volcanic|ice`, e.g. `cargo run --release -- --biome ice`. `--seed <n>` (default 1) picks another solar system, with a different sun: red dwarf, orange, yellow, white or blue giant (e.g. `--seed 8` for a red dwarf, `--seed 2` for a blue giant).
 
 If you're contributing, run `git config core.hooksPath .githooks` once to enable the pre-commit
 hook: it formats staged Rust files with `rustfmt` and prints `cargo clippy` output (advisory only,
