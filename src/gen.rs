@@ -645,8 +645,10 @@ impl MeshGen {
     }
 
     // generates a simplified heightmap mesh for distant terrain
-    // the water surface of a chunk: one quad at sea level over every column whose natural terrain is below it
-    // (the top of layer sea level, flush with sea-level beaches). Edits don't change the water.
+    // the water surface of a chunk: one quad at the top of layer sea level (flush with sea-level beaches)
+    // over every column whose sea-level cell holds water (PlanetData::sea_cell_is_water: natural ocean
+    // and holes dug below sea level alike) and whose cell above is open — under a ceiling (a tunnel dug at
+    // sea level) the surface would lie against the solid face above and flicker; that water has none.
     pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
         if data.planet_type.def().liquid.is_none() {
             return (Vec::new(), Vec::new());
@@ -658,7 +660,13 @@ impl MeshGen {
         let v_start = key.v_idx * CHUNK_SIZE;
         for u in u_start..(u_start + CHUNK_SIZE).min(res) {
             for v in v_start..(v_start + CHUNK_SIZE).min(res) {
-                if data.terrain.get_height(key.face, u, v) >= sea {
+                let above = BlockId {
+                    face: key.face,
+                    layer: sea + 1,
+                    u,
+                    v,
+                };
+                if !data.sea_cell_is_water(key.face, u, v) || data.exists(above) {
                     continue;
                 }
                 let p =
@@ -1203,6 +1211,75 @@ mod biome_tests {
             !verts.is_empty(),
             "sanity check: Earth-like should mesh water here"
         );
+    }
+
+    fn water_quads(planet: &PlanetData, face: u8, u: u32, v: u32) -> usize {
+        let key = PlanetData::chunk_key(crate::common::BlockId {
+            face,
+            u,
+            v,
+            layer: 0,
+        });
+        MeshGen::build_water(key, planet).0.len() / 4
+    }
+
+    // digging a land column down below sea level: the hole gets a water surface (water table)
+    #[test]
+    fn a_hole_dug_below_sea_level_gets_a_water_surface() {
+        let mut planet = PlanetData::new(32);
+        let (face, u, v) = crate::common::tests::first_land_column(&planet, 2);
+        let sea = planet.terrain.sea_level();
+        let before = water_quads(&planet, face, u, v);
+        for layer in (sea..=planet.terrain.get_height(face, u, v)).rev() {
+            planet.remove_block(crate::common::BlockId { face, layer, u, v });
+        }
+        assert_eq!(water_quads(&planet, face, u, v), before + 1);
+    }
+
+    // a tunnel dug at sea level under land: water to swim in, but no surface pressed against its
+    // ceiling (the two would flicker)
+    #[test]
+    fn a_tunnel_at_sea_level_gets_no_water_surface() {
+        let mut planet = PlanetData::new(32);
+        let (face, u, v) = crate::common::tests::first_land_column(&planet, 2);
+        let sea = planet.terrain.sea_level();
+        let before = water_quads(&planet, face, u, v);
+        planet.remove_block(crate::common::BlockId {
+            face,
+            layer: sea,
+            u,
+            v,
+        });
+        assert_eq!(water_quads(&planet, face, u, v), before);
+    }
+
+    // a block placed into the ocean at sea level: no water surface drawn on top of it
+    #[test]
+    fn a_block_at_sea_level_has_no_water_surface_on_it() {
+        let mut planet = PlanetData::new(32);
+        let key = chunk_with_ocean(&planet);
+        let sea = planet.terrain.sea_level();
+        let (face, u, v) = (0..CHUNK_SIZE * CHUNK_SIZE)
+            .map(|i| {
+                (
+                    key.face,
+                    key.u_idx * CHUNK_SIZE + i / CHUNK_SIZE,
+                    key.v_idx * CHUNK_SIZE + i % CHUNK_SIZE,
+                )
+            })
+            .find(|&(f, u, v)| planet.terrain.get_height(f, u, v) < sea)
+            .unwrap();
+        let before = water_quads(&planet, face, u, v);
+        planet.add_block(
+            crate::common::BlockId {
+                face,
+                layer: sea,
+                u,
+                v,
+            },
+            crate::material::BlockType::Stone,
+        );
+        assert_eq!(water_quads(&planet, face, u, v), before - 1);
     }
 
     #[test]

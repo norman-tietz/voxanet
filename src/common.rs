@@ -254,15 +254,22 @@ impl PlanetData {
         Self::get_chunk_key(id)
     }
 
-    // how far `pos` lies below the sea surface (negative above it), or None outside the ocean: a column's
-    // natural terrain must be below sea level, like the rendered water (MeshGen::build_water)
+    // whether the column's sea-level cell holds the planet's liquid. Water table: any empty cell at sea
+    // level does, natural ocean or dug out, so holes dug below sea level fill (not only those that
+    // connect to the sea). Shared by the rendered water (MeshGen::build_water) and swimming.
+    pub fn sea_cell_is_water(&self, face: u8, u: u32, v: u32) -> bool {
+        let layer = self.terrain.sea_level();
+        self.planet_type.def().liquid.is_some() && !self.exists(BlockId { face, layer, u, v })
+    }
+
+    // how far `pos` lies below the sea surface (negative above it), or None outside water: the column's
+    // sea-level cell must hold water (sea_cell_is_water)
     pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
-        self.planet_type.def().liquid?;
         let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
-        let sea = self.terrain.sea_level();
-        if self.terrain.get_height(id.face, id.u, id.v) >= sea {
+        if !self.sea_cell_is_water(id.face, id.u, id.v) {
             return None;
         }
+        let sea = self.terrain.sea_level();
         Some(crate::gen::CoordSystem::get_layer_radius(sea + 1, self.resolution) - pos.length())
     }
 
@@ -359,7 +366,7 @@ impl Frustum {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::biome::PlanetType;
 
@@ -370,6 +377,60 @@ mod tests {
     #[test]
     fn new_uses_the_home_seed() {
         assert_eq!(PlanetData::new(16).seed, crate::noise::HOME_SEED);
+    }
+
+    // a land column at least `above` layers higher than sea level, for digging below it
+    pub(crate) fn first_land_column(planet: &PlanetData, above: u32) -> (u8, u32, u32) {
+        let sea = planet.terrain.sea_level();
+        for face in 0..6u8 {
+            for u in 0..planet.resolution {
+                for v in 0..planet.resolution {
+                    if planet.terrain.get_height(face, u, v) >= sea + above {
+                        return (face, u, v);
+                    }
+                }
+            }
+        }
+        panic!("test planet has no land column {above} above sea level");
+    }
+
+    fn center(planet: &PlanetData, face: u8, u: u32, v: u32, layer: u32) -> glam::Vec3 {
+        crate::gen::CoordSystem::get_block_center(face, u, v, layer, planet.resolution)
+    }
+
+    // digging a land column down below sea level leaves a hole that holds water (water table):
+    // any empty cell at sea level is water, whatever the column's natural height
+    #[test]
+    fn a_hole_dug_below_sea_level_holds_water() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let (face, u, v) = first_land_column(&planet, 2);
+        let sea = planet.terrain.sea_level();
+        let pos = center(&planet, face, u, v, sea);
+        assert!(planet.water_depth(pos).is_none(), "sanity check: dry land");
+        for layer in (sea - 1..=planet.terrain.get_height(face, u, v)).rev() {
+            planet.remove_block(BlockId { face, layer, u, v });
+        }
+        assert!(planet.water_depth(pos).is_some_and(|d| d > 0.0));
+    }
+
+    // a block placed into the ocean at sea level: no water there to swim in any more
+    #[test]
+    fn a_block_placed_at_sea_level_displaces_the_water() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let (face, u, v) = first_underwater_column(&planet);
+        let sea = planet.terrain.sea_level();
+        let pos = center(&planet, face, u, v, sea + 1);
+        assert!(planet.water_depth(pos).is_some(), "sanity check: ocean");
+        planet.add_block(
+            BlockId {
+                face,
+                layer: sea,
+                u,
+                v,
+            },
+            crate::material::BlockType::Stone,
+        );
+        assert!(planet.water_depth(pos).is_none());
     }
 
     fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {

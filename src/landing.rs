@@ -150,9 +150,9 @@ pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) 
     }
     let res = planet.resolution;
     let probe = position.normalize_or_zero() * (res as f32 / 2.0);
-    crate::gen::CoordSystem::pos_to_id(probe, res).is_some_and(|id| {
-        planet.terrain.get_height(id.face, id.u, id.v) < planet.terrain.sea_level()
-    })
+    // the same water rule as swimming and the rendered surface, so a dug, lava-filled hole counts too
+    crate::gen::CoordSystem::pos_to_id(probe, res)
+        .is_some_and(|id| planet.sea_cell_is_water(id.face, id.u, id.v))
 }
 
 // captured galaxy flight can't go below this distance from the planet's centre (in its radii):
