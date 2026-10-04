@@ -137,6 +137,8 @@ pub struct GalaxyPlanet {
     pub orbit_radius: f64,
     pub orbit_speed: f64, // radians/sec; positive = counterclockwise looking down +Y
     pub orbit_phase: f64, // starting angle, radians
+    pub orbit_tilt: f64, // inclination out of the common orbital plane, radians (0..MAX_ORBIT_TILT)
+    pub orbit_node: f64, // direction of the tilt axis within the plane, radians
     pub radius: f32,
     pub planet_type: PlanetType,
     pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/galaxy_terrain.rs);
@@ -152,7 +154,13 @@ pub struct Galaxy {
 const PLANET_COUNT: usize = 7;
 const INNER_ORBIT_RADIUS: f64 = 8_000.0;
 const ORBIT_RADIUS_GROWTH: f64 = 1.5; // each planet this many times farther out than the last
-const INNER_ORBIT_PERIOD_SECS: f64 = 180.0;
+const INNER_ORBIT_PERIOD_SECS: f64 = 180.0; // at INNER_ORBIT_RADIUS; Kepler beyond (orbit_speed_for)
+                                            // seeded orbit variety (orbit_for): each radius x0.95..x1.10 around the spacing (neighbours keep a gap of
+                                            // at least x1.29, the innermost stays at INNER_ORBIT_RADIUS or more, outside every star's heat zone),
+                                            // a random starting angle and a small tilt out of the common plane
+const ORBIT_JITTER_MIN: f64 = 0.95;
+const ORBIT_JITTER_MAX: f64 = 1.10;
+const MAX_ORBIT_TILT: f64 = 4.0 * std::f64::consts::PI / 180.0;
 const MIN_PLANET_RADIUS: f32 = 40.0;
 const MAX_PLANET_RADIUS: f32 = 250.0;
 // most planets a galaxy can hold (generated + /galaxy add): the galaxy renderer sizes its per-planet
@@ -166,11 +174,13 @@ impl Galaxy {
     pub fn generate(seed: u64) -> Self {
         let planets = (0..PLANET_COUNT)
             .map(|i| {
-                let orbit_radius = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(i as i32);
+                let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(seed, i);
                 GalaxyPlanet {
                     orbit_radius,
                     orbit_speed: orbit_speed_for(orbit_radius),
-                    orbit_phase: std::f64::consts::TAU * (i as f64) / (PLANET_COUNT as f64),
+                    orbit_phase,
+                    orbit_tilt,
+                    orbit_node,
                     radius: planet_radius_for(seed, i),
                     planet_type: PlanetType::ALL[i % PlanetType::ALL.len()],
                     noise_seed: noise_seed_for(seed, i),
@@ -211,11 +221,13 @@ impl Galaxy {
             return Err("Planet radius must be 20-500.");
         }
         let i = self.planets.len();
-        let orbit_radius = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(i as i32);
+        let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(self.seed, i);
         self.planets.push(GalaxyPlanet {
             orbit_radius,
             orbit_speed: orbit_speed_for(orbit_radius),
-            orbit_phase: std::f64::consts::TAU * (i as f64) / (PLANET_COUNT as f64),
+            orbit_phase,
+            orbit_tilt,
+            orbit_node,
             radius,
             planet_type,
             noise_seed: noise_seed_for(self.seed, i),
@@ -224,9 +236,43 @@ impl Galaxy {
     }
 }
 
+// angular speed (radians/s) on a circular orbit: Kepler's third law (period ~ radius^1.5), one orbit in
+// INNER_ORBIT_PERIOD_SECS at INNER_ORBIT_RADIUS
 fn orbit_speed_for(orbit_radius: f64) -> f64 {
-    let c = INNER_ORBIT_RADIUS.sqrt() * (std::f64::consts::TAU / INNER_ORBIT_PERIOD_SECS);
-    c / orbit_radius.sqrt()
+    std::f64::consts::TAU / INNER_ORBIT_PERIOD_SECS * (INNER_ORBIT_RADIUS / orbit_radius).powf(1.5)
+}
+
+// a deterministic value in 0..1 for (galaxy seed, planet index, `salt` naming what it's for): fmix64 as
+// planet_radius_for, with a salt per property so they don't correlate
+fn seeded_unit(seed: u64, index: usize, salt: u64) -> f64 {
+    let mut h = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(index as u64)
+        ^ salt.wrapping_mul(0xA24B_AED4_963E_E407);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^= h >> 33;
+    (h >> 11) as f64 / (1u64 << 53) as f64
+}
+
+// planet `index`'s orbit in the galaxy with `seed`: (radius, starting angle, tilt, tilt axis direction)
+fn orbit_for(seed: u64, index: usize) -> (f64, f64, f64, f64) {
+    let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(index as i32);
+    let jitter =
+        ORBIT_JITTER_MIN + (ORBIT_JITTER_MAX - ORBIT_JITTER_MIN) * seeded_unit(seed, index, 1);
+    let mut radius = base * jitter;
+    if index == 0 {
+        radius = radius.max(INNER_ORBIT_RADIUS);
+    }
+    let tau = std::f64::consts::TAU;
+    (
+        radius,
+        tau * seeded_unit(seed, index, 2),
+        MAX_ORBIT_TILT * seeded_unit(seed, index, 3),
+        tau * seeded_unit(seed, index, 4),
+    )
 }
 
 // deterministic pseudo-random value in [MIN_PLANET_RADIUS, MAX_PLANET_RADIUS] from seed + index —
@@ -269,13 +315,17 @@ impl GalaxyPlanet {
         (star.radius / self.orbit_radius).min(1.0).asin() as f32
     }
 
+    // on a circle of orbit_radius around the star, tilted by orbit_tilt about a horizontal axis
+    // (direction orbit_node) out of the common orbital plane (XZ)
     pub fn position_at(&self, t: f64) -> DVec3 {
         let angle = self.orbit_phase + self.orbit_speed * t;
-        DVec3::new(
+        let flat = DVec3::new(
             self.orbit_radius * angle.cos(),
             0.0,
             self.orbit_radius * angle.sin(),
-        )
+        );
+        let axis = DVec3::new(self.orbit_node.cos(), 0.0, self.orbit_node.sin());
+        DQuat::from_axis_angle(axis, self.orbit_tilt) * flat
     }
 
     // The planet frame: origin at the planet centre, turned by the spin angle about +Y, the axis
@@ -658,8 +708,12 @@ mod tests {
         let i = a.add_planet(PlanetType::Ice, 120.0).unwrap();
         assert_eq!(i, 7);
         let p = a.planets[7];
-        let expected_orbit = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(7);
-        assert!((p.orbit_radius - expected_orbit).abs() < 1e-6);
+        let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(7);
+        assert!(p.orbit_radius >= 0.9 * base && p.orbit_radius <= 1.15 * base);
+        assert!(
+            p.orbit_radius > a.planets[6].orbit_radius * 1.25,
+            "inside the last orbit"
+        );
         assert_eq!(p.planet_type, PlanetType::Ice);
         assert_eq!(p.radius, 120.0);
         assert_eq!(p.noise_seed, noise_seed_for(1, 7));
@@ -1049,13 +1103,21 @@ mod tests {
     #[test]
     fn solar_day_equals_the_planet_types_day_length() {
         let g = Galaxy::generate(1);
-        for p in &g.planets {
+        // exact for an orbit in the common plane; on a tilted orbit (spin axis still +Y) the sun's height
+        // swings by up to +-tilt over the year (small seasons), so within one day it can shift by up to twice
+        // the tilt's sine (inner planets cover much of their orbit in one of their days)
+        let flat = GalaxyPlanet {
+            orbit_tilt: 0.0,
+            ..g.planets[0]
+        };
+        for p in g.planets.iter().chain([&flat]) {
+            let tolerance = 2.0 * p.orbit_tilt.sin() as f32 + 1e-3;
             let day = p.planet_type.def().day_length_secs as f64;
             let morning = p.sun_dir_in_planet_frame(g.star.position(), 5.0);
             let next_morning = p.sun_dir_in_planet_frame(g.star.position(), 5.0 + day);
             let evening = p.sun_dir_in_planet_frame(g.star.position(), 5.0 + day / 2.0);
             assert!(
-                (morning - next_morning).length() < 1e-3,
+                (morning - next_morning).length() < tolerance,
                 "{morning:?} vs {next_morning:?}"
             );
             assert!(
@@ -1146,6 +1208,8 @@ mod tests {
             assert_eq!(pa.orbit_radius, pb.orbit_radius);
             assert_eq!(pa.orbit_speed, pb.orbit_speed);
             assert_eq!(pa.orbit_phase, pb.orbit_phase);
+            assert_eq!(pa.orbit_tilt, pb.orbit_tilt);
+            assert_eq!(pa.orbit_node, pb.orbit_node);
             assert_eq!(pa.radius, pb.radius);
             assert_eq!(pa.planet_type, pb.planet_type);
             assert_eq!(pa.noise_seed, pb.noise_seed);
@@ -1209,9 +1273,9 @@ mod tests {
                 pos.length(),
                 p.orbit_radius
             );
-            assert_eq!(
-                pos.y, 0.0,
-                "orbits are coplanar in the XZ plane this milestone"
+            assert!(
+                pos.y.abs() <= p.orbit_radius * p.orbit_tilt.sin() + 1e-6,
+                "out of the orbit's tilt"
             );
         }
     }
@@ -1237,15 +1301,82 @@ mod tests {
         );
     }
 
+    // Kepler: the period grows with the orbit radius ^ 1.5, 180 s at the base inner orbit
     #[test]
-    fn inner_planet_period_is_about_three_minutes() {
+    fn orbit_periods_follow_kepler() {
+        let period = |r: f64| std::f64::consts::TAU / orbit_speed_for(r);
+        assert!((period(INNER_ORBIT_RADIUS) - 180.0).abs() < 1e-6);
         let g = Galaxy::generate(1);
-        let inner = &g.planets[0];
-        let period = std::f64::consts::TAU / inner.orbit_speed;
-        assert!(
-            (period - 180.0).abs() < 1.0,
-            "period was {period}s, expected ~180s"
-        );
+        for p in &g.planets {
+            let expected = 180.0 * (p.orbit_radius / INNER_ORBIT_RADIUS).powf(1.5);
+            assert!((std::f64::consts::TAU / p.orbit_speed - expected).abs() < 1e-6 * expected);
+        }
+    }
+
+    // starting angles are seeded, not the old even spread, and differ between systems
+    #[test]
+    fn starting_angles_are_seeded() {
+        let (a, b) = (Galaxy::generate(1), Galaxy::generate(2));
+        let even = |i: usize| std::f64::consts::TAU * i as f64 / PLANET_COUNT as f64;
+        assert!(a
+            .planets
+            .iter()
+            .enumerate()
+            .any(|(i, p)| (p.orbit_phase - even(i)).abs() > 0.2));
+        assert!(a
+            .planets
+            .iter()
+            .zip(&b.planets)
+            .any(|(p, q)| (p.orbit_phase - q.orbit_phase).abs() > 0.2));
+        for p in &a.planets {
+            assert!((0.0..std::f64::consts::TAU).contains(&p.orbit_phase));
+        }
+    }
+
+    // orbit radii vary around the spacing but never cross, and the inner orbit stays clear of every
+    // star's heat zone
+    #[test]
+    fn orbit_radii_vary_without_crossing() {
+        for seed in 0..50u64 {
+            let g = Galaxy::generate(seed);
+            for (i, p) in g.planets.iter().enumerate() {
+                let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(i as i32);
+                assert!(
+                    p.orbit_radius >= 0.9 * base && p.orbit_radius <= 1.15 * base,
+                    "seed {seed} #{i}"
+                );
+                if i > 0 {
+                    assert!(
+                        p.orbit_radius >= 1.25 * g.planets[i - 1].orbit_radius,
+                        "seed {seed} #{i}"
+                    );
+                }
+            }
+            assert!(
+                g.planets[0].orbit_radius >= INNER_ORBIT_RADIUS,
+                "seed {seed}"
+            );
+        }
+        let varied = (0..20u64).map(|s| Galaxy::generate(s).planets[3].orbit_radius);
+        let (lo, hi) = varied.fold((f64::MAX, 0.0f64), |(l, h), r| (l.min(r), h.max(r)));
+        assert!(hi - lo > 0.05 * lo, "radii don't vary between seeds");
+    }
+
+    // orbits are tilted a little (up to MAX_ORBIT_TILT) out of the common plane, staying circles
+    #[test]
+    fn orbits_are_slightly_tilted() {
+        let g = Galaxy::generate(1);
+        let mut out_of_plane = false;
+        for p in &g.planets {
+            assert!(p.orbit_tilt >= 0.0 && p.orbit_tilt <= MAX_ORBIT_TILT);
+            for k in 0..8 {
+                let pos = p.position_at(k as f64 * 37.0);
+                assert!((pos.length() - p.orbit_radius).abs() < 1e-6 * p.orbit_radius);
+                assert!(pos.y.abs() <= p.orbit_radius * p.orbit_tilt.sin() + 1e-6);
+                out_of_plane |= pos.y.abs() > 1.0;
+            }
+        }
+        assert!(out_of_plane, "every planet still in one plane");
     }
 
     #[test]

@@ -185,6 +185,8 @@ mod tests {
             orbit_radius: 8_000.0,
             orbit_speed: 0.01,
             orbit_phase: 0.0,
+            orbit_tilt: 0.0,
+            orbit_node: 0.0,
             radius: 100.0,
             planet_type,
             noise_seed,
