@@ -762,14 +762,20 @@ impl MeshGen {
                     })
                     .unwrap_or(def.palette.beach);
                 let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
-                let color = if h < data.terrain.sea_level() {
+                let sea = data.terrain.sea_level();
+                // a liquid-less planet's filled-in basin: its surface is the sea-level fill over natural
+                // terrain below sea level, coloured flat like the rest of the basin (no rim shading)
+                let filled_basin = def.liquid.is_none()
+                    && h == sea
+                    && data.terrain.get_height(key.face, su, sv) < sea;
+                let color = if h < sea || filled_basin {
                     match def.liquid {
                         // distant water: the planet type's own shallow liquid color, not a
                         // hardcoded Earth-specific one
                         Some(liquid) => liquid.shallow_color,
-                        // liquid-less planet (e.g. Ice): the LOD surface here is really the
-                        // filled-in beach material (PlanetData::exists's liquid-less solidity rule),
-                        // not water, so color it as such instead
+                        // liquid-less planet (e.g. Ice): the filled-in beach material
+                        // (PlanetData::exists's liquid-less solidity rule), not water — a filled
+                        // basin, or edits that dug below sea level
                         None => def.palette.beach.color(),
                     }
                 } else {
@@ -1325,6 +1331,66 @@ mod biome_tests {
             glam::Vec3::from(b.pos).length() > glam::Vec3::from(a.pos).length() + 1.0
         });
         assert!(raised, "no LOD vertex rose with the tower");
+    }
+
+    // on a liquid-less planet the filled-in basins keep their unshaded beach colour from afar, as
+    // before the LOD meshes sampled the edited surface (every vertex, rims of basins included)
+    #[test]
+    fn unedited_ice_lod_colours_are_unchanged() {
+        // the start planet's resolution: enough relief for steep shores around the basins
+        let mut planet = PlanetData::new(337);
+        planet.switch_planet_type(PlanetType::Ice);
+        let def = planet.planet_type.def();
+        let sea = planet.terrain.sea_level();
+        let (res, size, row) = (
+            planet.resolution,
+            planet.resolution.next_power_of_two(),
+            65u32,
+        );
+        let mut basin_vertices = 0;
+        for face in 0..6u8 {
+            let key = crate::common::LodKey {
+                face,
+                x: 0,
+                y: 0,
+                size,
+            };
+            let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+            // the 65 x 65 grid (skirt vertices follow it)
+            for (k, vert) in verts.iter().take((row * row) as usize).enumerate() {
+                let (ux, vy) = (k as u32 % row, k as u32 / row);
+                let (su, sv) = ((ux * size / 64).min(res - 1), (vy * size / 64).min(res - 1));
+                let h = planet.terrain.get_height(face, su, sv);
+                let expected = if h < sea {
+                    basin_vertices += 1;
+                    def.palette.beach.color()
+                } else {
+                    let pos = glam::Vec3::from(vert.pos).normalize();
+                    let slope = glam::Vec3::from(vert.normal).dot(pos).abs();
+                    let shade = if slope < 0.85 { 0.75 } else { 1.0 };
+                    let floor = planet.mining_floor();
+                    crate::material::natural_type(
+                        &planet.terrain,
+                        &def.palette,
+                        floor,
+                        face,
+                        su,
+                        sv,
+                        h,
+                    )
+                    .color()
+                    .map(|c| c * shade)
+                };
+                assert_eq!(
+                    vert.color, expected,
+                    "face {face} vertex {k} (column {su}, {sv})"
+                );
+            }
+        }
+        assert!(
+            basin_vertices > 0,
+            "sanity check: the planet has filled-in basins"
+        );
     }
 
     // natural terrain looks exactly as before: same positions and colours
