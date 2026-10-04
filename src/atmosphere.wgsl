@@ -241,7 +241,11 @@ fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
         let n = n_planet + 2.0 * cross(q.xyz, cross(q.xyz, n_planet) + q.w * n_planet);
         return star_surface(normalize(n), mu, a.time, a.star);
     }
-    return star_corona((closest - r) / r, a.star);
+    // the corona around the ray's closest point to the star that lies ahead of the camera: measured
+    // against the whole line, a ray pointing straight away from the sun passed it at distance 0 and
+    // drew a corona-only second sun opposite the real one (star_shading.rs sky_corona_distance)
+    let closest_ahead = length(L - ray_dir * max(along, 0.0));
+    return star_corona((closest_ahead - r) / r, a.star);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what

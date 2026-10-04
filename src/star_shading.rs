@@ -15,6 +15,17 @@ pub fn corona_falloff(d: f32, size: f32) -> f32 {
     (-d / size).exp() / (1.0 + 8.0 * d)
 }
 
+// how far outside the sun's limb a ray passes, in star radii (mirror of atmo_sun_disc's corona input):
+// with `l` the direction to the star and `angle` its angular radius
+pub fn sky_corona_distance(ray: glam::Vec3, l: glam::Vec3, angle: f32) -> f32 {
+    let r = angle.sin();
+    let along = ray.dot(l);
+    // the ray's closest point to the star, never behind the camera: measured against the whole line,
+    // the point straight away from the sun passed it at distance 0 (a second, corona-only sun)
+    let closest = (l - ray * along.max(0.0)).length();
+    (closest - r) / r
+}
+
 // the star's surface normal the sky's sun disc samples for a ray (planet frame), with `l` the direction
 // to the star and `angle` its angular radius, turned into galaxy space by `planet_to_galaxy` — the same
 // point fs_star shades (mirror of atmosphere.wgsl atmo_sun_disc). None outside the disc.
@@ -38,6 +49,24 @@ pub fn sky_disc_normal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the sky's corona (atmo_sun_disc) glows only around the sun: a ray pointing away from it passes
+    // the sun's line at distance 0, but never comes near the sun itself
+    #[test]
+    fn sky_corona_is_only_around_the_sun() {
+        let l = glam::Vec3::new(0.3, 0.8, -0.52).normalize();
+        let angle = 1.5f32.to_radians();
+        let size = 1.0;
+        let toward = corona_falloff(sky_corona_distance(l, l, angle), size);
+        let away = corona_falloff(sky_corona_distance(-l, l, angle), size);
+        let sideways = corona_falloff(
+            sky_corona_distance(l.any_orthonormal_vector(), l, angle),
+            size,
+        );
+        assert!(toward > 0.9, "{toward}");
+        assert!(away < 1e-6, "anti-sun corona {away}");
+        assert!(away <= sideways, "away {away} > sideways {sideways}");
+    }
 
     // the sky's sun disc (atmo_sun_disc) shows the same point of the star as the galaxy's star (fs_star):
     // seen from a planet whose frame is turned by `q` (planet -> galaxy), a ray hits the star at the same
