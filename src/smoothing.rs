@@ -9,6 +9,13 @@ use glam::Vec3;
 // respond alike)
 pub const FLIGHT_EASE_SECONDS: f32 = 0.25;
 
+// flight keys (A/D roll, Q/E turn) set a target rate; the actual rate ramps toward it at the accel,
+// so a key reaches full rate in 0.3 s and coasts to a stop in 0.3 s after release
+pub const ROLL_SPEED: f32 = 1.5; // rad/s
+pub const ROLL_ACCEL: f32 = 5.0; // rad/s^2
+pub const FLIGHT_TURN_SPEED: f32 = 1.5; // rad/s
+pub const TURN_ACCEL: f32 = 5.0; // rad/s^2
+
 // `current` eased toward `target` over `dt` with time constant `tau` (frame-rate independent)
 pub fn ease_toward(current: Vec3, target: Vec3, dt: f32, tau: f32) -> Vec3 {
     current + (target - current) * (1.0 - (-dt / tau).exp())

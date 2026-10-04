@@ -11,17 +11,17 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 // keyboard turning speed (Q/E), radians per second
 const TURN_SPEED: f32 = 2.0;
-pub const ROLL_SPEED: f32 = 1.5; // rad/s, Q/E in fly mode and galaxy flight
 
-// Q/E as (turn, roll) for this step: first-person fly mode rolls (Q left), everything else turns
-// (walking, swimming, third person, where Q/E are the only way to turn)
-fn q_e_turn_and_roll(q: bool, e: bool, fly_mode: bool, first_person: bool, dt: f32) -> (f32, f32) {
-    let amount = (q as i32 - e as i32) as f32 * dt;
-    if fly_mode && first_person {
-        (0.0, amount * ROLL_SPEED)
-    } else {
-        (amount * TURN_SPEED, 0.0)
-    }
+// flight keys as axes from -1 to 1: A/D roll (A left), Q/E turn (Q left). Planet fly mode in first
+// person, orbit and galaxy flight; their rates are eased (smoothing.rs)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlightKeys {
+    pub roll: f32,
+    pub turn: f32,
+}
+
+fn key_axis(positive: bool, negative: bool) -> f32 {
+    (positive as i32 - negative as i32) as f32
 }
 
 pub struct Controller {
@@ -96,21 +96,48 @@ impl Controller {
         (input, jump, self.move_down, self.sprint, rotation_delta)
     }
 
-    // galaxy flight: Q/E roll (Q left), radians for this step
-    pub fn galaxy_roll(&self, dt: f32) -> f32 {
-        q_e_turn_and_roll(self.keys[5], self.keys[6], true, true, dt).1
+    // movement input and flight keys: in flight A/D roll and Q/E turn instead of A/D moving sideways
+    fn movement_and_keys(&self, flight: bool) -> (Vec3, FlightKeys) {
+        let input = Vec3::new(
+            if flight {
+                0.0
+            } else {
+                key_axis(self.keys[3], self.keys[1])
+            },
+            0.0,
+            key_axis(self.keys[2], self.keys[0]),
+        );
+        let keys = if flight {
+            FlightKeys {
+                roll: key_axis(self.keys[1], self.keys[3]),
+                turn: key_axis(self.keys[5], self.keys[6]),
+            }
+        } else {
+            FlightKeys::default()
+        };
+        (input, keys)
+    }
+
+    // planet mode: flight keys while flying in first person, else walking keys (A/D strafe, Q/E turn)
+    pub fn flight_input(&self) -> (Vec3, FlightKeys) {
+        self.movement_and_keys(self.fly_mode && self.first_person)
+    }
+
+    // galaxy flight (free or in orbit): always flight keys
+    pub fn galaxy_flight_input(&self) -> (Vec3, FlightKeys) {
+        self.movement_and_keys(true)
     }
 
     pub fn update_player(&mut self, player: &mut Player, planet: &PlanetData, dt: f32) {
-        let (input, jump, down, sprint, rotation_delta) = self.raw_input();
-
-        let (turn, roll) = q_e_turn_and_roll(
-            self.keys[5],
-            self.keys[6],
-            self.fly_mode,
-            self.first_person,
-            dt,
-        );
+        let (_, jump, down, sprint, rotation_delta) = self.raw_input();
+        let (input, keys) = self.flight_input();
+        // on foot (and in third person) Q/E turn directly; in flight they're eased flight keys
+        let in_flight = self.fly_mode && self.first_person;
+        let turn = if in_flight {
+            0.0
+        } else {
+            key_axis(self.keys[5], self.keys[6]) * TURN_SPEED * dt
+        };
 
         let touched_down = player.update(
             dt,
@@ -120,7 +147,7 @@ impl Controller {
             down,
             rotation_delta,
             turn,
-            roll,
+            keys,
             self.fly_mode,
             sprint,
         );
@@ -371,26 +398,50 @@ impl Controller {
 mod tests {
     use super::*;
 
-    // Q/E: roll in first-person fly mode, turn everywhere else (walking, swimming, third person)
+    fn controller_with(keys: [bool; 7], fly_mode: bool, first_person: bool) -> Controller {
+        let mut c = Controller::new();
+        c.keys = keys;
+        c.fly_mode = fly_mode;
+        c.first_person = first_person;
+        c
+    }
+
+    // keys: [W, A, S, D, Space, Q, E]
+    const A: [bool; 7] = [false, true, false, false, false, false, false];
+    const D_AND_Q: [bool; 7] = [false, false, false, true, false, true, false];
+
+    // first-person flight: A/D roll (A left), Q/E turn (Q left), no sideways movement
     #[test]
-    fn q_e_roll_when_flying_in_first_person_and_turn_otherwise() {
-        let dt = 0.5;
+    fn flight_keys_roll_with_a_d_and_turn_with_q_e() {
+        let c = controller_with(A, true, true);
+        let (input, keys) = c.flight_input();
+        assert_eq!(input.x, 0.0, "A strafed in flight");
         assert_eq!(
-            q_e_turn_and_roll(true, false, true, true, dt),
-            (0.0, ROLL_SPEED * dt)
+            keys,
+            FlightKeys {
+                roll: 1.0,
+                turn: 0.0
+            }
         );
+        let c = controller_with(D_AND_Q, true, true);
         assert_eq!(
-            q_e_turn_and_roll(false, true, true, true, dt),
-            (0.0, -ROLL_SPEED * dt)
+            c.flight_input().1,
+            FlightKeys {
+                roll: -1.0,
+                turn: 1.0
+            }
         );
-        assert_eq!(
-            q_e_turn_and_roll(true, false, false, true, dt),
-            (TURN_SPEED * dt, 0.0)
-        );
-        assert_eq!(
-            q_e_turn_and_roll(true, false, true, false, dt),
-            (TURN_SPEED * dt, 0.0)
-        );
+    }
+
+    // walking (and third-person flying): A/D strafe and Q/E turn, no flight keys
+    #[test]
+    fn on_foot_a_d_strafe_and_q_e_turn() {
+        for (fly, first) in [(false, true), (true, false)] {
+            let c = controller_with(A, fly, first);
+            let (input, keys) = c.flight_input();
+            assert_eq!(input.x, -1.0);
+            assert_eq!(keys, FlightKeys::default());
+        }
     }
 
     fn player_on_a_slope() -> Player {

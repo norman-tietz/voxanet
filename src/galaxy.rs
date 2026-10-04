@@ -273,6 +273,8 @@ pub struct GalaxyFlight {
     pub position: DVec3,
     pub velocity: DVec3,
     pub rotation: Quat,
+    pub roll_rate: f32, // eased roll rate (A/D), rad/s, positive rolls left
+    pub turn_rate: f32, // eased turn rate (Q/E), rad/s, positive turns left
     mouse_sens: f32,
 }
 
@@ -282,6 +284,8 @@ impl GalaxyFlight {
             position,
             velocity: DVec3::ZERO,
             rotation: Quat::IDENTITY,
+            roll_rate: 0.0,
+            turn_rate: 0.0,
             mouse_sens: 0.002,
         }
     }
@@ -320,13 +324,21 @@ impl GalaxyFlight {
         down: bool,
         mouse_delta: (f32, f32),
         sprint: bool,
-        roll: f32, // Q/E for this step: about the view direction, positive rolls left
+        keys: crate::controller::FlightKeys, // A/D roll, Q/E turn: eased rates (smoothing.rs), pure roll
         up: Option<Vec3>,
     ) {
-        if roll.abs() > 1e-6 {
-            self.rotation = (self.rotation * Quat::from_axis_angle(Vec3::Z, roll)).normalize();
+        use crate::smoothing::{approach, FLIGHT_TURN_SPEED, ROLL_ACCEL, ROLL_SPEED, TURN_ACCEL};
+        self.roll_rate = approach(self.roll_rate, keys.roll * ROLL_SPEED, ROLL_ACCEL * dt);
+        self.turn_rate = approach(
+            self.turn_rate,
+            keys.turn * FLIGHT_TURN_SPEED,
+            TURN_ACCEL * dt,
+        );
+        if self.roll_rate != 0.0 {
+            let roll = Quat::from_axis_angle(Vec3::Z, self.roll_rate * dt);
+            self.rotation = (self.rotation * roll).normalize();
         }
-        let yaw_delta = -mouse_delta.0 * self.mouse_sens;
+        let yaw_delta = -mouse_delta.0 * self.mouse_sens + self.turn_rate * dt;
         if yaw_delta.abs() > 1e-6 {
             self.rotation =
                 Quat::from_axis_angle(yaw_axis(self.rotation, up), yaw_delta) * self.rotation;
@@ -429,9 +441,12 @@ pub fn approach_pitch_assist(rotation: Quat, up: Vec3, max_step: f32) -> Option<
     ))
 }
 
-// whether the player took over from the approach assist this tick (mouse look or Q/E roll)
-pub fn approach_assist_interrupted(mouse_delta: (f32, f32), roll: f32) -> bool {
-    mouse_delta.0.abs() > 1e-3 || mouse_delta.1.abs() > 1e-3 || roll.abs() > 1e-6
+// whether the player took over from the approach assist this tick (mouse look, rolling or turning)
+pub fn approach_assist_interrupted(
+    mouse_delta: (f32, f32),
+    keys: crate::controller::FlightKeys,
+) -> bool {
+    mouse_delta.0.abs() > 1e-3 || mouse_delta.1.abs() > 1e-3 || keys.roll != 0.0 || keys.turn != 0.0
 }
 
 // Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
@@ -475,6 +490,7 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::FlightKeys;
 
     // a bake with stored edits contains them; one without doesn't
     #[test]
@@ -561,7 +577,7 @@ mod tests {
             false,
             (80.0, 0.0),
             false,
-            0.0,
+            FlightKeys::default(),
             Some(up),
         );
         let after = flight.rotation * Vec3::NEG_Z;
@@ -587,7 +603,7 @@ mod tests {
             false,
             (80.0, 0.0),
             false,
-            0.0,
+            FlightKeys::default(),
             up,
         );
         let after = flight.rotation * Vec3::NEG_Z;
@@ -627,15 +643,65 @@ mod tests {
         }
     }
 
-    // Q/E: roll about the view direction (Q left: the camera's right side comes up); the view direction
-    // itself doesn't move
+    // A/D: roll about the view direction (A left: the camera's right side comes up), ramping up while
+    // held and coasting after release; the view direction itself doesn't move
     #[test]
-    fn q_e_roll_about_the_view_direction() {
+    fn a_d_roll_about_the_view_direction_with_a_ramp() {
+        let roll_left = FlightKeys {
+            roll: 1.0,
+            turn: 0.0,
+        };
         for up in [None, Some(Vec3::Y)] {
             let mut flight = GalaxyFlight::new(DVec3::new(0.0, 600.0, 0.0));
             flight.rotation = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.2);
-            let (forward, right) = (flight.rotation * Vec3::NEG_Z, flight.rotation * Vec3::X);
-            let camera_up = flight.rotation * Vec3::Y;
+            let (forward, camera_up) = (flight.rotation * Vec3::NEG_Z, flight.rotation * Vec3::Y);
+            let step = |flight: &mut GalaxyFlight, keys| {
+                flight.update(
+                    1.0 / 60.0,
+                    Vec3::ZERO,
+                    false,
+                    false,
+                    (0.0, 0.0),
+                    false,
+                    keys,
+                    up,
+                )
+            };
+            step(&mut flight, roll_left);
+            assert!(
+                flight.roll_rate < 0.5 * crate::smoothing::ROLL_SPEED,
+                "{up:?}: no ramp"
+            );
+            for _ in 0..20 {
+                step(&mut flight, roll_left);
+            }
+            assert!(
+                (flight.rotation * Vec3::NEG_Z).dot(forward) > 1.0 - 1e-4,
+                "{up:?}"
+            );
+            assert!(
+                (flight.rotation * Vec3::X).dot(camera_up) > 0.1,
+                "{up:?}: A didn't raise the right side"
+            );
+            step(&mut flight, FlightKeys::default());
+            assert!(
+                flight.roll_rate > 0.5 * crate::smoothing::ROLL_SPEED,
+                "{up:?}: stopped dead"
+            );
+            for _ in 0..20 {
+                step(&mut flight, FlightKeys::default());
+            }
+            assert_eq!(flight.roll_rate, 0.0, "{up:?}: still rolling");
+        }
+    }
+
+    // Q/E turn (Q left) in galaxy flight, without rolling
+    #[test]
+    fn q_e_turn_in_galaxy_flight() {
+        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+        let left = -(flight.rotation * Vec3::X);
+        let forward = flight.rotation * Vec3::NEG_Z;
+        for _ in 0..30 {
             flight.update(
                 1.0 / 60.0,
                 Vec3::ZERO,
@@ -643,20 +709,18 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
-                0.3,
-                up,
+                FlightKeys {
+                    roll: 0.0,
+                    turn: 1.0,
+                },
+                None,
             );
-            assert!(
-                (flight.rotation * Vec3::NEG_Z).dot(forward) > 1.0 - 1e-5,
-                "{up:?}"
-            );
-            let new_right = flight.rotation * Vec3::X;
-            assert!(
-                new_right.dot(camera_up) > 0.25,
-                "{up:?}: Q didn't raise the right side"
-            );
-            assert!((new_right.dot(right) - 0.3f32.cos()).abs() < 1e-4, "{up:?}");
         }
+        assert!(((flight.rotation * Vec3::NEG_Z) - forward).dot(left) > 0.1);
+        assert!(
+            (flight.rotation * Vec3::Y).dot(Vec3::Y) > 1.0 - 1e-4,
+            "turning rolled the view"
+        );
     }
 
     // how far below the local horizon a rotation looks
@@ -705,13 +769,27 @@ mod tests {
         assert!(after.dot(plane).abs() < 1e-4, "left its vertical plane");
     }
 
-    // mouse look or Q/E roll hands the view back to the player
+    // mouse look, rolling or turning keys hand the view back to the player
     #[test]
-    fn approach_assist_is_interrupted_by_mouse_or_roll() {
-        assert!(!approach_assist_interrupted((0.0, 0.0), 0.0));
-        assert!(approach_assist_interrupted((3.0, 0.0), 0.0));
-        assert!(approach_assist_interrupted((0.0, -2.0), 0.0));
-        assert!(approach_assist_interrupted((0.0, 0.0), 0.02));
+    fn approach_assist_is_interrupted_by_mouse_or_flight_keys() {
+        let none = FlightKeys::default();
+        assert!(!approach_assist_interrupted((0.0, 0.0), none));
+        assert!(approach_assist_interrupted((3.0, 0.0), none));
+        assert!(approach_assist_interrupted((0.0, -2.0), none));
+        assert!(approach_assist_interrupted(
+            (0.0, 0.0),
+            FlightKeys {
+                roll: -1.0,
+                turn: 0.0
+            }
+        ));
+        assert!(approach_assist_interrupted(
+            (0.0, 0.0),
+            FlightKeys {
+                roll: 0.0,
+                turn: 1.0
+            }
+        ));
     }
 
     // free flight: Space/Shift climb and descend along the camera's own up
@@ -719,7 +797,16 @@ mod tests {
     fn free_flight_climbs_along_the_camera_up() {
         let mut flight = GalaxyFlight::new(DVec3::ZERO);
         flight.rotation = Quat::from_rotation_z(3.14159); // upside down relative to galaxy +Y
-        flight.update(1.0, Vec3::ZERO, true, false, (0.0, 0.0), false, 0.0, None);
+        flight.update(
+            1.0,
+            Vec3::ZERO,
+            true,
+            false,
+            (0.0, 0.0),
+            false,
+            FlightKeys::default(),
+            None,
+        );
         assert!(flight.velocity.y < -1.0, "{:?}", flight.velocity);
     }
 
@@ -1150,7 +1237,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
-                0.0,
+                FlightKeys::default(),
                 None,
             );
         }
@@ -1172,7 +1259,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
-                0.0,
+                FlightKeys::default(),
                 None,
             );
         }

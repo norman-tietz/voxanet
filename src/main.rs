@@ -386,15 +386,15 @@ impl Game {
                 }
             }
             GameMode::Galaxy => {
-                let (input, jump, down, sprint, mouse_delta) = controller.raw_input();
+                let (_, jump, down, sprint, mouse_delta) = controller.raw_input();
+                let (input, keys) = controller.galaxy_flight_input();
                 // turning and climbing follow galaxy space's +Y in free flight, the local radial up
                 // while captured (the planet's spin axis would pitch the view at its equator)
                 let up = match *flight_frame {
                     FlightFrame::Free => None,
                     FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
                 };
-                let roll = controller.galaxy_roll(dt);
-                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, roll, up);
+                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, keys, up);
                 let t = clock.elapsed().as_secs_f64();
                 // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
                 let next = crate::galaxy::next_flight_frame(
@@ -422,7 +422,7 @@ impl Game {
                     );
                     match turn {
                         Some(turn)
-                            if !crate::galaxy::approach_assist_interrupted(mouse_delta, roll) =>
+                            if !crate::galaxy::approach_assist_interrupted(mouse_delta, keys) =>
                         {
                             // the route turns with the view (flight follows the view only under thrust)
                             galaxy_flight.rotation = (turn * galaxy_flight.rotation).normalize();
@@ -473,6 +473,7 @@ impl Game {
             player.rotation = rotation;
             player.cam_pitch = cam_pitch;
             player.cam_roll = cam_roll;
+            player.roll_rate = galaxy_flight.roll_rate; // a roll in progress carries on
             *approach_assist = false; // a later liftoff isn't an approach
             player.velocity = glam::Vec3::ZERO;
             player.landing = false;
@@ -496,6 +497,7 @@ impl Game {
                 player.cam_roll,
                 player.velocity,
             );
+            galaxy_flight.roll_rate = player.roll_rate; // a roll in progress carries on
             *flight_frame = FlightFrame::Captured(i);
             player.landing = false;
             *mode = GameMode::Galaxy;

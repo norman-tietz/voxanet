@@ -25,6 +25,7 @@ const FLY_LOOKAHEAD_MIN: f32 = 5.0;
 const FLY_LOOKAHEAD_MAX: f32 = 60.0;
 const FLY_LOOKAHEAD_SAMPLES: u32 = 4; // points between the player and the lookahead distance
 const LANDING_ROLL_LEVEL_RATE: f32 = 1.5; // rad/s an F landing eases the roll level
+const BANK_TURN_RATE: f32 = 0.8; // rad/s the heading turns at a 90° roll at cruise speed (planet fly mode)
 
 // an angle wrapped into -PI..PI
 fn wrap_angle(a: f32) -> f32 {
@@ -109,7 +110,9 @@ pub struct Player {
     pub velocity: Vec3,
     pub rotation: Quat,
     pub cam_pitch: f32,
-    pub cam_roll: f32, // fly mode only (Q/E): roll about the view direction; level when walking/swimming
+    pub cam_roll: f32, // fly mode only: roll about the view direction; level when walking/swimming
+    pub roll_rate: f32, // fly mode: eased roll rate (A/D), rad/s, positive rolls left
+    pub turn_rate: f32, // fly mode: eased turn rate (Q/E), rad/s, positive turns left
     pub grounded: bool,
     pub debug_mode: bool,
     pub health: f32,
@@ -133,6 +136,8 @@ impl Player {
             rotation: Quat::IDENTITY,
             cam_pitch: 0.0,
             cam_roll: 0.0,
+            roll_rate: 0.0,
+            turn_rate: 0.0,
             grounded: false,
             debug_mode: false,
             health: MAX_HEALTH,
@@ -156,12 +161,14 @@ impl Player {
         self.landing = false;
         self.taking_off = None;
         self.cam_roll = 0.0;
+        self.roll_rate = 0.0;
+        self.turn_rate = 0.0;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
 
-    // turn: keyboard yaw in radians for this step, positive turns left; roll: keyboard roll for this
-    // step (fly mode), positive rolls left
+    // turn: keyboard yaw in radians for this step (on foot), positive turns left; keys: the flight keys
+    // (fly mode in first person: A/D roll, Q/E turn, eased here)
     // returns true when an F-landing touched down this tick (the caller turns fly mode off)
     pub fn update(
         &mut self,
@@ -172,22 +179,53 @@ impl Player {
         down: bool,
         mouse_delta: (f32, f32),
         turn: f32,
-        roll: f32,
+        keys: crate::controller::FlightKeys,
         flying: bool,
         sprint: bool,
     ) -> bool {
         let up = Physics::get_up_vector(self.position);
 
-        // --- ROLL ---
-        // walking and swimming are level; an F landing eases the roll level and ignores Q/E, a take-off
-        // climb keeps it as it is; otherwise Q/E roll freely
+        // --- ROLL AND TURN RATES (flight keys) ---
+        // walking and swimming are level; an F landing ignores the keys and eases the roll level, the
+        // take-off climb ignores them; otherwise A/D roll and Q/E turn, both ramping up and coasting
+        // down (smoothing.rs)
+        let mut flight_yaw = 0.0;
         if !flying {
             self.cam_roll = 0.0;
-        } else if self.landing {
-            let step = LANDING_ROLL_LEVEL_RATE * dt;
-            self.cam_roll -= self.cam_roll.clamp(-step, step);
-        } else if self.taking_off.is_none() {
-            self.cam_roll = wrap_angle(self.cam_roll + roll);
+            self.roll_rate = 0.0;
+            self.turn_rate = 0.0;
+        } else {
+            use crate::smoothing::{
+                approach, FLIGHT_TURN_SPEED, ROLL_ACCEL, ROLL_SPEED, TURN_ACCEL,
+            };
+            let steering = !self.landing && self.taking_off.is_none();
+            let (roll_target, turn_target) = if steering {
+                (keys.roll * ROLL_SPEED, keys.turn * FLIGHT_TURN_SPEED)
+            } else {
+                (0.0, 0.0)
+            };
+            self.turn_rate = approach(self.turn_rate, turn_target, TURN_ACCEL * dt);
+            if self.landing {
+                self.roll_rate = 0.0;
+                let step = LANDING_ROLL_LEVEL_RATE * dt;
+                self.cam_roll -= self.cam_roll.clamp(-step, step);
+            } else {
+                self.roll_rate = approach(self.roll_rate, roll_target, ROLL_ACCEL * dt);
+                self.cam_roll = wrap_angle(self.cam_roll + self.roll_rate * dt);
+            }
+            // banked turn: rolled while flying forward, the heading turns toward the lowered side,
+            // in proportion to the forward speed (none while hovering)
+            let altitude = self.position.length() - planet.resolution as f32 / 2.0;
+            let cruise =
+                crate::landing::fly_speed(self.move_speed, false, altitude, self.handover_altitude);
+            let heading = self.rotation * Vec3::NEG_Z;
+            let forward_share = (self.velocity.dot(heading) / cruise.max(1e-3)).clamp(0.0, 1.0);
+            let bank = if self.landing {
+                0.0
+            } else {
+                BANK_TURN_RATE * self.cam_roll.sin() * forward_share
+            };
+            flight_yaw = (self.turn_rate + bank) * dt;
         }
         // the mouse moves in screen directions: turn the rolled screen's right/down back into yaw/pitch
         let (sin, cos) = self.cam_roll.sin_cos();
@@ -197,7 +235,7 @@ impl Player {
         );
 
         // --- ROTATION (YAW) ---
-        let yaw_delta = -mouse_delta.0 * self.mouse_sens + turn;
+        let yaw_delta = -mouse_delta.0 * self.mouse_sens + turn + flight_yaw;
         if yaw_delta.abs() > 1e-6 {
             let yaw_rot = Quat::from_axis_angle(up, yaw_delta);
             self.rotation = yaw_rot * self.rotation;
@@ -469,6 +507,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::FlightKeys;
 
     // Test wrapper that calls the production function
     fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
@@ -485,7 +524,13 @@ mod tests {
         (player, planet)
     }
 
-    fn tick(player: &mut Player, planet: &PlanetData, mouse: (f32, f32), roll: f32, flying: bool) {
+    fn tick(
+        player: &mut Player,
+        planet: &PlanetData,
+        mouse: (f32, f32),
+        keys: FlightKeys,
+        flying: bool,
+    ) {
         player.update(
             1.0 / 60.0,
             planet,
@@ -494,7 +539,7 @@ mod tests {
             false,
             mouse,
             0.0,
-            roll,
+            keys,
             flying,
             false,
         );
@@ -525,7 +570,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 0.0,
-                0.0,
+                FlightKeys::default(),
                 true,
                 false,
             );
@@ -540,7 +585,7 @@ mod tests {
             false,
             (0.0, 0.0),
             0.0,
-            0.0,
+            FlightKeys::default(),
             true,
             false,
         );
@@ -552,25 +597,118 @@ mod tests {
         assert!(coasting < cruising, "didn't slow down");
     }
 
-    // fly mode: Q/E roll the camera (Q left: its right side comes up); walking is always level
+    const ROLL_LEFT: FlightKeys = FlightKeys {
+        roll: 1.0,
+        turn: 0.0,
+    };
+    const TURN_LEFT: FlightKeys = FlightKeys {
+        roll: 0.0,
+        turn: 1.0,
+    };
+    const NO_KEYS: FlightKeys = FlightKeys {
+        roll: 0.0,
+        turn: 0.0,
+    };
+
+    // fly mode: A rolls left (the camera's right side comes up) about the view direction; walking is
+    // always level
     #[test]
     fn fly_mode_rolls_and_walking_is_level() {
         let (mut player, planet) = flying_player();
         let (right, up, forward) = camera_axes(&player);
-        tick(&mut player, &planet, (0.0, 0.0), 0.4, true);
-        assert!((player.cam_roll - 0.4).abs() < 1e-6);
+        for _ in 0..12 {
+            tick(&mut player, &planet, (0.0, 0.0), ROLL_LEFT, true);
+        }
         let (right2, _, forward2) = camera_axes(&player);
+        assert!(player.cam_roll > 0.1, "{}", player.cam_roll);
         assert!(
-            forward2.dot(forward) > 1.0 - 1e-4,
+            forward2.dot(forward) > 1.0 - 1e-3,
             "rolling moved the view direction"
         );
         assert!(
-            right2.dot(up) > 0.3,
-            "Q didn't raise the camera's right side"
+            right2.dot(up) > 0.1,
+            "A didn't raise the camera's right side"
         );
-        assert!((right2.dot(right) - 0.4f32.cos()).abs() < 1e-3);
-        tick(&mut player, &planet, (0.0, 0.0), 0.0, false);
+        assert!(right2.dot(right) < 1.0);
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, false);
         assert_eq!(player.cam_roll, 0.0, "walking (or swimming) is level");
+    }
+
+    // the roll rate ramps up while A is held and coasts down after releasing it
+    #[test]
+    fn roll_ramps_up_and_coasts_to_a_stop() {
+        let (mut player, planet) = flying_player();
+        tick(&mut player, &planet, (0.0, 0.0), ROLL_LEFT, true);
+        assert!(
+            player.roll_rate < 0.5 * crate::smoothing::ROLL_SPEED,
+            "no ramp: {}",
+            player.roll_rate
+        );
+        for _ in 0..20 {
+            tick(&mut player, &planet, (0.0, 0.0), ROLL_LEFT, true);
+        }
+        assert!(
+            (player.roll_rate - crate::smoothing::ROLL_SPEED).abs() < 1e-4,
+            "not at full rate after 0.35 s"
+        );
+        let released_at = player.cam_roll;
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        assert!(
+            player.roll_rate > 0.5 * crate::smoothing::ROLL_SPEED,
+            "stopped dead on release"
+        );
+        assert!(player.cam_roll > released_at, "stopped rolling on release");
+        for _ in 0..20 {
+            tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        }
+        assert_eq!(player.roll_rate, 0.0, "still rolling 0.35 s after release");
+    }
+
+    // Q turns left, eased like the roll
+    #[test]
+    fn q_turns_left_with_a_ramp() {
+        let (mut player, planet) = flying_player();
+        let (_, _, forward) = camera_axes(&player);
+        let (left, _, _) = camera_axes(&player);
+        let left = -left;
+        tick(&mut player, &planet, (0.0, 0.0), TURN_LEFT, true);
+        assert!(player.turn_rate > 0.0 && player.turn_rate < crate::smoothing::FLIGHT_TURN_SPEED);
+        for _ in 0..30 {
+            tick(&mut player, &planet, (0.0, 0.0), TURN_LEFT, true);
+        }
+        let (_, _, forward2) = camera_axes(&player);
+        assert!((forward2 - forward).dot(left) > 0.1, "didn't turn left");
+    }
+
+    // planet fly mode: flying forward while rolled left turns the heading left (banked turn); without
+    // forward speed a roll doesn't turn
+    #[test]
+    fn rolled_flight_turns_toward_the_lowered_side() {
+        let (mut player, planet) = flying_player();
+        player.cam_pitch = 0.0;
+        player.cam_roll = 0.6;
+        let (_, _, forward) = camera_axes(&player);
+        let left = -(player.rotation * Vec3::X);
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        let (_, _, still) = camera_axes(&player);
+        assert!((still - forward).length() < 1e-4, "turned without moving");
+        player.velocity = forward * crate::landing::fly_speed(player.move_speed, false, 0.0, None);
+        for _ in 0..30 {
+            player.update(
+                1.0 / 60.0,
+                &planet,
+                Vec3::new(0.0, 0.0, -1.0),
+                false,
+                false,
+                (0.0, 0.0),
+                0.0,
+                NO_KEYS,
+                true,
+                false,
+            );
+        }
+        let (_, _, forward2) = camera_axes(&player);
+        assert!((forward2 - forward).dot(left) > 0.05, "no banked turn");
     }
 
     // rolled 90°, moving the mouse right still turns the view toward the screen's right
@@ -579,7 +717,7 @@ mod tests {
         let (mut player, planet) = flying_player();
         player.cam_roll = std::f32::consts::FRAC_PI_2;
         let (screen_right, screen_up, forward) = camera_axes(&player);
-        tick(&mut player, &planet, (40.0, 0.0), 0.0, true);
+        tick(&mut player, &planet, (40.0, 0.0), NO_KEYS, true);
         let (_, _, forward2) = camera_axes(&player);
         let moved = forward2 - forward;
         assert!(moved.dot(screen_right) > 0.05, "{moved:?}");
@@ -589,15 +727,15 @@ mod tests {
         );
     }
 
-    // an F landing ignores Q/E and eases the roll level; so does nothing during a take-off climb
+    // an F landing ignores the roll keys and eases the roll level; the take-off climb ignores them too
     #[test]
-    fn landing_levels_the_roll_and_ignores_q_e() {
+    fn landing_levels_the_roll_and_ignores_the_roll_keys() {
         let (mut player, planet) = flying_player();
         player.cam_roll = 1.0;
         player.landing = true;
         let mut last = player.cam_roll;
         for _ in 0..30 {
-            tick(&mut player, &planet, (0.0, 0.0), 0.2, true);
+            tick(&mut player, &planet, (0.0, 0.0), ROLL_LEFT, true);
             if !player.landing {
                 break;
             }
@@ -607,8 +745,8 @@ mod tests {
         let (mut player, planet) = flying_player();
         player.cam_roll = 0.5;
         player.taking_off = Some(player.position.length() + 20.0);
-        tick(&mut player, &planet, (0.0, 0.0), 0.3, true);
-        assert_eq!(player.cam_roll, 0.5, "Q/E rolled during the take-off climb");
+        tick(&mut player, &planet, (0.0, 0.0), ROLL_LEFT, true);
+        assert_eq!(player.cam_roll, 0.5, "rolled during the take-off climb");
     }
 
     // F take-off: the climb rises smoothly to its target and ends there (fly mode, hovering)
@@ -634,7 +772,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 0.0,
-                0.0,
+                FlightKeys::default(),
                 true,
                 false,
             );

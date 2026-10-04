@@ -45,9 +45,9 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 
 | Input | Action |
 |-------|--------|
-| `W` `A` `S` `D` | Move |
+| `W` `A` `S` `D` | Move (while flying in first person, `A` / `D` roll instead, see Flying) |
 | Mouse | Look around (first person) |
-| `Q` / `E` | Turn left / right (first and third person); while flying in first person, roll left / right instead |
+| `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
 | `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
@@ -57,10 +57,13 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 
 ### Flying
 
-Fly mode has no collision, so a terrain-following floor keeps you from flying into the ground: it holds a clearance above the highest terrain ahead of you (so it starts climbing before you reach a hill, not after), and flying on over lower terrain keeps your current altitude rather than diving down to hug it.
+In first-person flight the controls work like an aircraft: there is no sideways movement, `A` / `D` roll and `Q` / `E` turn, and every key eases in and out instead of switching instantly (in third person `A` / `D` and `Q` / `E` keep their walking meaning). Fly mode has no collision, so a terrain-following floor keeps you from flying into the ground: it holds a clearance above the highest terrain ahead of you (so it starts climbing before you reach a hill, not after), and flying on over lower terrain keeps your current altitude rather than diving down to hug it.
 
 | Input | Action |
 |-------|--------|
+| `W` / `S` | Fly forward / back (in the direction you look); speed eases in and out |
+| `A` / `D` (hold) | Roll left / right; while moving forward, a roll banks the flight into a turn toward the lowered side |
+| `Q` / `E` (hold) | Turn left / right |
 | `Space` (hold) | Climb |
 | `Left Shift` (hold) | Descend (held back by the terrain floor — you can't fly through the ground) |
 
@@ -73,10 +76,11 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | Input | Action |
 |-------|--------|
 | Mouse | Look / steer |
-| `W` `A` `S` `D` | Fly forward/left/back/right |
+| `W` / `S` | Fly forward / back |
+| `A` / `D` (hold) | Roll left / right (the roll is kept when you enter or leave a planet's voxel world) |
+| `Q` / `E` (hold) | Turn left / right |
 | `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
-| `Q` / `E` (hold) | Roll left / right (the roll is kept when you enter or leave a planet's voxel world) |
 
 Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain. If you come in heading straight at the planet, the view eases up toward the horizon a little (move the mouse to take over).
 
