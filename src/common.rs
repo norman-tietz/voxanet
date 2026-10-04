@@ -304,6 +304,32 @@ impl PlanetData {
         }
     }
 
+    // the column's top solid layer after edits (u, v clamped to the face like the height map): the natural
+    // effective height where its chunk is unedited, else searched down from the build ceiling. Distant
+    // views (LOD meshes, the near impostor) sample it, so large builds and pits show from afar
+    pub fn surface(&self, face: u8, u: u32, v: u32) -> u32 {
+        let (u, v) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
+        let edited = self
+            .edits
+            .chunks
+            .get(&Self::get_chunk_key(BlockId {
+                face,
+                layer: 0,
+                u,
+                v,
+            }))
+            .is_some_and(|m| !m.placed.is_empty() || !m.mined.is_empty());
+        if !edited {
+            return self.effective_height(face, u, v);
+        }
+        let floor = self.mining_floor();
+        let mut layer = self.build_ceiling();
+        while layer >= floor && !self.exists(BlockId { face, layer, u, v }) {
+            layer -= 1;
+        }
+        layer // below the floor everything is bedrock
+    }
+
     // picks a spawn direction: `preferred` unless the active liquid is damaging and `preferred`'s
     // column is underwater (an unescapable death loop, since floating alone still ticks damage), in
     // which case it searches a dense, evenly-spread set of directions over the whole sphere for one
@@ -758,6 +784,40 @@ pub(crate) mod tests {
         let g = again.edit_generation();
         again.restore_edits(edits);
         assert_eq!(again.edit_generation(), g);
+    }
+
+    // the surface follows edits: a placed tower raises it, a mined pit lowers it; unedited columns
+    // keep their natural (effective) height
+    #[test]
+    fn surface_follows_placed_and_mined_blocks() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let (h3, h5) = (
+            planet.terrain.get_height(0, 3, 3),
+            planet.terrain.get_height(0, 5, 5),
+        );
+        assert_eq!(planet.surface(0, 3, 3), planet.effective_height(0, 3, 3));
+        let top = (h3 + 3).min(planet.build_ceiling());
+        for layer in h3 + 1..=top {
+            planet
+                .add_block(id(0, 3, 3, layer), BlockType::Stone)
+                .unwrap();
+        }
+        assert_eq!(planet.surface(0, 3, 3), top);
+        planet.remove_block(id(0, 5, 5, h5)).unwrap();
+        planet.remove_block(id(0, 5, 5, h5 - 1)).unwrap();
+        assert_eq!(planet.surface(0, 5, 5), h5 - 2);
+        // a column of an edited chunk that wasn't itself edited: natural height
+        assert_eq!(planet.surface(0, 7, 7), planet.effective_height(0, 7, 7));
+    }
+
+    // columns past the face edge clamp like the height map does
+    #[test]
+    fn surface_clamps_to_the_face() {
+        let planet = PlanetData::new(TEST_RES);
+        assert_eq!(
+            planet.surface(0, TEST_RES, 0),
+            planet.surface(0, TEST_RES - 1, 0)
+        );
     }
 
     fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {

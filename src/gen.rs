@@ -710,10 +710,10 @@ impl MeshGen {
             let abs_u = (key.x as i64 + step_u).clamp(0, data.resolution as i64) as u32;
             let abs_v = (key.y as i64 + step_v).clamp(0, data.resolution as i64) as u32;
 
-            // oceans are flat at sea level from afar (LOD surfaces sit at layer h, like the land)
+            // the edited surface (natural height where unedited, LOD surfaces sit at layer h like the
+            // land); oceans and liquid-less basins are flat at sea level from afar, like the water table
             let h = data
-                .terrain
-                .get_height(key.face, abs_u, abs_v)
+                .surface(key.face, abs_u, abs_v)
                 .max(data.terrain.sea_level());
             CoordSystem::get_vertex_pos(key.face, abs_u, abs_v, h, data.resolution)
         };
@@ -751,16 +751,16 @@ impl MeshGen {
                     (key.x + offset_u).min(data.resolution - 1),
                     (key.y + offset_v).min(data.resolution - 1),
                 );
-                let h = data.terrain.get_height(key.face, su, sv);
-                let surface = crate::material::natural_type(
-                    &data.terrain,
-                    &def.palette,
-                    data.mining_floor(),
-                    key.face,
-                    su,
-                    sv,
-                    h,
-                );
+                let h = data.surface(key.face, su, sv);
+                // the block on top, edits included (the natural material where unedited)
+                let surface = data
+                    .block_type(BlockId {
+                        face: key.face,
+                        layer: h,
+                        u: su,
+                        v: sv,
+                    })
+                    .unwrap_or(def.palette.beach);
                 let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
                 let color = if h < data.terrain.sea_level() {
                     match def.liquid {
@@ -1286,6 +1286,67 @@ mod biome_tests {
             )
             .unwrap();
         assert_eq!(water_quads(&planet, face, u, v), before - 1);
+    }
+
+    fn lod_key_for(face: u8, u: u32, v: u32) -> crate::common::LodKey {
+        // the finest LOD node size (two chunks) containing the column: one vertex per column
+        let size = CHUNK_SIZE * 2;
+        crate::common::LodKey {
+            face,
+            x: u / size * size,
+            y: v / size * size,
+            size,
+        }
+    }
+
+    // a placed tower changes the LOD mesh where it is
+    #[test]
+    fn lod_mesh_follows_edits() {
+        let mut planet = PlanetData::new(64);
+        let (face, u, v) = crate::common::tests::first_land_column(&planet, 1);
+        let key = lod_key_for(face, u, v);
+        let (before, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let h = planet.terrain.get_height(face, u, v);
+        let top = (h + 4).min(planet.build_ceiling());
+        assert!(
+            top >= h + 2,
+            "sanity check: room for a two-block tower under the ceiling"
+        );
+        for layer in h + 1..=top {
+            planet
+                .add_block(
+                    crate::common::BlockId { face, layer, u, v },
+                    crate::material::BlockType::Stone,
+                )
+                .unwrap();
+        }
+        let (after, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let raised = before.iter().zip(&after).any(|(a, b)| {
+            glam::Vec3::from(b.pos).length() > glam::Vec3::from(a.pos).length() + 1.0
+        });
+        assert!(raised, "no LOD vertex rose with the tower");
+    }
+
+    // natural terrain looks exactly as before: same positions and colours
+    #[test]
+    fn unedited_lod_mesh_is_unchanged() {
+        let planet = PlanetData::new(64);
+        let key = crate::common::LodKey {
+            face: 1,
+            x: 0,
+            y: 0,
+            size: 64,
+        };
+        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let sea = planet.terrain.sea_level();
+        let def = planet.planet_type.def();
+        // vertex 0 samples column (0, 0)
+        let h = planet.terrain.get_height(1, 0, 0);
+        let expected = CoordSystem::get_vertex_pos(1, 0, 0, h.max(sea), planet.resolution);
+        assert!((glam::Vec3::from(verts[0].pos) - expected).length() < 1e-4);
+        if h < sea {
+            assert_eq!(verts[0].color, def.liquid.unwrap().shallow_color);
+        }
     }
 
     #[test]
