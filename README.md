@@ -50,7 +50,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
-| `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
+| `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground and levels your roll; `F` again cancels it; refused over lava). During the automatic climb or descent `A` / `D` and `Q` / `E` are ignored |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
@@ -71,7 +71,7 @@ Flying speed grows with altitude. Keep climbing and, a few planet radii out, the
 
 ### Space Flight
 
-In space there is no gravity and no terrain floor; a compass strip at the top of the screen shows each planet's number, type and distance (and the sun).
+In space there is no gravity and no terrain floor; a compass strip at the top of the screen shows each planet's number, type and distance (and the sun). The keys work as in planet flight and ease in and out the same way, except that a roll stays a pure roll (no banked turn without air).
 
 | Input | Action |
 |-------|--------|
@@ -82,7 +82,7 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
 
-Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain. If you come in heading straight at the planet, the view eases up toward the horizon a little (move the mouse to take over).
+Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain. If you come in heading straight at the planet, the view eases up toward the horizon a little (move the mouse, roll or turn to take over).
 
 ### Swimming
 
