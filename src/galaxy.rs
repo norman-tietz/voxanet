@@ -264,6 +264,11 @@ fn noise_seed_for(seed: u64, index: usize) -> u32 {
 }
 
 impl GalaxyPlanet {
+    // the star's angular radius seen from this planet (radians): its apparent size in the planet's sky
+    pub fn star_angular_radius(&self, star: &Star) -> f32 {
+        (star.radius / self.orbit_radius).min(1.0).asin() as f32
+    }
+
     pub fn position_at(&self, t: f64) -> DVec3 {
         let angle = self.orbit_phase + self.orbit_speed * t;
         DVec3::new(
@@ -1272,6 +1277,15 @@ mod tests {
         let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false, Vec3::Y);
         assert!((result.length() - 1.0).abs() < 1e-6);
         assert_eq!(result, Vec3::X);
+    }
+
+    #[test]
+    fn star_angular_radius_follows_size_and_distance() {
+        let g = Galaxy::generate(1);
+        let (inner, outer) = (&g.planets[0], &g.planets[6]);
+        let a = inner.star_angular_radius(&g.star);
+        assert!((a - (g.star.radius / inner.orbit_radius).asin() as f32).abs() < 1e-6);
+        assert!(outer.star_angular_radius(&g.star) < a);
     }
 
     #[test]

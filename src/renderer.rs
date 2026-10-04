@@ -67,10 +67,21 @@ pub struct BiomeUniform {
     pub cloud_dark: [f32; 4],
     pub space_color: [f32; 4],
     pub sun: [f32; 4], // rgb: the star type's sunlight (Atmosphere.sun_color); w: star angular radius
+    // the star type's look (star.wgsl StarLook) for the sky's sun disc (atmo_sun_disc)
+    pub star_surface: [f32; 4],
+    pub star_limb: [f32; 4],
+    pub star_corona: [f32; 4], // rgb, w: corona_size
+    pub star_params: [f32; 4], // granulation, granule_scale, sunspots, unused
 }
 
 impl BiomeUniform {
-    pub fn from_def(def: &crate::biome::PlanetTypeDef, sunlight: [f32; 3]) -> Self {
+    // `angular_radius`: the star's apparent radius from the installed planet (GalaxyPlanet::star_angular_radius)
+    pub fn from_def(
+        def: &crate::biome::PlanetTypeDef,
+        star: &crate::galaxy::Star,
+        angular_radius: f32,
+    ) -> Self {
+        let look = star.star_type.def();
         let (shallow, deep, behavior) = match def.liquid {
             Some(l) => (
                 l.shallow_color,
@@ -92,7 +103,11 @@ impl BiomeUniform {
             cloud_light: v4(def.atmosphere.cloud_light, 0.0),
             cloud_dark: v4(def.atmosphere.cloud_dark, 0.0),
             space_color: v4(def.atmosphere.space_color, 0.0),
-            sun: v4(sunlight, 0.0),
+            sun: v4(look.sunlight, angular_radius),
+            star_surface: v4(look.surface_color, 0.0),
+            star_limb: v4(look.limb_color, 0.0),
+            star_corona: v4(look.corona_color, look.corona_size),
+            star_params: [look.granulation, look.granule_scale, look.sunspots, 0.0],
         }
     }
 }
@@ -1922,9 +1937,17 @@ impl Renderer {
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
 
+        // the installed planet is the one the backdrop leaves out (the voxel engine draws it)
+        let angular_radius = match backdrop.content {
+            crate::galaxy_render::GalaxyContent::AllButPlanet(i) => {
+                backdrop.galaxy.planets[i].star_angular_radius(&backdrop.galaxy.star)
+            }
+            crate::galaxy_render::GalaxyContent::Everything => 0.0,
+        };
         let biome_data = BiomeUniform::from_def(
             &planet.planet_type.def(),
-            backdrop.galaxy.star.star_type.def().sunlight,
+            &backdrop.galaxy.star,
+            angular_radius,
         );
         self.queue
             .write_buffer(&self.biome_buf, 0, bytemuck::cast_slice(&[biome_data]));
@@ -2789,15 +2812,18 @@ pub(crate) mod tests {
     // the Rust BiomeUniform must match the WGSL struct: 8 vec4s now (the sun added)
     #[test]
     fn biome_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<BiomeUniform>(), 8 * 16);
+        assert_eq!(std::mem::size_of::<BiomeUniform>(), 12 * 16);
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did
     #[test]
     fn yellow_sunlight_is_todays_sun_color() {
         let def = crate::biome::PlanetType::EarthLike.def();
-        let u = BiomeUniform::from_def(&def, crate::galaxy::StarType::Yellow.def().sunlight);
+        let galaxy = crate::galaxy::Galaxy::generate(1);
+        assert_eq!(galaxy.star.star_type, crate::galaxy::StarType::Yellow);
+        let u = BiomeUniform::from_def(&def, &galaxy.star, 0.3);
         assert_eq!(&u.sun[..3], &[1.6, 1.5, 1.3]);
+        assert_eq!(u.sun[3], 0.3, "the star's angular radius");
     }
 
     #[test]

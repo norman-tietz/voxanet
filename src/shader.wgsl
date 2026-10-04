@@ -41,6 +41,10 @@ struct Biome {
     cloud_dark: vec4<f32>,
     space_color: vec4<f32>,
     sun: vec4<f32>, // rgb: sunlight (the star type's), w: star angular radius
+    star_surface: vec4<f32>, // the star type's look, for the sky's sun disc (atmo_sun_disc)
+    star_limb: vec4<f32>,
+    star_corona: vec4<f32>,  // rgb, w: corona_size
+    star_params: vec4<f32>,  // granulation, granule_scale, sunspots, unused
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
@@ -428,6 +432,10 @@ fn engine_atmosphere() -> Atmosphere {
         biome.cloud_light.rgb,
         biome.cloud_dark.rgb,
         biome.sun.rgb,
+        StarLook(biome.star_surface.rgb, biome.star_limb.rgb, biome.star_corona.rgb, biome.star_params.x,
+                 biome.star_params.y, biome.star_params.z, biome.star_corona.w),
+        biome.sun.w,
+        global.screen.w,
     );
 }
 

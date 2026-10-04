@@ -41,6 +41,9 @@ struct Atmosphere {
     cloud_light: vec3<f32>,
     cloud_dark: vec3<f32>,
     sun_color: vec3<f32>, // sunlight: the star type's (galaxy.rs StarTypeDef.sunlight)
+    star: StarLook,       // the star's look (star.wgsl), for the sun disc in the sky
+    star_angle: f32,      // the star's angular radius from this planet; 0 = no disc (impostor shells)
+    time: f32,            // seconds, for the star's boiling surface
 }
 
 // --- TONE MAPPING (ACES) ---
@@ -216,9 +219,24 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
 // white-hot. Only ever drawn where the ray truly reaches deep space (never for a ray that hit terrain
 // first), so it's automatically hidden on the planet's own night side and correctly occluded wherever
 // callers composite clouds on top afterwards.
+// the star in the sky at its real apparent size (a.star_angle), shaded like the galaxy's star (star.wgsl):
+// limb-darkened disc, then its corona, so the sky's sun and the galaxy backdrop's star match at the
+// handover. It fades with the sky's opacity like the rest of the sky (atmo_sky_over_black, fs_light).
 fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
-    let sun_cos = max(dot(ray_dir, L), 0.0);
-    return a.sun_color * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
+    if (a.star_angle <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let cos_a = clamp(dot(ray_dir, L), -1.0, 1.0);
+    let angle = acos(cos_a);
+    if (angle < a.star_angle) {
+        // the point of the star's sphere this ray sees: `x` across the disc, mu = cos of its tilt
+        let x = angle / a.star_angle;
+        let mu = sqrt(max(1.0 - x * x, 0.0));
+        let side = ray_dir - L * cos_a;
+        let n = normalize(L * mu + side * (x / max(length(side), 1e-6)));
+        return star_surface(n, mu, a.time, a.star);
+    }
+    return star_corona((angle - a.star_angle) / a.star_angle, a.star);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what
