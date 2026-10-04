@@ -9,6 +9,120 @@ use glam::{DQuat, DVec3, Quat, Vec3};
 
 pub struct Star {
     pub radius: f64,
+    pub star_type: StarType,
+}
+
+// the galaxy's star: one of five types, picked from the galaxy seed (star_type_for); sets the star's
+// look and size and the sunlight colour on its planets (spec 2026-10-04 star rendering)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StarType {
+    RedDwarf,
+    Orange,
+    Yellow,
+    White,
+    BlueGiant,
+}
+
+pub struct StarTypeDef {
+    pub name: &'static str,
+    pub surface_color: [f32; 3], // disc centre, linear, before tone mapping
+    pub limb_color: [f32; 3],    // toward the edge (limb darkening shifts warmer)
+    pub radius: f64,
+    pub granulation: f32,   // surface noise contrast 0..1
+    pub granule_scale: f32, // noise frequency over the unit sphere
+    pub sunspots: f32,      // share of the surface covered by spots 0..1
+    pub corona_color: [f32; 3],
+    pub corona_size: f32,   // glow falloff length in star radii
+    pub sunlight: [f32; 3], // the planets' sunlight (Atmosphere.sun_color)
+}
+
+const STAR_TYPES: [StarTypeDef; 5] = [
+    StarTypeDef {
+        name: "Red dwarf",
+        surface_color: [2.2, 0.9, 0.45],
+        limb_color: [1.4, 0.35, 0.12],
+        radius: 1_800.0,
+        granulation: 0.35,
+        granule_scale: 14.0,
+        sunspots: 0.12,
+        corona_color: [1.0, 0.35, 0.15],
+        corona_size: 0.35,
+        sunlight: [1.72, 1.45, 1.12],
+    },
+    StarTypeDef {
+        name: "Orange",
+        surface_color: [2.2, 1.35, 0.7],
+        limb_color: [1.5, 0.6, 0.22],
+        radius: 2_400.0,
+        granulation: 0.3,
+        granule_scale: 16.0,
+        sunspots: 0.08,
+        corona_color: [1.0, 0.55, 0.25],
+        corona_size: 0.4,
+        sunlight: [1.68, 1.48, 1.18],
+    },
+    StarTypeDef {
+        name: "Yellow",
+        surface_color: [2.0, 1.75, 1.25],
+        limb_color: [1.5, 0.95, 0.45],
+        radius: 3_000.0,
+        granulation: 0.25,
+        granule_scale: 18.0,
+        sunspots: 0.05,
+        corona_color: [1.0, 0.8, 0.5],
+        corona_size: 0.45,
+        sunlight: [1.6, 1.5, 1.3],
+    },
+    StarTypeDef {
+        name: "White",
+        surface_color: [1.85, 1.85, 1.9],
+        limb_color: [1.3, 1.2, 1.05],
+        radius: 3_300.0,
+        granulation: 0.2,
+        granule_scale: 20.0,
+        sunspots: 0.03,
+        corona_color: [0.85, 0.9, 1.0],
+        corona_size: 0.5,
+        sunlight: [1.52, 1.52, 1.48],
+    },
+    StarTypeDef {
+        name: "Blue giant",
+        surface_color: [1.5, 1.75, 2.3],
+        limb_color: [1.0, 1.15, 1.6],
+        radius: 3_600.0,
+        granulation: 0.15,
+        granule_scale: 22.0,
+        sunspots: 0.0,
+        corona_color: [0.55, 0.7, 1.0],
+        corona_size: 0.6,
+        sunlight: [1.38, 1.5, 1.68],
+    },
+];
+
+impl StarType {
+    pub const ALL: [StarType; 5] = [
+        StarType::RedDwarf,
+        StarType::Orange,
+        StarType::Yellow,
+        StarType::White,
+        StarType::BlueGiant,
+    ];
+
+    pub fn def(self) -> &'static StarTypeDef {
+        &STAR_TYPES[self as usize]
+    }
+}
+
+// the star type of the galaxy with this seed: a bit-mixing hash (fmix64, as planet_radius_for) of the
+// seed alone, independent of the planets' hashes
+pub fn star_type_for(seed: u64) -> StarType {
+    let mut h = seed.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ 0x5DEE_CE66_D1CE_4E5B;
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^= h >> 33;
+    StarType::ALL[(h % StarType::ALL.len() as u64) as usize]
 }
 
 impl Star {
@@ -39,7 +153,6 @@ const PLANET_COUNT: usize = 7;
 const INNER_ORBIT_RADIUS: f64 = 8_000.0;
 const ORBIT_RADIUS_GROWTH: f64 = 1.5; // each planet this many times farther out than the last
 const INNER_ORBIT_PERIOD_SECS: f64 = 180.0;
-const STAR_RADIUS: f64 = 3_000.0;
 const MIN_PLANET_RADIUS: f32 = 40.0;
 const MAX_PLANET_RADIUS: f32 = 250.0;
 // most planets a galaxy can hold (generated + /galaxy add): the galaxy renderer sizes its per-planet
@@ -64,9 +177,11 @@ impl Galaxy {
                 }
             })
             .collect();
+        let star_type = star_type_for(seed);
         Self {
             star: Star {
-                radius: STAR_RADIUS,
+                radius: star_type.def().radius,
+                star_type,
             },
             planets,
             seed,
@@ -1157,6 +1272,41 @@ mod tests {
         let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false, Vec3::Y);
         assert!((result.length() - 1.0).abs() < 1e-6);
         assert_eq!(result, Vec3::X);
+    }
+
+    #[test]
+    fn star_type_is_seeded() {
+        assert_eq!(star_type_for(7), star_type_for(7));
+        let seen: std::collections::HashSet<_> = (0..200u64).map(star_type_for).collect();
+        assert_eq!(seen.len(), StarType::ALL.len(), "not every type appears");
+        let g = Galaxy::generate(9);
+        assert_eq!(g.star.star_type, star_type_for(9));
+        assert_eq!(g.star.radius, star_type_for(9).def().radius);
+    }
+
+    #[test]
+    fn every_star_keeps_its_heat_zone_off_the_orbits() {
+        for t in StarType::ALL {
+            let limit = INNER_ORBIT_RADIUS - MAX_PLANET_RADIUS as f64;
+            assert!(HEAT_ZONE_RADII * t.def().radius < limit, "{}", t.def().name);
+        }
+    }
+
+    #[test]
+    fn sunlight_is_bright_and_only_moderately_tinted() {
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let today = lum([1.6, 1.5, 1.3]);
+        for t in StarType::ALL {
+            let s = t.def().sunlight;
+            assert!(
+                (lum(s) - today).abs() < 0.05 * today,
+                "{}: {s:?}",
+                t.def().name
+            );
+            let (lo, hi) = (s[0].min(s[1]).min(s[2]), s[0].max(s[1]).max(s[2]));
+            assert!(lo >= 0.6 * hi, "{}: {s:?}", t.def().name);
+        }
+        assert_eq!(StarType::Yellow.def().sunlight, [1.6, 1.5, 1.3]);
     }
 
     // heat: none outside HEAT_ZONE_RADII (the innermost planet's orbit included), rising toward the

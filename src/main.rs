@@ -60,6 +60,15 @@ fn parse_biome_arg() -> crate::biome::PlanetType {
     })
 }
 
+// --seed <n>: the galaxy seed (default 1): sets the star type and the planets
+fn parse_seed(args: &[String]) -> u64 {
+    args.iter()
+        .skip_while(|a| *a != "--seed")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
+
 // the world-space distance from the planet center to just above the ground along `dir`, using the
 // liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
 fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
@@ -75,10 +84,12 @@ fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
 fn main() {
     SystemDiagnostics::print_startup_info();
     let initial_biome = parse_biome_arg();
+    let seed = parse_seed(&std::env::args().collect::<Vec<_>>());
     let event_loop = EventLoop::new().unwrap();
     let mut app = App {
         game: None,
         initial_biome,
+        seed,
     };
     event_loop.run_app(&mut app).unwrap();
 }
@@ -87,6 +98,7 @@ struct App {
     // created in `resumed`, once a window can be opened
     game: Option<Game>,
     initial_biome: crate::biome::PlanetType, // from --biome, see parse_biome_arg()
+    seed: u64,                               // the galaxy seed, from --seed (parse_seed)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -256,11 +268,15 @@ struct Game {
 }
 
 impl Game {
-    fn new(window: Arc<Window>, initial_biome: crate::biome::PlanetType) -> Self {
+    fn new(window: Arc<Window>, initial_biome: crate::biome::PlanetType, seed: u64) -> Self {
         let mut renderer = pollster::block_on(Renderer::new(window));
         let mut controller = Controller::new();
         let mut player = Player::new();
-        let galaxy = crate::galaxy::Galaxy::generate(1);
+        let galaxy = crate::galaxy::Galaxy::generate(seed);
+        println!(
+            "Galaxy seed {seed}: {} star",
+            galaxy.star.star_type.def().name
+        );
         let start_planet = galaxy.start_planet_index(initial_biome);
 
         // every planet lives in the galaxy: start on one of them, standing at local noon
@@ -937,7 +953,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes().with_title("voxanet"))
                 .unwrap(),
         );
-        self.game = Some(Game::new(window, self.initial_biome));
+        self.game = Some(Game::new(window, self.initial_biome, self.seed));
     }
 
     fn window_event(
@@ -1010,6 +1026,15 @@ mod tests {
         stash_edits(&mut store, None, 2, &mut planet);
         assert!(store.is_empty());
         assert!(!planet.edits.is_empty());
+    }
+
+    #[test]
+    fn seed_flag_is_parsed_with_fallback() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_seed(&args(&["voxanet", "--seed", "42"])), 42);
+        assert_eq!(parse_seed(&args(&["voxanet"])), 1);
+        assert_eq!(parse_seed(&args(&["voxanet", "--seed", "x"])), 1);
+        assert_eq!(parse_seed(&args(&["voxanet", "--seed"])), 1);
     }
 
     // the near impostor is outdated once the planet is edited after it was built
