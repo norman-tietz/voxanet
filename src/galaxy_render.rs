@@ -60,6 +60,30 @@ fn star_depth(distance: f32) -> f32 {
     NEAR_PLANE / distance
 }
 
+// the star for the lens flare (flare.rs): its screen position (NDC), the reversed-Z depth of its nearest
+// point as the star pipeline writes it, and its angular radius; None when it's behind the camera
+pub(crate) fn star_on_screen(
+    camera: &GalaxyCamera,
+    galaxy: &Galaxy,
+    aspect: f32,
+) -> Option<(glam::Vec2, f32, f32)> {
+    let offset = (galaxy.star.position() - camera.position).as_vec3();
+    let view = Mat4::from_quat(camera.rotation).inverse();
+    let clip = projection(camera.fov_y, aspect) * view * offset.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let dist = offset.length();
+    let r = galaxy.star.radius as f32;
+    let along = offset.dot(camera.rotation * Vec3::NEG_Z);
+    let nearest = ((dist - r) * along / dist).max(NEAR_PLANE);
+    Some((
+        glam::Vec2::new(clip.x / clip.w, clip.y / clip.w),
+        star_depth(nearest),
+        (r / dist).min(1.0).asin(),
+    ))
+}
+
 // the star is never drawn smaller than this angular radius, so a distant sun stays a visible point
 const STAR_MIN_ANGULAR_RADIUS: f32 = 0.0025; // ~0.14 degrees, a few pixels at 1080p
 

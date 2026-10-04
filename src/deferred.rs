@@ -328,7 +328,8 @@ impl Deferred {
         let albedo = tex(ALBEDO_FORMAT, target);
         let normal = tex(NORMAL_FORMAT, target);
         let dist = tex(DIST_FORMAT, target);
-        let depth = tex(DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        // also bound as a texture: the lens flare reads it for its occlusion taps (flare.wgsl)
+        let depth = tex(DEPTH_FORMAT, target);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("deferred_textures_bind"),
             layout,
@@ -358,6 +359,11 @@ impl Deferred {
             self.depth,
             self.textures_bind,
         ) = Self::make_targets(device, &self.textures_layout, width, height);
+    }
+
+    // the camera-distance G-buffer (0 = sky), for the lens flare's occlusion taps
+    pub fn dist_view(&self) -> &wgpu::TextureView {
+        &self.dist
     }
 
     // colour attachments of the geometry pass, cleared to "sky" (distance 0)

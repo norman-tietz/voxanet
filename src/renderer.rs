@@ -26,6 +26,14 @@ use winit::window::Window;
 
 // the scene shader: the shared atmosphere maths (atmosphere.wgsl, also used by the galaxy impostors)
 // followed by the voxel engine's own shader
+// the lens flare (flare.wgsl), with the atmosphere (atmo_cloud_shadow) and star code it uses
+pub(crate) const FLARE_SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    include_str!("star.wgsl"),
+    "\n",
+    include_str!("flare.wgsl")
+);
+
 pub(crate) const SCENE_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
     include_str!("star.wgsl"),
@@ -214,6 +222,10 @@ pub struct Renderer {
     pub hw_shadows: bool,               // use hw_rt instead of the ray march (console: /hw_shadows)
     screenshot_request: Option<String>, // set by /screenshot, consumed at the end of the next render()
     flash_pipeline: wgpu::RenderPipeline,
+    flare_pipeline: wgpu::RenderPipeline, // lens flares (flare.wgsl), drawn before the HUD text
+    flare_layout: wgpu::BindGroupLayout,
+    flare_buf: wgpu::Buffer,
+    flare_bind: wgpu::BindGroup, // rebuilt on resize (it binds the G-buffer distance and depth)
     flash_buf: wgpu::Buffer,
     flash_bind: wgpu::BindGroup,
     heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
@@ -663,6 +675,88 @@ impl Renderer {
         });
 
         // --- FLASH PIPELINE --- (full-screen triangle, only needs local.params.x for its opacity)
+        // lens flare (flare.wgsl): its uniform plus the depth / G-buffer distance it reads for occlusion
+        let flare_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("flare_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let flare_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Flare Uniform"),
+            size: std::mem::size_of::<crate::flare::FlareUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let flare_bind = Self::make_flare_bind(&device, &flare_layout, &flare_buf, &deferred);
+        let flare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flare.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(FLARE_SHADER.into()),
+        });
+        let flare_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("flare_pipeline_layout"),
+                bind_group_layouts: &[Some(&flare_layout)],
+                immediate_size: 0,
+            });
+        let flare_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Flare Pipeline"),
+            layout: Some(&flare_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &flare_shader,
+                entry_point: Some("vs_flare"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &flare_shader,
+                entry_point: Some("fs_flare"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let flash_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[None, Some(&local_layout)],
@@ -815,6 +909,10 @@ impl Renderer {
             local_buf_player,
             local_bind_player,
             flash_pipeline,
+            flare_pipeline,
+            flare_layout,
+            flare_buf,
+            flare_bind,
             flash_buf,
             flash_bind,
             heat_buf,
@@ -973,6 +1071,94 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.deferred.resize(&self.device, width, height);
         self.rt_blur.resize(&self.device, width, height);
+        self.flare_bind = Self::make_flare_bind(
+            &self.device,
+            &self.flare_layout,
+            &self.flare_buf,
+            &self.deferred,
+        );
+    }
+
+    fn make_flare_bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        buf: &wgpu::Buffer,
+        deferred: &Deferred,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("flare_bind"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(deferred.dist_view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&deferred.depth),
+                },
+            ],
+        })
+    }
+
+    // the lens flare's uniform for a sun at `ndc` (None: behind the camera), with `angular_radius`;
+    // `boost` scales it (heat, night, underwater); returns whether there's anything to draw
+    #[allow(clippy::too_many_arguments)]
+    fn update_flare(
+        &self,
+        ndc: Option<glam::Vec2>,
+        expected_depth: f32,
+        angular_radius: f32,
+        boost: f32,
+        star: &crate::galaxy::StarTypeDef,
+        planet_mode: bool,
+        camera: [f32; 4],
+        light: [f32; 4],
+    ) -> bool {
+        let Some(ndc) = ndc else {
+            return false;
+        };
+        let intensity = boost
+            * crate::flare::flare_intensity(
+                1.0,
+                crate::flare::on_screen_factor(ndc, crate::flare::OFF_SCREEN_MARGIN),
+                angular_radius,
+            );
+        if intensity <= 0.001 {
+            return false;
+        }
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        // taps across half the sun's apparent radius (80 degrees vertical field of view)
+        let radius_px = angular_radius.tan() / (40f32.to_radians()).tan() * h / 2.0;
+        let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
+        self.queue.write_buffer(
+            &self.flare_buf,
+            0,
+            bytemuck::cast_slice(&[crate::flare::FlareUniform {
+                sun: [ndc.x, ndc.y, expected_depth, intensity],
+                tint: v4(star.corona_color),
+                tint2: v4(star.surface_color),
+                mode: [
+                    if planet_mode { 1.0 } else { 0.0 },
+                    (radius_px * 0.5).clamp(2.0, 40.0),
+                    w,
+                    h,
+                ],
+                camera,
+                light,
+            }]),
+        );
+        true
+    }
+
+    fn draw_flare(&self, pass: &mut wgpu::RenderPass) {
+        pass.set_pipeline(&self.flare_pipeline);
+        pass.set_bind_group(0, &self.flare_bind, &[]);
+        pass.draw(0..6, 0..8);
     }
 
     pub fn update_console_mesh(&mut self, t: f32) {
@@ -1949,6 +2135,40 @@ impl Renderer {
             &backdrop.galaxy.star,
             angular_radius,
         );
+        // lens flare: the sun projected far along its direction; none at night (below the horizon) or
+        // under water, dimmed by clouds on the GPU
+        let flare = {
+            let sun_far = mvp * (cam_pos + sun_dir.normalize() * 1000.0).extend(1.0);
+            let ndc = (sun_far.w > 0.0)
+                .then(|| glam::Vec2::new(sun_far.x / sun_far.w, sun_far.y / sun_far.w));
+            let up = cam_pos.normalize_or_zero();
+            let sea_radius = if planet.planet_type.def().liquid.is_none() {
+                0.0
+            } else {
+                CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
+            };
+            let daylight = if sun_dir.dot(up) > 0.0 { 1.0 } else { 0.0 };
+            let above_water = if cam_pos.length() < sea_radius {
+                0.0
+            } else {
+                1.0
+            };
+            self.update_flare(
+                ndc,
+                0.0,
+                angular_radius,
+                daylight * above_water,
+                backdrop.galaxy.star.star_type.def(),
+                true,
+                [
+                    cam_pos.x,
+                    cam_pos.y,
+                    cam_pos.z,
+                    planet.resolution as f32 * 0.5,
+                ],
+                [sun_dir.x, sun_dir.y, sun_dir.z, time],
+            )
+        };
         self.queue
             .write_buffer(&self.biome_buf, 0, bytemuck::cast_slice(&[biome_data]));
 
@@ -2510,6 +2730,9 @@ impl Renderer {
                 multiview_mask: None,
             });
 
+            if flare {
+                self.draw_flare(&mut pass);
+            }
             self.text_renderer
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)
                 .unwrap();
@@ -2577,7 +2800,18 @@ impl Renderer {
             camera.position.distance(galaxy.star.position()),
             galaxy.star.radius,
         );
-        self.render_galaxy_overlay(&view, camera, galaxy, t, heat);
+        let on_screen = crate::galaxy_render::star_on_screen(camera, galaxy, screen.0 / screen.1);
+        let flare = self.update_flare(
+            on_screen.map(|s| s.0),
+            on_screen.map_or(0.0, |s| s.1),
+            on_screen.map_or(0.0, |s| s.2),
+            1.0 - heat, // the heat glow already dominates near the star
+            galaxy.star.star_type.def(),
+            false,
+            [0.0; 4],
+            [0.0; 4],
+        );
+        self.render_galaxy_overlay(&view, camera, galaxy, t, heat, flare);
         if let Some(path) = self.screenshot_request.take() {
             crate::screenshot::capture(
                 &self.device,
@@ -2602,7 +2836,8 @@ impl Renderer {
         camera: &crate::galaxy_render::GalaxyCamera,
         galaxy: &crate::galaxy::Galaxy,
         t: f64,
-        heat: f32, // the star's heat at the camera (galaxy::star_heat): glow and warning
+        heat: f32,   // the star's heat at the camera (galaxy::star_heat): glow and warning
+        flare: bool, // draw the lens flare (update_flare wrote its uniform)
     ) {
         const COMPASS_HALF_WIDTH: f32 = 240.0; // px, covers ±COMPASS_SPAN_DEG
         const COMPASS_SPAN_DEG: f32 = 90.0;
@@ -2793,8 +3028,11 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // the heat glow under the HUD text, so the warning and compass stay readable
+            // the heat glow and the lens flare under the HUD text, so the warning and compass stay readable
             self.draw_full_screen(&mut pass, &self.heat_bind, heat_alpha);
+            if flare {
+                self.draw_flare(&mut pass);
+            }
             self.text_renderer
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)
                 .unwrap();
@@ -2808,6 +3046,11 @@ impl Renderer {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn flare_shader_is_valid_wgsl() {
+        assert_valid_wgsl(FLARE_SHADER);
+    }
 
     // the Rust BiomeUniform must match the WGSL struct: 8 vec4s now (the sun added)
     #[test]

@@ -6,6 +6,7 @@ mod common;
 mod controller;
 mod deferred;
 mod entity;
+mod flare;
 mod galaxy;
 mod galaxy_render;
 mod galaxy_terrain;
