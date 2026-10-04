@@ -217,6 +217,18 @@ impl GalaxyPlanet {
         data.switch_planet_type(self.planet_type);
         data
     }
+
+    // bake() plus the edits kept from an earlier visit (refused if they belong to another terrain)
+    pub fn bake_with_edits(
+        &self,
+        edits: Option<crate::common::PlanetEdits>,
+    ) -> crate::common::PlanetData {
+        let mut data = self.bake();
+        if let Some(edits) = edits {
+            data.restore_edits(edits);
+        }
+        data
+    }
 }
 
 // how close flight must come to a planet's centre, in that planet's radii, to be captured into its
@@ -452,6 +464,28 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a bake with stored edits contains them; one without doesn't
+    #[test]
+    fn bake_with_edits_restores_them() {
+        let galaxy = Galaxy::generate(1);
+        let planet = &galaxy.planets[0];
+        let mut first = planet.bake();
+        let (face, u, v) = (0u8, 40u32, 40u32);
+        let top = first.terrain.get_height(face, u, v) + 1; // one block on the surface: under the ceiling
+        let block = crate::common::BlockId {
+            face,
+            layer: top,
+            u,
+            v,
+        };
+        first
+            .add_block(block, crate::material::BlockType::Stone)
+            .unwrap();
+        let edits = first.take_edits();
+        assert!(planet.bake_with_edits(Some(edits)).exists(block));
+        assert!(!planet.bake_with_edits(None).exists(block));
+    }
 
     #[test]
     fn start_planet_is_the_first_of_the_preferred_type() {

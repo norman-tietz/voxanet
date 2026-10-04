@@ -111,15 +111,21 @@ struct BakedPlanet {
     data: PlanetData,
     near_verts: Vec<crate::common::Vertex>,
     near_indices: Vec<u32>,
+    impostor_generation: u64, // data.edit_generation() when the near impostor was built
 }
 
 // bakes a galaxy planet's voxel world and its near impostor: synchronously at start-up and for
 // /galaxy home, on a background thread on capture (start_bake)
-fn bake_planet(galaxy: &crate::galaxy::Galaxy, index: usize) -> BakedPlanet {
-    let data = galaxy.planets[index].bake();
+fn bake_planet(
+    galaxy: &crate::galaxy::Galaxy,
+    index: usize,
+    edits: Option<crate::common::PlanetEdits>,
+) -> BakedPlanet {
+    let data = galaxy.planets[index].bake_with_edits(edits);
     let (near_verts, near_indices) = crate::galaxy_terrain::near_impostor_mesh(&data);
     BakedPlanet {
         index,
+        impostor_generation: data.edit_generation(),
         data,
         near_verts,
         near_indices,
@@ -129,20 +135,39 @@ fn bake_planet(galaxy: &crate::galaxy::Galaxy, index: usize) -> BakedPlanet {
 fn start_bake(
     galaxy: &crate::galaxy::Galaxy,
     index: usize,
+    edits: Option<crate::common::PlanetEdits>,
 ) -> std::sync::mpsc::Receiver<BakedPlanet> {
     let (tx, rx) = std::sync::mpsc::channel();
     let target = galaxy.planets[index];
     std::thread::spawn(move || {
-        let data = target.bake();
+        let data = target.bake_with_edits(edits);
         let (near_verts, near_indices) = crate::galaxy_terrain::near_impostor_mesh(&data);
         let _ = tx.send(BakedPlanet {
             index,
+            impostor_generation: data.edit_generation(),
             data,
             near_verts,
             near_indices,
         });
     });
     rx
+}
+
+// before planet `incoming` is installed, keeps the installed planet's edits for its next visit (nothing
+// to keep at start-up, when re-installing the same planet, or when it's unedited)
+fn stash_edits(
+    store: &mut std::collections::HashMap<usize, crate::common::PlanetEdits>,
+    installed: Option<usize>,
+    incoming: usize,
+    planet: &mut PlanetData,
+) {
+    let Some(installed) = installed.filter(|&i| i != incoming) else {
+        return;
+    };
+    let edits = planet.take_edits();
+    if !edits.is_empty() {
+        store.insert(installed, edits);
+    }
 }
 
 // makes a baked galaxy planet the voxel engine's world: palette, full mesh reload streaming from
@@ -215,6 +240,9 @@ struct Game {
     clock: Instant,            // shared game clock: galaxy orbits and planet day/night
     loaded_world: usize,       // the galaxy planet the voxel engine holds (always one)
     start_planet: usize,       // where the game starts and /galaxy home returns to
+    // each planet's edits while another planet is installed (stash_edits), handed to its next bake
+    edits_by_planet: std::collections::HashMap<usize, crate::common::PlanetEdits>,
+    impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
 }
 
 impl Game {
@@ -227,7 +255,8 @@ impl Game {
 
         // every planet lives in the galaxy: start on one of them, standing at local noon
         let mut planet = PlanetData::new(8); // placeholder, replaced right below
-        let baked = bake_planet(&galaxy, start_planet);
+        let baked = bake_planet(&galaxy, start_planet, None);
+        let impostor_generation = baked.impostor_generation;
         // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
         // turned on past noon while baking
         let clock = Instant::now();
@@ -271,6 +300,8 @@ impl Game {
             clock,
             loaded_world: start_planet,
             start_planet,
+            edits_by_planet: std::collections::HashMap::new(),
+            impostor_generation,
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -294,6 +325,8 @@ impl Game {
             clock,
             loaded_world,
             start_planet,
+            edits_by_planet,
+            impostor_generation,
         } = self;
 
         let now = Instant::now();
@@ -379,7 +412,9 @@ impl Game {
                     );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
                     if *loaded_world != i && *baking != Some(i) {
-                        *bake_rx = Some(start_bake(galaxy, i));
+                        // the stored edits stay in the store until this bake is installed, so a
+                        // dropped bake loses nothing
+                        *bake_rx = Some(start_bake(galaxy, i, edits_by_planet.get(&i).cloned()));
                         *baking = Some(i);
                     }
                     // once loaded, the voxel engine streams from the flight's planet-frame position,
@@ -450,8 +485,13 @@ impl Game {
                         .to_planet_frame(galaxy_flight.position, clock.elapsed().as_secs_f64()),
                 };
                 let index = baked.index;
+                let generation = baked.impostor_generation;
+                // the installed planet keeps its edits for its next visit; the new one has its own now
+                stash_edits(edits_by_planet, Some(*loaded_world), index, planet);
+                edits_by_planet.remove(&index);
                 install_world(renderer, controller, planet, baked, local.as_vec3());
                 *loaded_world = index;
+                *impostor_generation = generation;
                 *voxel_ready_announced = false;
                 println!("Baked #{} (res {})", index + 1, planet.resolution);
             }
@@ -480,11 +520,14 @@ impl Game {
                     *baking = None;
                     let i = *start_planet;
                     if *loaded_world != i {
-                        let baked = bake_planet(galaxy, i);
+                        let baked = bake_planet(galaxy, i, edits_by_planet.remove(&i));
+                        let generation = baked.impostor_generation;
                         // the time after the bake: the planet keeps turning while it bakes
                         let t = clock.elapsed().as_secs_f64();
                         let spawn = noon_spawn(&baked.data, galaxy, i, t);
+                        stash_edits(edits_by_planet, Some(*loaded_world), i, planet);
                         install_world(renderer, controller, planet, baked, spawn);
+                        *impostor_generation = generation;
                         *loaded_world = i;
                     }
                     let t = clock.elapsed().as_secs_f64();
@@ -864,6 +907,50 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mined_planet() -> PlanetData {
+        let mut planet = PlanetData::new(32);
+        let h = planet.terrain.get_height(0, 3, 3);
+        planet
+            .remove_block(crate::common::BlockId {
+                face: 0,
+                layer: h,
+                u: 3,
+                v: 3,
+            })
+            .unwrap();
+        planet
+    }
+
+    // installing a different planet stores the installed planet's edits under its number
+    #[test]
+    fn stash_stores_the_installed_planets_edits() {
+        let mut store = std::collections::HashMap::new();
+        let mut planet = mined_planet();
+        stash_edits(&mut store, Some(2), 5, &mut planet);
+        assert!(store.get(&2).is_some_and(|e| !e.is_empty()));
+        assert!(planet.edits.is_empty());
+    }
+
+    // re-installing the planet that's already installed (or the first install at start-up) stores nothing
+    #[test]
+    fn stash_is_a_no_op_for_the_installed_planet() {
+        let mut store = std::collections::HashMap::new();
+        let mut planet = mined_planet();
+        stash_edits(&mut store, Some(2), 2, &mut planet);
+        stash_edits(&mut store, None, 2, &mut planet);
+        assert!(store.is_empty());
+        assert!(!planet.edits.is_empty());
+    }
+
+    // an unedited planet takes no room in the store
+    #[test]
+    fn stash_skips_unedited_planets() {
+        let mut store = std::collections::HashMap::new();
+        let mut planet = PlanetData::new(32);
+        stash_edits(&mut store, Some(2), 5, &mut planet);
+        assert!(store.is_empty());
+    }
 
     // a bake finishes on another thread some time after capture; by then the player may have flown
     // out of orbit, gone home, landed elsewhere or been captured by another planet
