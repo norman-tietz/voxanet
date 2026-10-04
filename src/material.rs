@@ -136,13 +136,13 @@ pub fn surface_type(
 pub fn natural_type(
     terrain: &PlanetTerrain,
     palette: &Palette,
-    has_core: bool,
+    bedrock_below: u32, // layers below this are bedrock (PlanetData::mining_floor)
     face: u8,
     u: u32,
     v: u32,
     layer: u32,
 ) -> BlockType {
-    if has_core && layer < CORE_LAYERS {
+    if layer < bedrock_below {
         return BlockType::Bedrock;
     }
     let depth = terrain.get_height(face, u, v).saturating_sub(layer);

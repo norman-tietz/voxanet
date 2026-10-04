@@ -755,7 +755,7 @@ impl MeshGen {
                 let surface = crate::material::natural_type(
                     &data.terrain,
                     &def.palette,
-                    data.has_core,
+                    data.mining_floor(),
                     key.face,
                     su,
                     sv,
@@ -1231,7 +1231,9 @@ mod biome_tests {
         let sea = planet.terrain.sea_level();
         let before = water_quads(&planet, face, u, v);
         for layer in (sea..=planet.terrain.get_height(face, u, v)).rev() {
-            planet.remove_block(crate::common::BlockId { face, layer, u, v });
+            planet
+                .remove_block(crate::common::BlockId { face, layer, u, v })
+                .unwrap();
         }
         assert_eq!(water_quads(&planet, face, u, v), before + 1);
     }
@@ -1244,12 +1246,14 @@ mod biome_tests {
         let (face, u, v) = crate::common::tests::first_land_column(&planet, 2);
         let sea = planet.terrain.sea_level();
         let before = water_quads(&planet, face, u, v);
-        planet.remove_block(crate::common::BlockId {
-            face,
-            layer: sea,
-            u,
-            v,
-        });
+        planet
+            .remove_block(crate::common::BlockId {
+                face,
+                layer: sea,
+                u,
+                v,
+            })
+            .unwrap();
         assert_eq!(water_quads(&planet, face, u, v), before);
     }
 
@@ -1270,15 +1274,17 @@ mod biome_tests {
             .find(|&(f, u, v)| planet.terrain.get_height(f, u, v) < sea)
             .unwrap();
         let before = water_quads(&planet, face, u, v);
-        planet.add_block(
-            crate::common::BlockId {
-                face,
-                layer: sea,
-                u,
-                v,
-            },
-            crate::material::BlockType::Stone,
-        );
+        planet
+            .add_block(
+                crate::common::BlockId {
+                    face,
+                    layer: sea,
+                    u,
+                    v,
+                },
+                crate::material::BlockType::Stone,
+            )
+            .unwrap();
         assert_eq!(water_quads(&planet, face, u, v), before - 1);
     }
 

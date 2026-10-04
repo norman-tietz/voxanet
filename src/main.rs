@@ -161,6 +161,17 @@ fn install_world(
     renderer.log_memory(planet);
 }
 
+// the HUD status line for a refused edit; None: the block would overlap the player
+fn edit_refused_message(why: Option<crate::common::EditRefused>) -> &'static str {
+    use crate::common::EditRefused;
+    match why {
+        Some(EditRefused::BuildLimit) => "Build limit reached.",
+        Some(EditRefused::MiningFloor) => "Bedrock: can't dig deeper.",
+        Some(EditRefused::EditLimit) => "Too many edits on this planet.",
+        None => "No room: you're in the way.",
+    }
+}
+
 // where a player stands at local noon on galaxy planet `index` (whose voxel world is `planet`):
 // the surface point facing the star, moved to dry land if that is lava
 fn noon_spawn(
@@ -687,12 +698,28 @@ impl Game {
                                 true,
                             );
                             if let Some((place_id, _)) = place_info {
-                                planet.add_block(place_id, controller.selected_block);
-                                renderer.refresh_neighbors(place_id, planet);
+                                // a block where the player stands would trap them
+                                let result = if crate::physics::Physics::overlaps_block(
+                                    player.position,
+                                    place_id,
+                                    planet,
+                                ) {
+                                    Err(None)
+                                } else {
+                                    planet
+                                        .add_block(place_id, controller.selected_block)
+                                        .map_err(Some)
+                                };
+                                match result {
+                                    Ok(()) => renderer.refresh_neighbors(place_id, planet),
+                                    Err(why) => renderer.show_status(edit_refused_message(why)),
+                                }
                             }
                         } else if button == MouseButton::Left {
-                            planet.remove_block(id);
-                            renderer.refresh_neighbors(id, planet);
+                            match planet.remove_block(id) {
+                                Ok(()) => renderer.refresh_neighbors(id, planet),
+                                Err(why) => renderer.show_status(edit_refused_message(Some(why))),
+                            }
                         }
                         renderer.window.request_redraw();
                     } else {

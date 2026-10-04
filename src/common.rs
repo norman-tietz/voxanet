@@ -5,9 +5,25 @@ use crate::material::{self, BlockType};
 use crate::noise::PlanetTerrain;
 use bytemuck::{Pod, Zeroable};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // --- CONSTANTS ---
 pub const CHUNK_SIZE: u32 = 32;
+
+// edit limits (PlanetData::build_ceiling, mining_floor, add_block/remove_block)
+const BUILD_MARGIN: u32 = 24; // layers above the highest natural peak that can be built on
+const BEDROCK_DEPTH: u32 = 32; // layers below the lowest natural column that can be mined
+pub const MAX_EDITS: usize = 1_000_000; // placed + mined entries per planet (~60 MB)
+                                        // cloud shell radius in planet radii; must match CLOUD_ALT in atmosphere.wgsl (checked by a test)
+pub const CLOUD_ALT: f32 = 1.32;
+
+// why an edit was refused
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditRefused {
+    BuildLimit,  // above build_ceiling
+    MiningFloor, // below mining_floor
+    EditLimit,   // MAX_EDITS reached
+}
 
 // --- DATA TYPES ---
 
@@ -79,9 +95,11 @@ impl ChunkMods {
 
 #[derive(Clone)]
 pub struct PlanetData {
-    pub chunks: HashMap<ChunkKey, ChunkMods>,
+    // the player's edits, shared (copy-on-write): every mesh worker gets a clone of the planet, and
+    // cloning the Arc instead of every entry keeps that instant however much was edited
+    pub chunks: Arc<HashMap<ChunkKey, ChunkMods>>,
+    edits: usize, // entries in chunks (placed + mined), for MAX_EDITS
     pub resolution: u32,
-    pub has_core: bool,
     pub terrain: crate::noise::PlanetTerrain,
     pub planet_type: PlanetType,
     // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
@@ -101,9 +119,9 @@ impl PlanetData {
         println!("Terrain Generation Complete.");
 
         Self {
-            chunks: HashMap::new(),
+            chunks: Arc::default(),
+            edits: 0,
             resolution,
-            has_core: true,
             terrain, // <--- Store it
             planet_type: PlanetType::EarthLike,
             seed,
@@ -114,7 +132,37 @@ impl PlanetData {
     // but keeps the same terrain shape — phase 1 reuses one noise map for every planet type
     pub fn switch_planet_type(&mut self, to: PlanetType) {
         self.planet_type = to;
-        self.chunks.clear();
+        self.chunks = Arc::default();
+        self.edits = 0;
+    }
+
+    // the highest layer blocks can be placed in: BUILD_MARGIN above the highest natural peak, but not
+    // into the cloud shell (on small planets the clouds are only a few layers above the peaks)
+    pub fn build_ceiling(&self) -> u32 {
+        let (_, peak) = self.terrain.height_range();
+        let cloud_radius = CLOUD_ALT * self.resolution as f32 / 2.0;
+        let mut top = peak + BUILD_MARGIN;
+        while top > peak
+            && crate::gen::CoordSystem::get_layer_radius(top + 1, self.resolution) > cloud_radius
+        {
+            top -= 1;
+        }
+        top
+    }
+
+    // the lowest layer that can be mined: BEDROCK_DEPTH below the lowest natural column, never into the
+    // core; everything below is bedrock. Deeper, the exponential layers shrink blocks too far to move in.
+    pub fn mining_floor(&self) -> u32 {
+        let (lowest, _) = self.terrain.height_range();
+        lowest
+            .saturating_sub(BEDROCK_DEPTH)
+            .max(material::CORE_LAYERS)
+    }
+
+    // stored edit entries (placed + mined)
+    #[cfg(test)]
+    pub fn edit_count(&self) -> usize {
+        self.edits
     }
 
     fn get_chunk_key(id: BlockId) -> ChunkKey {
@@ -125,34 +173,58 @@ impl PlanetData {
         }
     }
 
-    pub fn add_block(&mut self, id: BlockId, ty: BlockType) {
+    pub fn add_block(&mut self, id: BlockId, ty: BlockType) -> Result<(), EditRefused> {
+        if id.layer > self.build_ceiling() {
+            return Err(EditRefused::BuildLimit);
+        }
         let natural = self.natural_type(id);
         let key = Self::get_chunk_key(id);
-        let mods = self.chunks.entry(key).or_insert_with(ChunkMods::new);
-
-        mods.mined.remove(&id);
+        let (was_mined, was_placed) = self.chunks.get(&key).map_or((false, false), |m| {
+            (m.mined.contains(&id), m.placed.contains_key(&id))
+        });
         // putting back what was mined there just restores the terrain
-        if natural == Some(ty) {
+        let restores = natural == Some(ty);
+        if !restores && !was_mined && !was_placed && self.edits >= MAX_EDITS {
+            return Err(EditRefused::EditLimit);
+        }
+
+        let mods = Arc::make_mut(&mut self.chunks)
+            .entry(key)
+            .or_insert_with(ChunkMods::new);
+        let before = mods.mined.len() + mods.placed.len();
+        mods.mined.remove(&id);
+        if restores {
             mods.placed.remove(&id);
         } else {
             mods.placed.insert(id, ty);
         }
+        self.edits = self.edits + mods.mined.len() + mods.placed.len() - before;
+        Ok(())
     }
 
-    pub fn remove_block(&mut self, id: BlockId) {
-        // protect the bottom 4 layers as the unbreakable core
-        if self.has_core && id.layer < 6 {
-            return;
+    pub fn remove_block(&mut self, id: BlockId) -> Result<(), EditRefused> {
+        if id.layer < self.mining_floor() {
+            return Err(EditRefused::MiningFloor);
         }
-
         let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v);
         let key = Self::get_chunk_key(id);
-        let mods = self.chunks.entry(key).or_insert_with(ChunkMods::new);
+        let (was_mined, was_placed) = self.chunks.get(&key).map_or((false, false), |m| {
+            (m.mined.contains(&id), m.placed.contains_key(&id))
+        });
+        if terrain_below && !was_mined && !was_placed && self.edits >= MAX_EDITS {
+            return Err(EditRefused::EditLimit);
+        }
 
+        let mods = Arc::make_mut(&mut self.chunks)
+            .entry(key)
+            .or_insert_with(ChunkMods::new);
+        let before = mods.mined.len() + mods.placed.len();
         mods.placed.remove(&id);
         if terrain_below {
             mods.mined.insert(id);
         }
+        self.edits = self.edits + mods.mined.len() + mods.placed.len() - before;
+        Ok(())
     }
 
     pub fn exists(&self, id: BlockId) -> bool {
@@ -305,7 +377,7 @@ impl PlanetData {
         Some(material::natural_type(
             &self.terrain,
             &def.palette,
-            self.has_core,
+            self.mining_floor(),
             id.face,
             id.u,
             id.v,
@@ -408,7 +480,7 @@ pub(crate) mod tests {
         let pos = center(&planet, face, u, v, sea);
         assert!(planet.water_depth(pos).is_none(), "sanity check: dry land");
         for layer in (sea - 1..=planet.terrain.get_height(face, u, v)).rev() {
-            planet.remove_block(BlockId { face, layer, u, v });
+            planet.remove_block(BlockId { face, layer, u, v }).unwrap();
         }
         assert!(planet.water_depth(pos).is_some_and(|d| d > 0.0));
     }
@@ -421,16 +493,141 @@ pub(crate) mod tests {
         let sea = planet.terrain.sea_level();
         let pos = center(&planet, face, u, v, sea + 1);
         assert!(planet.water_depth(pos).is_some(), "sanity check: ocean");
-        planet.add_block(
-            BlockId {
-                face,
-                layer: sea,
-                u,
-                v,
-            },
-            crate::material::BlockType::Stone,
-        );
+        planet
+            .add_block(
+                BlockId {
+                    face,
+                    layer: sea,
+                    u,
+                    v,
+                },
+                crate::material::BlockType::Stone,
+            )
+            .unwrap();
         assert!(planet.water_depth(pos).is_none());
+    }
+
+    fn id(face: u8, u: u32, v: u32, layer: u32) -> BlockId {
+        BlockId { face, layer, u, v }
+    }
+
+    // the build ceiling: blocks can be placed up to it, not above, and a refusal stores nothing
+    #[test]
+    fn placing_stops_at_the_build_ceiling() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let top = planet.build_ceiling();
+        assert_eq!(planet.add_block(id(0, 3, 3, top), BlockType::Stone), Ok(()));
+        let before = planet.edit_count();
+        assert_eq!(
+            planet.add_block(id(0, 3, 3, top + 1), BlockType::Stone),
+            Err(EditRefused::BuildLimit)
+        );
+        assert_eq!(planet.edit_count(), before);
+        assert!(!planet.exists(id(0, 3, 3, top + 1)));
+    }
+
+    // the ceiling sits above the highest peak and below the cloud shell, on small and large planets
+    #[test]
+    fn the_build_ceiling_is_above_the_peaks_and_below_the_clouds() {
+        for res in [80u32, 160, 337] {
+            let planet = PlanetData::new(res);
+            let (_, peak) = planet.terrain.height_range();
+            let top = planet.build_ceiling();
+            let cloud_radius = CLOUD_ALT * res as f32 / 2.0;
+            assert!(top > peak, "res {res}: ceiling {top} not above peak {peak}");
+            assert!(
+                crate::gen::CoordSystem::get_layer_radius(top + 1, res) <= cloud_radius,
+                "res {res}: ceiling {top} reaches into the clouds"
+            );
+        }
+    }
+
+    // CLOUD_ALT has to agree with the shader's cloud shell
+    #[test]
+    fn cloud_alt_matches_the_shader() {
+        let wgsl = include_str!("atmosphere.wgsl");
+        let line = wgsl
+            .lines()
+            .find(|l| l.trim_start().starts_with("const CLOUD_ALT "))
+            .unwrap();
+        let value: f32 = line
+            .split('=')
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(value, CLOUD_ALT);
+    }
+
+    // nothing below the mining floor can be mined, and it is bedrock
+    #[test]
+    fn mining_stops_at_the_bedrock_floor() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let floor = planet.mining_floor();
+        let (lowest, _) = planet.terrain.height_range();
+        assert_eq!(
+            floor,
+            lowest
+                .saturating_sub(BEDROCK_DEPTH)
+                .max(material::CORE_LAYERS)
+        );
+        assert_eq!(planet.remove_block(id(0, 3, 3, floor)), Ok(()));
+        assert_eq!(
+            planet.remove_block(id(0, 3, 3, floor - 1)),
+            Err(EditRefused::MiningFloor)
+        );
+        assert!(planet.exists(id(0, 3, 3, floor - 1)));
+        assert_eq!(
+            planet.block_type(id(0, 3, 3, floor - 1)),
+            Some(BlockType::Bedrock)
+        );
+        assert_ne!(
+            planet.block_type(id(0, 3, 4, floor)),
+            Some(BlockType::Bedrock)
+        );
+    }
+
+    // a copy handed to a mesh worker shares the edits until the original is edited again
+    #[test]
+    fn copies_share_edits_until_an_edit() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet
+            .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
+            .unwrap();
+        let copy = planet.clone();
+        assert!(Arc::ptr_eq(&planet.chunks, &copy.chunks));
+        planet
+            .remove_block(id(0, 4, 4, planet.terrain.get_height(0, 4, 4)))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&planet.chunks, &copy.chunks));
+        assert_eq!(copy.edit_count(), 1, "the copy keeps its own snapshot");
+        assert_eq!(planet.edit_count(), 2);
+    }
+
+    // at the cap, new entries are refused, but undoing edits still works
+    #[test]
+    fn the_edit_cap_refuses_new_entries_but_allows_undo() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let h = planet.terrain.get_height(0, 3, 3);
+        planet.remove_block(id(0, 3, 3, h)).unwrap();
+        planet.edits = MAX_EDITS; // pretend the planet is full
+        let h2 = planet.terrain.get_height(0, 5, 5);
+        assert_eq!(
+            planet.remove_block(id(0, 5, 5, h2)),
+            Err(EditRefused::EditLimit)
+        );
+        assert_eq!(
+            planet.add_block(id(0, 5, 5, h2 + 1), BlockType::Stone),
+            Err(EditRefused::EditLimit)
+        );
+        // putting the mined block back restores the terrain: one entry fewer
+        let restore = planet.natural_type(id(0, 3, 3, h)).unwrap();
+        assert_eq!(planet.add_block(id(0, 3, 3, h), restore), Ok(()));
+        assert_eq!(planet.edits, MAX_EDITS - 1);
     }
 
     fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {
@@ -501,9 +698,11 @@ pub(crate) mod tests {
             face: 0,
             u: 5,
             v: 5,
-            layer: planet.terrain.sea_level() + 50,
+            layer: planet.terrain.get_height(0, 5, 5) + 1,
         };
-        planet.add_block(id, crate::material::BlockType::Stone);
+        planet
+            .add_block(id, crate::material::BlockType::Stone)
+            .unwrap();
         assert!(planet.chunks.values().any(|m| !m.placed.is_empty()));
 
         let height_before = planet.terrain.get_height(0, 5, 5);

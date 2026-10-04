@@ -120,6 +120,22 @@ impl Physics {
     }
 
     pub fn check_collision(pos: Vec3, planet: &PlanetData) -> bool {
+        Self::body_points(pos)
+            .into_iter()
+            .any(|p| Self::is_solid(p, planet))
+    }
+
+    // whether a block in cell `id` would overlap the body of a player standing at `pos` (placing it
+    // there would trap them): the same sample points check_collision tests
+    pub fn overlaps_block(pos: Vec3, id: BlockId, planet: &PlanetData) -> bool {
+        Self::body_points(pos)
+            .into_iter()
+            .any(|p| CoordSystem::pos_to_id(p, planet.resolution) == Some(id))
+    }
+
+    // the points of the player's body that collision samples: feet, waist, eyes and head, each at the
+    // centre line and around the radius
+    fn body_points(pos: Vec3) -> Vec<Vec3> {
         let up = pos.normalize();
 
         let checks = [
@@ -146,11 +162,10 @@ impl Physics {
             (-right - fwd) * diag,
         ];
 
-        checks.iter().any(|&center_p| {
-            offsets
-                .iter()
-                .any(|&o| Self::is_solid(center_p + o, planet))
-        })
+        checks
+            .iter()
+            .flat_map(|&c| offsets.iter().map(move |&o| c + o))
+            .collect()
     }
 
     pub fn solve_movement(
@@ -262,5 +277,39 @@ impl Physics {
         }
 
         (curr_pos, final_vel, grounded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // standing on a column: the cells the body passes through can't take a block, the ones beside and
+    // above it can
+    #[test]
+    fn overlaps_block_covers_the_body_and_nothing_beside_it() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0u8, 10u32, 10u32);
+        let h = planet.terrain.get_height(face, u, v);
+        let dir = CoordSystem::get_block_center(face, u, v, h + 1, 32).normalize();
+        let feet = dir * CoordSystem::get_layer_radius(h + 1, 32) + dir * 0.01;
+        let cell = |p: Vec3| CoordSystem::pos_to_id(p, 32).unwrap();
+        assert!(Physics::overlaps_block(feet, cell(feet), &planet));
+        assert!(
+            Physics::overlaps_block(feet, cell(feet + dir * 1.7), &planet),
+            "head"
+        );
+        assert!(
+            !Physics::overlaps_block(feet, cell(feet + dir * 3.0), &planet),
+            "above the head"
+        );
+        let beside = BlockId {
+            u: u + 2,
+            ..cell(feet)
+        };
+        assert!(
+            !Physics::overlaps_block(feet, beside, &planet),
+            "two columns over"
+        );
     }
 }

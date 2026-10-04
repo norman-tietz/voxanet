@@ -12,7 +12,6 @@ use glam::Vec3;
 
 pub const WINDOW_SIZE: u32 = 256; // columns per side
 pub const MAX_WORDS_PER_COLUMN: u32 = 16; // 32 layers per word -> at most 512 layers
-const PIT_MARGIN: u32 = 32; // layers kept below the lowest column so mined pits still count
 pub const TILE: u32 = 8; // columns per side of a max-height tile (lets rays skip open air)
 
 // must match FaceWindow in shader.wgsl
@@ -146,16 +145,24 @@ fn fill_face(
             max_h = max_h.max(h);
         }
     }
-    // placed blocks can stick out above the terrain
+    // placed blocks can stick out above the terrain, mined pits reach below it (down to the mining
+    // floor); cells below the window read as solid, so it has to reach the deepest pit inside it
+    let inside = |id: &BlockId| {
+        let (lu, lv) = (id.u as i32 - origin_u, id.v as i32 - origin_v);
+        id.face == face && lu >= 0 && lv >= 0 && lu < size_i && lv < size_i
+    };
     for mods in planet.chunks.values() {
         for id in mods.placed.keys() {
             if id.face == face {
                 max_h = max_h.max(id.layer);
             }
         }
+        for id in mods.mined.iter().filter(|id| inside(id)) {
+            min_h = min_h.min(id.layer);
+        }
     }
 
-    let base = min_h.saturating_sub(PIT_MARGIN);
+    let base = min_h;
     let words = ((max_h - base + 1 + 31) / 32).min(MAX_WORDS_PER_COLUMN);
     let top = base + words * 32; // first layer not stored (treated as air)
     let start = bits.len();
@@ -231,5 +238,55 @@ fn fill_face(
         offset,
         max_layer: max_h.min(top - 1) as i32,
         tile_offset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a window over high land (on larger planets the window is the 256 columns near the player, which
+    // can lie entirely in hills) with a pit dug down to the mining floor: the window has to reach down
+    // to the pit, or its cells read as solid and the pit's floor is shadowed at noon
+    #[test]
+    fn the_window_reaches_down_to_a_pit_at_the_mining_floor() {
+        let mut planet = PlanetData::new(160);
+        let res = planet.resolution;
+        let floor = planet.mining_floor();
+        const N: u32 = 8;
+        const OLD_PIT_MARGIN: u32 = 32; // the fixed margin the window used to keep below its lowest column
+        let window_min = |f: u8, u0: u32, v0: u32| {
+            (u0..u0 + N)
+                .flat_map(|u| (v0..v0 + N).map(move |v| (u, v)))
+                .map(|(u, v)| planet.effective_height(f, u, v))
+                .min()
+                .unwrap()
+        };
+        let (face, u0, v0) = (0..6u8)
+            .flat_map(|f| {
+                (0..res - N)
+                    .step_by(N as usize)
+                    .flat_map(move |u| (0..res - N).step_by(N as usize).map(move |v| (f, u, v)))
+            })
+            .find(|&(f, u, v)| window_min(f, u, v) > floor + OLD_PIT_MARGIN)
+            .expect("no land high enough above the mining floor");
+        let (u, v) = (u0 + N / 2, v0 + N / 2);
+        for layer in (floor..=planet.terrain.get_height(face, u, v)).rev() {
+            planet.remove_block(BlockId { face, layer, u, v }).unwrap();
+        }
+        let mut bits = Vec::new();
+        let w = fill_face(&planet, face, u0 as i32, v0 as i32, N, 0, &mut bits);
+        assert!(
+            w.base_layer as u32 <= floor,
+            "window starts at {} above the pit at {floor}",
+            w.base_layer
+        );
+        let l = floor - w.base_layer as u32;
+        let word = bits[(((v - v0) * N + (u - u0)) * w.words_per_column + l / 32) as usize];
+        assert_eq!(
+            word & (1 << (l % 32)),
+            0,
+            "the pit's bottom cell reads as solid"
+        );
     }
 }

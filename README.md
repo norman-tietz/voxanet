@@ -93,8 +93,8 @@ In water deeper than about half a block you swim at half the walking speed; you 
 
 | Input | Action |
 |-------|--------|
-| Left mouse button | Mine the targeted block (the bottom core layers cannot be mined) |
-| Right mouse button | Place a block on the targeted face |
+| Left mouse button | Mine the targeted block (down to a bedrock floor about 32 layers below the planet's lowest terrain) |
+| Right mouse button | Place a block on the targeted face (up to a build limit a little above the planet's highest peaks, below the clouds; not where you stand) |
 | `1` `2` `3` `4` `5` | Choose the block type to place (shown below the FPS counter); the five materials depend on the active planet type — see **Planet Types** above |
 | Middle mouse button (wheel click) | Pick the targeted block's type as the block type to place |
 | Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
