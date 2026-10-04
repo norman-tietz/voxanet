@@ -170,6 +170,14 @@ fn stash_edits(
     }
 }
 
+// whether the installed planet was edited since its near impostor was built
+fn near_impostor_outdated(built_at: u64, planet: &PlanetData) -> bool {
+    planet.edit_generation() != built_at
+}
+
+// a near impostor rebuilt in the background: (planet index, edit generation it shows, mesh)
+type ImpostorRebuild = (usize, u64, Vec<crate::common::Vertex>, Vec<u32>);
+
 // makes a baked galaxy planet the voxel engine's world: palette, full mesh reload streaming from
 // `stream_from` (planet frame), near impostor for the galaxy renderer
 fn install_world(
@@ -243,6 +251,7 @@ struct Game {
     // each planet's edits while another planet is installed (stash_edits), handed to its next bake
     edits_by_planet: std::collections::HashMap<usize, crate::common::PlanetEdits>,
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
+    impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
 }
 
 impl Game {
@@ -302,6 +311,7 @@ impl Game {
             start_planet,
             edits_by_planet: std::collections::HashMap::new(),
             impostor_generation,
+            impostor_rx: None,
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -327,6 +337,7 @@ impl Game {
             start_planet,
             edits_by_planet,
             impostor_generation,
+            impostor_rx,
         } = self;
 
         let now = Instant::now();
@@ -494,6 +505,34 @@ impl Game {
                 *impostor_generation = generation;
                 *voxel_ready_announced = false;
                 println!("Baked #{} (res {})", index + 1, planet.resolution);
+            }
+        }
+
+        // the galaxy shows the installed planet's near impostor: rebuild it in the background when the
+        // planet was edited since it was built (after liftoff, or leaving by /galaxy goto)
+        if *mode == GameMode::Galaxy
+            && impostor_rx.is_none()
+            && near_impostor_outdated(*impostor_generation, planet)
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (index, generation, data) =
+                (*loaded_world, planet.edit_generation(), planet.clone());
+            std::thread::spawn(move || {
+                let (v, i) = crate::galaxy_terrain::near_impostor_mesh(&data);
+                let _ = tx.send((index, generation, v, i));
+            });
+            *impostor_rx = Some(rx);
+        }
+        let rebuilt = impostor_rx.as_ref().map(|rx| rx.try_recv());
+        if let Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) = rebuilt {
+            *impostor_rx = None; // the rebuild thread died: allow a new one
+        }
+        if let Some(Ok((index, generation, v, i))) = rebuilt {
+            *impostor_rx = None;
+            // dropped if another planet was installed meanwhile
+            if index == *loaded_world {
+                renderer.set_near_impostor(index, &v, &i);
+                *impostor_generation = generation;
             }
         }
 
@@ -941,6 +980,24 @@ mod tests {
         stash_edits(&mut store, None, 2, &mut planet);
         assert!(store.is_empty());
         assert!(!planet.edits.is_empty());
+    }
+
+    // the near impostor is outdated once the planet is edited after it was built
+    #[test]
+    fn near_impostor_is_outdated_only_after_an_edit() {
+        let mut planet = PlanetData::new(32);
+        let built_at = planet.edit_generation();
+        assert!(!near_impostor_outdated(built_at, &planet));
+        let h = planet.terrain.get_height(0, 3, 3);
+        planet
+            .remove_block(crate::common::BlockId {
+                face: 0,
+                layer: h,
+                u: 3,
+                v: 3,
+            })
+            .unwrap();
+        assert!(near_impostor_outdated(built_at, &planet));
     }
 
     // an unedited planet takes no room in the store
