@@ -42,6 +42,29 @@ pub fn flare_intensity(visibility: f32, on_screen: f32, angular_radius: f32) -> 
     (visibility * on_screen * brightness).min(MAX_FLARE)
 }
 
+// the sun's apparent radius in pixels on a screen `height` px tall with vertical field of view `fov_y`
+pub fn tap_radius_px(angular_radius: f32, fov_y: f32, height: f32) -> f32 {
+    angular_radius.tan() / (fov_y * 0.5).tan() * height * 0.5
+}
+
+// how much of the sun stands above the planet's geometric horizon (sphere of `horizon_r` around the
+// origin) seen from `cam_pos`: 1 above, 0 below, fading across the sun's own disc. High up the horizon
+// dips below the local horizontal, so the sun stays up over the limb, as in galaxy mode at the handover
+pub fn horizon_visibility(
+    sun_dir: glam::Vec3,
+    cam_pos: glam::Vec3,
+    horizon_r: f32,
+    angular_radius: f32,
+) -> f32 {
+    let d = cam_pos.length().max(1e-6);
+    let up = cam_pos / d;
+    let sun_elevation = sun_dir.normalize().dot(up).clamp(-1.0, 1.0).asin();
+    let horizon_elevation = -(horizon_r / d).min(1.0).acos();
+    let r = angular_radius.max(1e-4);
+    let x = ((sun_elevation - horizon_elevation + r) / (2.0 * r)).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
 // must match `Flare` in flare.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -58,6 +81,41 @@ pub struct FlareUniform {
 mod tests {
     use super::*;
     use glam::Vec2;
+
+    #[test]
+    fn tap_radius_follows_the_field_of_view() {
+        // a sun 2 degrees across, on a 1000 px tall screen
+        let r = 2f32.to_radians();
+        let wide = tap_radius_px(r, 80f32.to_radians(), 1000.0);
+        let narrow = tap_radius_px(r, 45f32.to_radians(), 1000.0);
+        assert!((wide - r.tan() / 40f32.to_radians().tan() * 500.0).abs() < 1e-3);
+        // the third-person camera's 45 degrees magnifies the disc ~2x
+        assert!(
+            (narrow / wide - 40f32.to_radians().tan() / 22.5f32.to_radians().tan()).abs() < 1e-3
+        );
+    }
+
+    #[test]
+    fn on_the_ground_the_sun_sets_at_the_local_horizon() {
+        let up = glam::Vec3::Y;
+        let cam = up * 100.0;
+        let sun = |deg: f32| glam::Vec3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0);
+        let r = 0.5f32.to_radians();
+        assert_eq!(horizon_visibility(sun(5.0), cam, 100.0, r), 1.0);
+        assert_eq!(horizon_visibility(sun(-5.0), cam, 100.0, r), 0.0);
+        assert!((horizon_visibility(sun(0.0), cam, 100.0, r) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn high_up_the_sun_stays_visible_below_the_local_horizontal() {
+        // at twice the horizon radius the horizon dips 60 degrees below the local horizontal
+        let cam = glam::Vec3::Y * 200.0;
+        let sun = |deg: f32| glam::Vec3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0);
+        let r = 0.5f32.to_radians();
+        assert_eq!(horizon_visibility(sun(-30.0), cam, 100.0, r), 1.0);
+        assert_eq!(horizon_visibility(sun(-80.0), cam, 100.0, r), 0.0);
+        assert!((horizon_visibility(sun(-60.0), cam, 100.0, r) - 0.5).abs() < 1e-2);
+    }
 
     // ghosts lie on the line from the sun through the screen centre (and beyond it)
     #[test]

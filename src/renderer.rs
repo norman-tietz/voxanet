@@ -1116,6 +1116,7 @@ impl Renderer {
         ndc: Option<glam::Vec2>,
         expected_depth: f32,
         angular_radius: f32,
+        fov_y: f32,
         boost: f32,
         star: &crate::galaxy::StarTypeDef,
         planet_mode: bool,
@@ -1135,8 +1136,8 @@ impl Renderer {
             return false;
         }
         let (w, h) = (self.config.width as f32, self.config.height as f32);
-        // taps across half the sun's apparent radius (80 degrees vertical field of view)
-        let radius_px = angular_radius.tan() / (40f32.to_radians()).tan() * h / 2.0;
+        // taps across half the sun's apparent radius
+        let radius_px = crate::flare::tap_radius_px(angular_radius, fov_y, h);
         let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
         self.queue.write_buffer(
             &self.flare_buf,
@@ -2143,19 +2144,22 @@ impl Renderer {
             angular_radius,
             star_frame,
         );
-        // lens flare: the sun projected far along its direction; none at night (below the horizon) or
-        // under water, dimmed by clouds on the GPU
+        // lens flare: the sun projected far along its direction; none once the sun is below the planet's
+        // geometric horizon (high up that's below the local horizontal, as in galaxy mode) or under
+        // water, dimmed by clouds and terrain on the GPU
         let flare = {
             let sun_far = mvp * (cam_pos + sun_dir.normalize() * 1000.0).extend(1.0);
             let ndc = (sun_far.w > 0.0)
                 .then(|| glam::Vec2::new(sun_far.x / sun_far.w, sun_far.y / sun_far.w));
-            let up = cam_pos.normalize_or_zero();
             let sea_radius = if planet.planet_type.def().liquid.is_none() {
                 0.0
             } else {
                 CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
             };
-            let daylight = if sun_dir.dot(up) > 0.0 { 1.0 } else { 0.0 };
+            let horizon_radius =
+                CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution);
+            let daylight =
+                crate::flare::horizon_visibility(sun_dir, cam_pos, horizon_radius, angular_radius);
             let above_water = if cam_pos.length() < sea_radius {
                 0.0
             } else {
@@ -2165,6 +2169,7 @@ impl Renderer {
                 ndc,
                 0.0,
                 angular_radius,
+                controller.fov_y(),
                 daylight * above_water,
                 backdrop.galaxy.star.star_type.def(),
                 true,
@@ -2813,6 +2818,7 @@ impl Renderer {
             on_screen.map(|s| s.0),
             on_screen.map_or(0.0, |s| s.1),
             on_screen.map_or(0.0, |s| s.2),
+            camera.fov_y,
             1.0 - heat, // the heat glow already dominates near the star
             galaxy.star.star_type.def(),
             false,

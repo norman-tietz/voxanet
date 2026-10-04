@@ -118,6 +118,14 @@ use crate::galaxy::MAX_PLANETS; // galaxy.rs caps generated + added planets at t
 const LOD_MEDIUM_DISTANCE_MULTIPLIER: f32 = 13.0;
 const LOD_NEAR_DISTANCE_MULTIPLIER: f32 = 6.0;
 
+// draw order for the atmosphere shells: farthest first. They blend without writing depth, so
+// two overlapping glows only composite correctly back to front
+fn back_to_front(distances: &[(usize, f32)]) -> Vec<usize> {
+    let mut sorted = distances.to_vec();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+    sorted.into_iter().map(|(i, _)| i).collect()
+}
+
 fn subdivision_for_distance(distance: f32, radius: f32) -> u32 {
     if distance > LOD_MEDIUM_DISTANCE_MULTIPLIER * radius {
         2
@@ -713,14 +721,20 @@ impl GalaxyRenderer {
                 }
             }
 
-            // atmosphere shells last, over the planets and everything behind them
+            // atmosphere shells last, over the planets and everything behind them, farthest first
             pass.set_pipeline(&self.atmosphere_pipeline);
             pass.set_vertex_buffer(0, self.v_buf.slice(..));
             pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-            for i in 0..galaxy.planets.len() {
-                if !content.draws_planet(i) {
-                    continue;
-                }
+            let shells: Vec<(usize, f32)> = (0..galaxy.planets.len())
+                .filter(|&i| content.draws_planet(i))
+                .map(|i| {
+                    (
+                        i,
+                        (galaxy.planets[i].position_at(t) - camera.position).length() as f32,
+                    )
+                })
+                .collect();
+            for i in back_to_front(&shells) {
                 pass.set_bind_group(
                     1,
                     &self.planet_uniform_bind,
@@ -815,6 +829,13 @@ impl GalaxyRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atmosphere_shells_draw_farthest_first() {
+        // planet index order 0, 1, 2 at distances 500, 3000, 1200: the farthest shell blends first
+        let order = back_to_front(&[(0, 500.0), (1, 3000.0), (2, 1200.0)]);
+        assert_eq!(order, vec![1, 2, 0]);
+    }
     use crate::galaxy::Galaxy;
 
     // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)

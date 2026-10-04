@@ -274,6 +274,6 @@ fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec
     let dist = atmo_fog_distance(cam_pos, world_pos, a.planet_r);
     let fog_factor = 1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5));
     let ray_dir = normalize(world_pos - cam_pos);
-    let fog_col = atmo_sky_over_black(ray_dir, cam_pos, L, a);
+    let fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r);
     return mix(lit, fog_col, clamp(fog_factor, 0.0, 1.0));
 }
