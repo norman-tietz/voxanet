@@ -109,6 +109,7 @@ pub struct Player {
     pub max_health: f32,
     pub spawn_point: Vec3,
     pub landing: bool, // F pressed while flying: auto-descending until touchdown (landing.rs)
+    pub taking_off: Option<f32>, // F pressed while walking/swimming: auto-climbing to this radius
     pub handover_altitude: Option<f32>, // on a galaxy planet: fly speed scales up to this altitude
 
     // Configuration
@@ -130,6 +131,7 @@ impl Player {
             max_health: MAX_HEALTH,
             spawn_point: Vec3::new(0.0, 200.0, 0.0),
             landing: false,
+            taking_off: None,
             handover_altitude: None,
             move_speed: 5.0,
             jump_force: 8.0,
@@ -144,6 +146,7 @@ impl Player {
         self.health = self.max_health;
         self.spawn_point = pos;
         self.landing = false;
+        self.taking_off = None;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
@@ -243,6 +246,14 @@ impl Player {
                 let horizontal = self.velocity - up * self.velocity.dot(up);
                 self.velocity = horizontal - up * crate::landing::landing_descent_speed(altitude);
             }
+            // F take-off: straight up along local up, easing in at the target without overshooting it;
+            // WASD still steers sideways
+            if let Some(target) = self.taking_off {
+                let remaining = (target - self.position.length()).max(0.0);
+                let horizontal = self.velocity - up * self.velocity.dot(up);
+                let climb = crate::landing::takeoff_climb_speed(remaining).min(remaining / dt);
+                self.velocity = horizontal + up * climb;
+            }
 
             // terrain floor, clamped before solving movement so a fast descent (sprinting down,
             // or diving via pitch) can't tunnel through the floor within a single tick — unlike the
@@ -334,6 +345,12 @@ impl Player {
                     self.velocity -= up * vert;
                 }
             }
+            if self
+                .taking_off
+                .is_some_and(|target| self.position.length() >= target - 0.05)
+            {
+                self.taking_off = None; // arrived: plain fly mode from here
+            }
             if self.landing
                 && crate::landing::touched_down(
                     self.position.length(),
@@ -419,6 +436,42 @@ mod tests {
     // Test wrapper that calls the production function
     fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
         damage_this_tick(depth, damaging, dt)
+    }
+
+    // F take-off: the climb rises smoothly to its target and ends there (fly mode, hovering)
+    #[test]
+    fn take_off_climbs_to_the_target_and_stops() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0u8, 10u32, 10u32);
+        let top = planet.surface(face, u, v) + 1;
+        let dir = crate::gen::CoordSystem::get_block_center(face, u, v, top, 32).normalize();
+        let mut player = Player::new();
+        player.spawn(dir * crate::gen::CoordSystem::get_layer_radius(top, 32));
+        let target_layer = crate::landing::takeoff_target_layer(&planet, player.position);
+        let target = crate::gen::CoordSystem::get_layer_radius(target_layer, 32);
+        player.taking_off = Some(target);
+        let mut max_step = 0.0f32;
+        for _ in 0..600 {
+            let before = player.position.length();
+            player.update(
+                1.0 / 60.0,
+                &planet,
+                Vec3::ZERO,
+                false,
+                false,
+                (0.0, 0.0),
+                0.0,
+                true,
+                false,
+            );
+            max_step = max_step.max(player.position.length() - before);
+        }
+        assert!(player.taking_off.is_none(), "climb never finished");
+        assert!(
+            player.position.length() >= target - 0.2,
+            "stopped short of {target}"
+        );
+        assert!(max_step < 1.0, "the climb jumped {max_step} in one tick");
     }
 
     #[test]

@@ -829,6 +829,7 @@ impl Game {
                         match crate::landing::f_action(
                             controller.fly_mode,
                             player.landing,
+                            player.taking_off.is_some(),
                             over_lava,
                         ) {
                             crate::landing::FAction::StartLanding => {
@@ -845,9 +846,19 @@ impl Game {
                             crate::landing::FAction::TakeOff => {
                                 controller.fly_mode = true;
                                 player.landing = false;
-                                let up = player.position.normalize_or_zero();
-                                player.position += up * crate::landing::TAKEOFF_LIFT;
+                                let layer =
+                                    crate::landing::takeoff_target_layer(planet, player.position);
+                                player.taking_off =
+                                    Some(crate::gen::CoordSystem::get_layer_radius(
+                                        layer,
+                                        planet.resolution,
+                                    ));
                                 player.velocity = glam::Vec3::ZERO;
+                                renderer.show_status("Taking off...");
+                            }
+                            crate::landing::FAction::StopTakeOff => {
+                                player.taking_off = None;
+                                renderer.show_status("Hovering.");
                             }
                         }
                     }

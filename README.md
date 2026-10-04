@@ -50,7 +50,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
-| `F` | First person only: take off when walking or swimming; land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
+| `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |

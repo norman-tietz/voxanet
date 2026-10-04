@@ -118,9 +118,34 @@ pub fn touched_down(radius: f32, floor: f32, feet_in_water: bool) -> bool {
     feet_in_water || radius - floor < TOUCHDOWN_MARGIN
 }
 
-// how far take-off lifts the player off the ground (fly mode velocity follows input every tick, so
-// the "small upward push" is a position nudge, not a velocity impulse)
-pub const TAKEOFF_LIFT: f32 = 2.0;
+// F take-off climbs above the ground by this share of the planet's relief (its highest natural peak
+// above sea level), at least TAKEOFF_MIN_CLEARANCE layers, and not above the highest peak: bigger
+// planets have more relief and climb higher, and valleys and canyons stay flyable
+const TAKEOFF_RELIEF_SHARE: f32 = 0.3;
+pub const TAKEOFF_MIN_CLEARANCE: u32 = 3;
+
+// the layer an F take-off from `position` (the feet) climbs to: measured from the water surface when
+// swimming, else from the top of the column below
+pub fn takeoff_target_layer(planet: &crate::common::PlanetData, position: Vec3) -> u32 {
+    let sea = planet.terrain.sea_level();
+    let (_, peak) = planet.terrain.height_range();
+    let in_water = planet.water_depth(position).is_some_and(|d| d > 0.0);
+    let ground = match crate::gen::CoordSystem::pos_to_id(position, planet.resolution) {
+        Some(id) if !in_water => planet.surface(id.face, id.u, id.v) + 1,
+        _ => sea + 1,
+    };
+    let relief = peak.saturating_sub(sea) as f32;
+    let climb = ((relief * TAKEOFF_RELIEF_SHARE).round() as u32).max(TAKEOFF_MIN_CLEARANCE);
+    (ground + climb)
+        .min(peak + 1)
+        .max(ground + TAKEOFF_MIN_CLEARANCE)
+}
+
+// F take-off climb speed: the landing descent mirrored — fast while far below the target, easing in
+// near it, never below LAND_MIN_DESCENT so it still finishes
+pub fn takeoff_climb_speed(remaining: f32) -> f32 {
+    (remaining * LAND_DESCENT_RATE).max(LAND_MIN_DESCENT)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FAction {
@@ -128,16 +153,23 @@ pub enum FAction {
     CancelLanding,
     RefuseLanding,
     TakeOff,
+    StopTakeOff,
 }
 
-// F: flying -> land (or cancel a landing in progress; refused over damaging liquid);
-// walking/swimming -> take off
-pub fn f_action(flying: bool, landing: bool, over_damaging_liquid: bool) -> FAction {
-    match (flying, landing) {
-        (true, true) => FAction::CancelLanding,
-        (true, false) if over_damaging_liquid => FAction::RefuseLanding,
-        (true, false) => FAction::StartLanding,
-        (false, _) => FAction::TakeOff,
+// F: flying -> land (or cancel a landing in progress; refused over damaging liquid; during the
+// take-off climb: stop it and hover); walking/swimming -> take off
+pub fn f_action(
+    flying: bool,
+    landing: bool,
+    taking_off: bool,
+    over_damaging_liquid: bool,
+) -> FAction {
+    match (flying, landing, taking_off) {
+        (true, true, _) => FAction::CancelLanding,
+        (true, false, true) => FAction::StopTakeOff,
+        (true, false, false) if over_damaging_liquid => FAction::RefuseLanding,
+        (true, false, false) => FAction::StartLanding,
+        (false, _, _) => FAction::TakeOff,
     }
 }
 
@@ -248,16 +280,107 @@ mod tests {
 
     #[test]
     fn f_lands_cancels_refuses_or_takes_off() {
-        assert_eq!(f_action(true, false, false), FAction::StartLanding);
-        assert_eq!(f_action(true, true, false), FAction::CancelLanding);
+        assert_eq!(f_action(true, false, false, false), FAction::StartLanding);
+        assert_eq!(f_action(true, true, false, false), FAction::CancelLanding);
         assert_eq!(
-            f_action(true, true, true),
+            f_action(true, true, false, true),
             FAction::CancelLanding,
             "cancel is always allowed"
         );
-        assert_eq!(f_action(true, false, true), FAction::RefuseLanding);
-        assert_eq!(f_action(false, false, false), FAction::TakeOff);
-        assert_eq!(f_action(false, false, true), FAction::TakeOff);
+        assert_eq!(f_action(true, false, false, true), FAction::RefuseLanding);
+        assert_eq!(f_action(false, false, false, false), FAction::TakeOff);
+        assert_eq!(f_action(false, false, false, true), FAction::TakeOff);
+    }
+
+    // F during the take-off climb stops it: the player hovers where they are
+    #[test]
+    fn f_during_take_off_stops_the_climb() {
+        assert_eq!(f_action(true, false, true, false), FAction::StopTakeOff);
+        assert_eq!(f_action(true, false, true, true), FAction::StopTakeOff);
+    }
+
+    // feet resting on top of the column's surface
+    fn standing_on(planet: &crate::common::PlanetData, face: u8, u: u32, v: u32) -> (Vec3, u32) {
+        let top = planet.surface(face, u, v) + 1;
+        let res = planet.resolution;
+        let dir = crate::gen::CoordSystem::get_block_center(face, u, v, top, res).normalize();
+        (
+            dir * crate::gen::CoordSystem::get_layer_radius(top, res),
+            top,
+        )
+    }
+
+    // the lowest land column (at or above sea level): a valley floor or beach
+    fn lowest_land(planet: &crate::common::PlanetData) -> (u8, u32, u32) {
+        let sea = planet.terrain.sea_level();
+        let res = planet.resolution;
+        (0..6u8)
+            .flat_map(|f| (0..res).flat_map(move |u| (0..res).map(move |v| (f, u, v))))
+            .filter(|&(f, u, v)| planet.terrain.get_height(f, u, v) >= sea)
+            .min_by_key(|&(f, u, v)| planet.terrain.get_height(f, u, v))
+            .unwrap()
+    }
+
+    // the climb above the ground grows with the planet's relief, at least TAKEOFF_MIN_CLEARANCE
+    #[test]
+    fn take_off_climbs_higher_on_planets_with_more_relief() {
+        let mut climbs = Vec::new();
+        for res in [80u32, 160, 337] {
+            let planet = crate::common::PlanetData::new(res);
+            let (f, u, v) = lowest_land(&planet);
+            let (feet, ground) = standing_on(&planet, f, u, v);
+            let target = takeoff_target_layer(&planet, feet);
+            assert!(target >= ground + TAKEOFF_MIN_CLEARANCE, "res {res}");
+            climbs.push(target - ground);
+        }
+        assert!(climbs[0] < climbs[1] && climbs[1] < climbs[2], "{climbs:?}");
+    }
+
+    // from a valley the target stays at or below the highest peak (canyons stay flyable); on the
+    // peak itself the minimum clearance applies
+    #[test]
+    fn take_off_stays_below_the_highest_peak() {
+        for res in [80u32, 160, 337] {
+            let planet = crate::common::PlanetData::new(res);
+            let (_, peak) = planet.terrain.height_range();
+            let (f, u, v) = lowest_land(&planet);
+            let (feet, _) = standing_on(&planet, f, u, v);
+            assert!(takeoff_target_layer(&planet, feet) <= peak + 1, "res {res}");
+            let summit = (0..6u8)
+                .flat_map(|f| (0..res).flat_map(move |u| (0..res).map(move |v| (f, u, v))))
+                .find(|&(f, u, v)| planet.terrain.get_height(f, u, v) == peak)
+                .unwrap();
+            let (feet, ground) = standing_on(&planet, summit.0, summit.1, summit.2);
+            assert_eq!(
+                takeoff_target_layer(&planet, feet),
+                ground + TAKEOFF_MIN_CLEARANCE
+            );
+        }
+    }
+
+    // swimming: the climb is measured from the water surface
+    #[test]
+    fn take_off_from_water_starts_at_the_surface() {
+        let planet = crate::common::PlanetData::new(160);
+        let sea = planet.terrain.sea_level();
+        let res = planet.resolution;
+        let (f, u, v) = (0..6u8)
+            .flat_map(|f| (0..res).flat_map(move |u| (0..res).map(move |v| (f, u, v))))
+            .find(|&(f, u, v)| planet.terrain.get_height(f, u, v) + 3 < sea)
+            .unwrap();
+        let dir = crate::gen::CoordSystem::get_block_center(f, u, v, sea, res).normalize();
+        let floating = dir * (crate::gen::CoordSystem::get_layer_radius(sea + 1, res) - 0.5);
+        let (land_feet, land_ground) = standing_on(
+            &planet,
+            lowest_land(&planet).0,
+            lowest_land(&planet).1,
+            lowest_land(&planet).2,
+        );
+        let land_climb = takeoff_target_layer(&planet, land_feet) - land_ground;
+        assert_eq!(
+            takeoff_target_layer(&planet, floating),
+            sea + 1 + land_climb
+        );
     }
 
     // landing straight down into lava would kill the player; into water is fine (they swim)
