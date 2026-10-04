@@ -263,11 +263,18 @@ impl Player {
             if down {
                 fly_dir -= up;
             }
-            self.velocity = if fly_dir.length() > 0.01 {
+            let target = if fly_dir.length() > 0.01 {
                 fly_dir.normalize() * effective_speed
             } else {
                 Vec3::ZERO
             };
+            // eased: pressing and releasing keys ramps the speed instead of switching it
+            self.velocity = crate::smoothing::ease_toward(
+                self.velocity,
+                target,
+                dt,
+                crate::smoothing::FLIGHT_EASE_SECONDS,
+            );
             // F-landing: straight down along local down, fast high up and slowing near the ground;
             // WASD still steers sideways (spec §4)
             if self.landing {
@@ -501,6 +508,48 @@ mod tests {
             cam.y_axis.truncate(),
             -cam.z_axis.truncate(),
         )
+    }
+
+    // fly mode: releasing W doesn't stop dead, the player coasts and slows down
+    #[test]
+    fn fly_mode_coasts_after_releasing_w() {
+        let (mut player, planet) = flying_player();
+        player.cam_pitch = 0.0;
+        let forward = Vec3::new(0.0, 0.0, -1.0);
+        for _ in 0..60 {
+            player.update(
+                1.0 / 60.0,
+                &planet,
+                forward,
+                false,
+                false,
+                (0.0, 0.0),
+                0.0,
+                0.0,
+                true,
+                false,
+            );
+        }
+        let cruising = player.velocity.length();
+        assert!(cruising > 1.0, "sanity check: flying forward");
+        player.update(
+            1.0 / 60.0,
+            &planet,
+            Vec3::ZERO,
+            false,
+            false,
+            (0.0, 0.0),
+            0.0,
+            0.0,
+            true,
+            false,
+        );
+        let coasting = player.velocity.length();
+        assert!(
+            coasting > 0.5 * cruising,
+            "stopped dead: {coasting} after {cruising}"
+        );
+        assert!(coasting < cruising, "didn't slow down");
     }
 
     // fly mode: Q/E roll the camera (Q left: its right side comes up); walking is always level

@@ -268,7 +268,6 @@ pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64
 
 pub const GALAXY_CRUISE_SPEED: f32 = 500.0;
 pub const GALAXY_BOOST_SPEED: f32 = 2000.0;
-const GALAXY_ACCEL: f32 = 800.0; // units/s^2
 
 pub struct GalaxyFlight {
     pub position: DVec3,
@@ -357,7 +356,13 @@ impl GalaxyFlight {
             self.velocity.y as f32,
             self.velocity.z as f32,
         );
-        let new_vel = accelerate_toward(vel_f32, target_velocity, GALAXY_ACCEL * dt);
+        // eased like planet fly mode, so cruise and boost respond alike (no long glide from boost)
+        let new_vel = crate::smoothing::ease_toward(
+            vel_f32,
+            target_velocity,
+            dt,
+            crate::smoothing::FLIGHT_EASE_SECONDS,
+        );
         self.velocity = DVec3::new(new_vel.x as f64, new_vel.y as f64, new_vel.z as f64);
 
         self.position += self.velocity * dt as f64;
@@ -380,12 +385,6 @@ fn yaw_axis(rotation: Quat, up: Option<Vec3>) -> Vec3 {
     let t = ((tilt - 0.3) / 0.5).clamp(0.0, 1.0);
     let rolled = t * t * (3.0 - 2.0 * t); // smoothstep
     horizon_up.lerp(camera_up, rolled).normalize()
-}
-
-// Pure: blends current velocity toward target, clamped by max acceleration this tick. Factored out
-// so the clamp is regression-tested without mouse/keyboard state.
-fn accelerate_toward(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
-    current + (target - current).clamp_length_max(max_delta)
 }
 
 // Pure: composes the desired flight direction from forward-thrust (already rotated into world
@@ -1108,25 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn accelerate_toward_is_clamped_by_max_delta() {
-        let result = accelerate_toward(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 5.0);
-        assert_eq!(result, Vec3::new(5.0, 0.0, 0.0));
-    }
-
-    #[test]
-    fn accelerate_toward_reaches_target_when_under_max_delta() {
-        let result = accelerate_toward(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 50.0);
-        assert_eq!(result, Vec3::new(10.0, 0.0, 0.0));
-    }
-
-    #[test]
-    fn accelerate_toward_does_not_move_when_already_at_target() {
-        let target = Vec3::new(3.0, 4.0, 0.0);
-        let result = accelerate_toward(target, target, 10.0);
-        assert_eq!(result, target);
-    }
-
-    #[test]
     fn compose_fly_direction_climb_only_is_straight_up() {
         assert_eq!(
             compose_fly_direction(Vec3::ZERO, true, false, Vec3::Y),
@@ -1155,6 +1135,30 @@ mod tests {
         let result = compose_fly_direction(Vec3::new(2.0, 0.0, 0.0), false, false, Vec3::Y);
         assert!((result.length() - 1.0).abs() < 1e-6);
         assert_eq!(result, Vec3::X);
+    }
+
+    // braking from boost speed takes well under a second (it used to glide for 2.5 s)
+    #[test]
+    fn galaxy_flight_brakes_from_boost_within_a_second() {
+        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+        flight.velocity = DVec3::new(0.0, 0.0, -GALAXY_BOOST_SPEED as f64);
+        for _ in 0..60 {
+            flight.update(
+                1.0 / 60.0,
+                Vec3::ZERO,
+                false,
+                false,
+                (0.0, 0.0),
+                false,
+                0.0,
+                None,
+            );
+        }
+        assert!(
+            flight.velocity.length() < 50.0,
+            "{}",
+            flight.velocity.length()
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ mod renderer;
 mod rt_blur;
 mod rt_shadow;
 mod screenshot;
+mod smoothing;
 mod system_diagnostics;
 
 use crate::cmd::Console;
