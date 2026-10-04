@@ -226,6 +226,20 @@ impl Player {
                 BANK_TURN_RATE * self.cam_roll.sin() * forward_share
             };
             flight_yaw = (self.turn_rate + bank) * dt;
+
+            // dive assist: racing steeply at the surface bends the view (and with it the route) up
+            // toward the horizon; not during the deliberate F landing or the take-off climb
+            if steering {
+                let altitude =
+                    self.position.length() - crate::landing::surface_radius(planet, self.position);
+                let pitch = crate::landing::dive_assist(self.velocity, up, altitude, dt);
+                if pitch > 0.0 {
+                    self.cam_pitch = (self.cam_pitch + pitch).min(1.5);
+                    if let Some(axis) = self.velocity.cross(up).try_normalize() {
+                        self.velocity = Quat::from_axis_angle(axis, pitch) * self.velocity;
+                    }
+                }
+            }
         }
         // the mouse moves in screen directions: turn the rolled screen's right/down back into yaw/pitch
         let (sin, cos) = self.cam_roll.sin_cos();
@@ -725,6 +739,30 @@ mod tests {
             moved.dot(screen_up).abs() < 0.2 * moved.dot(screen_right),
             "{moved:?}"
         );
+    }
+
+    // planet fly mode: diving fast at the ground pitches the view up (the route follows); an F landing
+    // is a deliberate vertical descent and isn't assisted
+    #[test]
+    fn a_fast_dive_pitches_the_view_up_but_not_during_a_landing() {
+        for landing in [false, true] {
+            let (mut player, planet) = flying_player();
+            player.cam_pitch = -1.4;
+            player.landing = landing;
+            let up = player.position.normalize();
+            let ground =
+                crate::gen::CoordSystem::get_layer_radius(planet.surface(0, 10, 10) + 1, 32);
+            let altitude = player.position.length() - ground;
+            // diving at the ground fast enough to hit it in about 1 s
+            player.velocity = (player.rotation * Vec3::NEG_Z * 0.1 - up).normalize() * altitude;
+            let before = player.cam_pitch;
+            tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+            if landing {
+                assert_eq!(player.cam_pitch, before, "assisted an F landing");
+            } else {
+                assert!(player.cam_pitch > before, "no pull-up");
+            }
+        }
     }
 
     // an F landing ignores the roll keys and eases the roll level; the take-off climb ignores them too

@@ -416,39 +416,6 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) ->
     }
 }
 
-// entering a planet's orbit heading (nearly) at its centre, the view and route are pitched up to at
-// most this far below the local horizon, at this rate, unless the player takes over (mouse, Q/E)
-pub const APPROACH_MAX_DIVE: f32 = std::f32::consts::FRAC_PI_4;
-pub const APPROACH_PITCH_RATE: f32 = std::f32::consts::PI / 6.0; // 30 degrees/s
-
-// the turn (world space, apply as `turn * rotation`) that pitches `rotation`'s view up toward the
-// horizon of `up` by at most `max_step`; None once it looks no steeper than APPROACH_MAX_DIVE down.
-// Pure pitch: about the horizontal axis across the view, so the heading doesn't change. Looking
-// straight down the heading is undefined; then it pitches toward the top of the screen.
-pub fn approach_pitch_assist(rotation: Quat, up: Vec3, max_step: f32) -> Option<Quat> {
-    let forward = rotation * Vec3::NEG_Z;
-    let dive = (-forward.dot(up)).clamp(-1.0, 1.0).asin();
-    if dive <= APPROACH_MAX_DIVE + 1e-4 {
-        return None;
-    }
-    let axis = forward
-        .cross(up)
-        .try_normalize()
-        .unwrap_or(rotation * Vec3::X);
-    Some(Quat::from_axis_angle(
-        axis,
-        (dive - APPROACH_MAX_DIVE).min(max_step),
-    ))
-}
-
-// whether the player took over from the approach assist this tick (mouse look, rolling or turning)
-pub fn approach_assist_interrupted(
-    mouse_delta: (f32, f32),
-    keys: crate::controller::FlightKeys,
-) -> bool {
-    mouse_delta.0.abs() > 1e-3 || mouse_delta.1.abs() > 1e-3 || keys.roll != 0.0 || keys.turn != 0.0
-}
-
 // Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
 // left/right angle from the view direction (positive = right, ±180 = straight behind), pitch the
 // up/down angle (positive = above). Both in degrees, camera-relative, so they follow mouse-look.
@@ -721,75 +688,6 @@ mod tests {
             (flight.rotation * Vec3::Y).dot(Vec3::Y) > 1.0 - 1e-4,
             "turning rolled the view"
         );
-    }
-
-    // how far below the local horizon a rotation looks
-    fn dive_of(rotation: Quat, up: Vec3) -> f32 {
-        (-(rotation * Vec3::NEG_Z).dot(up)).asin()
-    }
-
-    // entering an orbit head-on (looking straight at the centre): the assist pitches the view up to
-    // APPROACH_MAX_DIVE below the horizon and then stops
-    #[test]
-    fn approach_assist_raises_a_head_on_dive_to_the_maximum() {
-        let up = Vec3::Y;
-        let mut rot = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2); // looking down -Y
-        let dt = 1.0 / 60.0;
-        let mut ticks = 0;
-        while let Some(turn) = approach_pitch_assist(rot, up, APPROACH_PITCH_RATE * dt) {
-            rot = (turn * rot).normalize();
-            ticks += 1;
-            assert!(ticks < 600, "the assist never finished");
-        }
-        assert!(
-            (dive_of(rot, up) - APPROACH_MAX_DIVE).abs() < 1e-3,
-            "{}",
-            dive_of(rot, up)
-        );
-        // 45 degrees at 30 degrees/s: about 1.5 s
-        assert!((80..=100).contains(&ticks), "{ticks} ticks");
-    }
-
-    // a dive shallower than the maximum is left alone
-    #[test]
-    fn approach_assist_leaves_a_shallow_approach_alone() {
-        let rot = Quat::from_rotation_x(-0.3); // 0.3 rad below the horizon of +Y
-        assert!(approach_pitch_assist(rot, Vec3::Y, 0.1).is_none());
-    }
-
-    // the assist only pitches: no roll, and the view stays in the same vertical plane
-    #[test]
-    fn approach_assist_only_pitches_toward_the_horizon() {
-        let up = Vec3::Y;
-        let rot = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-1.3);
-        let turn = approach_pitch_assist(rot, up, 0.1).unwrap();
-        let (before, after) = (rot * Vec3::NEG_Z, turn * rot * Vec3::NEG_Z);
-        assert!(dive_of(turn * rot, up) < dive_of(rot, up), "not raised");
-        let plane = before.cross(up).normalize();
-        assert!(after.dot(plane).abs() < 1e-4, "left its vertical plane");
-    }
-
-    // mouse look, rolling or turning keys hand the view back to the player
-    #[test]
-    fn approach_assist_is_interrupted_by_mouse_or_flight_keys() {
-        let none = FlightKeys::default();
-        assert!(!approach_assist_interrupted((0.0, 0.0), none));
-        assert!(approach_assist_interrupted((3.0, 0.0), none));
-        assert!(approach_assist_interrupted((0.0, -2.0), none));
-        assert!(approach_assist_interrupted(
-            (0.0, 0.0),
-            FlightKeys {
-                roll: -1.0,
-                turn: 0.0
-            }
-        ));
-        assert!(approach_assist_interrupted(
-            (0.0, 0.0),
-            FlightKeys {
-                roll: 0.0,
-                turn: 1.0
-            }
-        ));
     }
 
     // free flight: Space/Shift climb and descend along the camera's own up

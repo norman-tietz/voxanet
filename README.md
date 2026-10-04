@@ -67,7 +67,7 @@ In first-person flight the controls work like an aircraft: there is no sideways 
 | `Space` (hold) | Climb |
 | `Left Shift` (hold) | Descend (held back by the terrain floor — you can't fly through the ground) |
 
-Flying speed grows with altitude. Keep climbing and, a few planet radii out, the view hands over to space flight without a cut.
+If you race steeply at the ground or the sea (the surface less than about 4 seconds away), the flight bends toward the horizon on its own, into a shallow descent about 10° below it, so a fast dive turns into a sweeping approach instead of a crash; you keep full control on top of it, and slow descents and the `F` landing are left alone. Flying speed grows with altitude. Keep climbing and, a few planet radii out, the view hands over to space flight without a cut.
 
 ### Space Flight
 
@@ -82,7 +82,7 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
 
-Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain. If you come in heading straight at the planet, the view eases up toward the horizon a little (move the mouse, roll or turn to take over).
+Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
 
 ### Swimming
 

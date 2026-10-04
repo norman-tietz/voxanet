@@ -253,7 +253,6 @@ struct Game {
     edits_by_planet: std::collections::HashMap<usize, crate::common::PlanetEdits>,
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
-    approach_assist: bool, // just entered an orbit from galaxy space: pitching a steep dive up (galaxy.rs)
 }
 
 impl Game {
@@ -314,7 +313,6 @@ impl Game {
             edits_by_planet: std::collections::HashMap::new(),
             impostor_generation,
             impostor_rx: None,
-            approach_assist: false,
         } // mismatched on purpose, so tick()'s first diff locks the cursor
     }
 
@@ -341,7 +339,6 @@ impl Game {
             edits_by_planet,
             impostor_generation,
             impostor_rx,
-            approach_assist,
         } = self;
 
         let now = Instant::now();
@@ -405,32 +402,11 @@ impl Game {
                 );
                 if next != *flight_frame {
                     galaxy_flight.change_frame(*flight_frame, next, galaxy, t);
-                    // coming in from galaxy space: pitch a steep dive at the planet up a little
-                    *approach_assist = matches!(next, FlightFrame::Captured(_));
                     match next {
                         FlightFrame::Captured(i) => println!("Entering the orbit of #{}", i + 1),
                         FlightFrame::Free => println!("Leaving orbit"),
                     }
                     *flight_frame = next;
-                }
-                if *approach_assist {
-                    let up = galaxy_flight.position.as_vec3().normalize_or_zero();
-                    let turn = crate::galaxy::approach_pitch_assist(
-                        galaxy_flight.rotation,
-                        up,
-                        crate::galaxy::APPROACH_PITCH_RATE * dt,
-                    );
-                    match turn {
-                        Some(turn)
-                            if !crate::galaxy::approach_assist_interrupted(mouse_delta, keys) =>
-                        {
-                            // the route turns with the view (flight follows the view only under thrust)
-                            galaxy_flight.rotation = (turn * galaxy_flight.rotation).normalize();
-                            galaxy_flight.velocity =
-                                (turn * galaxy_flight.velocity.as_vec3()).as_dvec3();
-                        }
-                        _ => *approach_assist = false, // done, or the player took over
-                    }
                 }
                 if let FlightFrame::Captured(i) = *flight_frame {
                     // the impostor is all there is until the voxel world is ready: don't sink into it
@@ -474,7 +450,6 @@ impl Game {
             player.cam_pitch = cam_pitch;
             player.cam_roll = cam_roll;
             player.roll_rate = galaxy_flight.roll_rate; // a roll in progress carries on
-            *approach_assist = false; // a later liftoff isn't an approach
             player.velocity = glam::Vec3::ZERO;
             player.landing = false;
             player.taking_off = None;

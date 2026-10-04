@@ -161,6 +161,40 @@ pub fn takeoff_climb_speed(remaining: f32) -> f32 {
     (remaining * LAND_DESCENT_RATE).max(LAND_MIN_DESCENT)
 }
 
+// dive assist (planet fly mode): racing steeply at the surface, the flight is bent toward the horizon
+// so it becomes a sweeping descent instead of a crash. It engages when the surface (ground or water)
+// is less than DIVE_ASSIST_SECONDS away at the current downward speed, pulls harder the closer the
+// impact, and stops at DIVE_ASSIST_TARGET below the horizon; slow descents are left alone
+pub const DIVE_ASSIST_SECONDS: f32 = 4.0;
+pub const DIVE_ASSIST_TARGET: f32 = 10.0 * std::f32::consts::PI / 180.0;
+const DIVE_ASSIST_MIN_SPEED: f32 = 15.0; // world units/s downward
+const DIVE_ASSIST_MAX_RATE: f32 = 1.5; // rad/s of pitch-up, approached as the impact nears
+
+// the pitch-up (radians, toward the horizon) the dive assist applies this step, for a velocity
+// `velocity` at `altitude` above the surface (`up`: the local radial up); 0 when not engaged
+pub fn dive_assist(velocity: Vec3, up: Vec3, altitude: f32, dt: f32) -> f32 {
+    let down = -velocity.dot(up);
+    if down < DIVE_ASSIST_MIN_SPEED || altitude <= 0.0 {
+        return 0.0;
+    }
+    let time_to_impact = altitude / down;
+    let dive = (down / velocity.length()).clamp(-1.0, 1.0).asin();
+    if time_to_impact >= DIVE_ASSIST_SECONDS || dive <= DIVE_ASSIST_TARGET {
+        return 0.0;
+    }
+    let pull = DIVE_ASSIST_MAX_RATE * (1.0 - time_to_impact / DIVE_ASSIST_SECONDS);
+    (pull * dt).min(dive - DIVE_ASSIST_TARGET)
+}
+
+// the radius of the surface below `position`: the top of its column, or the water surface above it
+pub fn surface_radius(planet: &crate::common::PlanetData, position: Vec3) -> f32 {
+    let res = planet.resolution;
+    let sea = planet.terrain.sea_level();
+    let top = crate::gen::CoordSystem::pos_to_id(position, res)
+        .map_or(sea + 1, |id| planet.surface(id.face, id.u, id.v) + 1);
+    crate::gen::CoordSystem::get_layer_radius(top.max(sea + 1), res)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FAction {
     StartLanding,
@@ -304,6 +338,69 @@ mod tests {
         assert_eq!(f_action(true, false, false, true), FAction::RefuseLanding);
         assert_eq!(f_action(false, false, false, false), FAction::TakeOff);
         assert_eq!(f_action(false, false, false, true), FAction::TakeOff);
+    }
+
+    // how far below the horizon a velocity points, in degrees
+    fn dive_deg(v: Vec3, up: Vec3) -> f32 {
+        (-v.normalize().dot(up)).asin().to_degrees()
+    }
+
+    // a fast, steep dive at the surface (impact within DIVE_ASSIST_SECONDS) is bent up toward a
+    // shallow descent: the assist pitches up, harder the closer the impact, and stops at the target
+    #[test]
+    fn a_fast_dive_is_bent_toward_a_shallow_descent() {
+        let up = Vec3::Y;
+        let mut v = Vec3::new(0.0, -200.0, -20.0); // ~84 degrees down, fast
+        let mut altitude = 600.0; // 3 s to impact
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            let pitch = dive_assist(v, up, altitude, dt);
+            if pitch > 0.0 {
+                let axis = v.cross(up).normalize();
+                v = Quat::from_axis_angle(axis, pitch) * v;
+            }
+            altitude = (altitude + v.dot(up) * dt).max(1.0);
+        }
+        let dive = dive_deg(v, up);
+        assert!(
+            (dive - DIVE_ASSIST_TARGET.to_degrees()).abs() < 0.5,
+            "ended at {dive} degrees"
+        );
+    }
+
+    // the closer the impact, the harder the pull
+    #[test]
+    fn the_pull_grows_as_impact_nears() {
+        let (up, v) = (Vec3::Y, Vec3::new(0.0, -200.0, -20.0));
+        let far = dive_assist(v, up, 700.0, 0.1); // 3.5 s
+        let near = dive_assist(v, up, 200.0, 0.1); // 1 s
+        assert!(far > 0.0 && near > far, "{far} {near}");
+    }
+
+    // left alone: slow descents, shallow dives, impacts further than DIVE_ASSIST_SECONDS away, climbs
+    #[test]
+    fn slow_shallow_distant_or_climbing_flight_is_not_assisted() {
+        let up = Vec3::Y;
+        assert_eq!(
+            dive_assist(Vec3::new(0.0, -10.0, -1.0), up, 20.0, 0.1),
+            0.0,
+            "slow"
+        );
+        assert_eq!(
+            dive_assist(Vec3::new(0.0, -15.0, -200.0), up, 30.0, 0.1),
+            0.0,
+            "shallow"
+        );
+        assert_eq!(
+            dive_assist(Vec3::new(0.0, -200.0, -20.0), up, 1000.0, 0.1),
+            0.0,
+            "5 s away"
+        );
+        assert_eq!(
+            dive_assist(Vec3::new(0.0, 200.0, -20.0), up, 50.0, 0.1),
+            0.0,
+            "climbing"
+        );
     }
 
     // F during the take-off climb stops it: the player hovers where they are
