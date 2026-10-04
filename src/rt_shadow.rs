@@ -151,7 +151,7 @@ fn fill_face(
         let (lu, lv) = (id.u as i32 - origin_u, id.v as i32 - origin_v);
         id.face == face && lu >= 0 && lv >= 0 && lu < size_i && lv < size_i
     };
-    for mods in planet.chunks.values() {
+    for mods in planet.edits.chunks.values() {
         for id in mods.placed.keys() {
             if id.face == face {
                 max_h = max_h.max(id.layer);
@@ -198,7 +198,7 @@ fn fill_face(
             face_bits[idx] &= !(1 << (l % 32));
         }
     };
-    for mods in planet.chunks.values() {
+    for mods in planet.edits.chunks.values() {
         for id in mods.placed.keys() {
             set(id, true);
         }
@@ -216,7 +216,7 @@ fn fill_face(
             *t = (*t).max(column(lu, lv));
         }
     }
-    for mods in planet.chunks.values() {
+    for mods in planet.edits.chunks.values() {
         for id in mods.placed.keys() {
             let (lu, lv) = (id.u as i32 - origin_u, id.v as i32 - origin_v);
             if id.face != face || lu < 0 || lv < 0 || lu >= size_i || lv >= size_i {

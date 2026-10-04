@@ -434,7 +434,7 @@ impl MeshGen {
         }
 
         // current Chunk Modifications
-        if let Some(mods) = data.chunks.get(&key) {
+        if let Some(mods) = data.edits.chunks.get(&key) {
             for &id in mods.placed.keys() {
                 candidates.insert(id);
             }
@@ -484,7 +484,7 @@ impl MeshGen {
         }
 
         for n_key in neighbor_keys {
-            if let Some(mods) = data.chunks.get(&n_key) {
+            if let Some(mods) = data.edits.chunks.get(&n_key) {
                 Self::add_mined_candidates(mods, &mut candidates, data);
             }
         }

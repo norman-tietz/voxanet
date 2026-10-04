@@ -84,6 +84,35 @@ pub struct ChunkMods {
     pub placed: HashMap<BlockId, BlockType>,
 }
 
+// a planet's player edits: everything a revisit (and later a save file) needs to restore them. The map
+// is shared copy-on-write, so cloning a PlanetData for a mesh worker doesn't copy the edits
+#[derive(Clone, Default)]
+pub struct PlanetEdits {
+    pub chunks: Arc<HashMap<ChunkKey, ChunkMods>>,
+    count: usize,    // placed + mined entries, for MAX_EDITS
+    resolution: u32, // the terrain these edits were made on
+    noise_seed: u32,
+}
+
+impl PlanetEdits {
+    fn for_terrain(resolution: u32, noise_seed: u32) -> Self {
+        Self {
+            resolution,
+            noise_seed,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[cfg(test)]
+    pub fn set_count_for_test(&mut self, count: usize) {
+        self.count = count;
+    }
+}
+
 impl ChunkMods {
     pub fn new() -> Self {
         Self {
@@ -95,16 +124,13 @@ impl ChunkMods {
 
 #[derive(Clone)]
 pub struct PlanetData {
-    // the player's edits, shared (copy-on-write): every mesh worker gets a clone of the planet, and
-    // cloning the Arc instead of every entry keeps that instant however much was edited
-    pub chunks: Arc<HashMap<ChunkKey, ChunkMods>>,
-    edits: usize, // entries in chunks (placed + mined), for MAX_EDITS
+    pub edits: PlanetEdits,
+    edit_generation: u64, // bumped by every successful edit (an outdated near impostor), not by restoring
     pub resolution: u32,
     pub terrain: crate::noise::PlanetTerrain,
     pub planet_type: PlanetType,
     // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
-    // nothing reads it at runtime since resizing is gone, kept as a record (and checked by tests)
-    #[allow(dead_code)]
+    // edits record it so they're only restored onto the same terrain
     pub seed: u32,
 }
 
@@ -119,8 +145,8 @@ impl PlanetData {
         println!("Terrain Generation Complete.");
 
         Self {
-            chunks: Arc::default(),
-            edits: 0,
+            edits: PlanetEdits::for_terrain(resolution, seed),
+            edit_generation: 0,
             resolution,
             terrain, // <--- Store it
             planet_type: PlanetType::EarthLike,
@@ -132,8 +158,7 @@ impl PlanetData {
     // but keeps the same terrain shape — phase 1 reuses one noise map for every planet type
     pub fn switch_planet_type(&mut self, to: PlanetType) {
         self.planet_type = to;
-        self.chunks = Arc::default();
-        self.edits = 0;
+        self.edits = PlanetEdits::for_terrain(self.resolution, self.seed);
     }
 
     // the highest layer blocks can be placed in: BUILD_MARGIN above the highest natural peak, but not
@@ -162,7 +187,30 @@ impl PlanetData {
     // stored edit entries (placed + mined)
     #[cfg(test)]
     pub fn edit_count(&self) -> usize {
-        self.edits
+        self.edits.count
+    }
+
+    // hands the edits over (for keeping them while another planet is installed); the planet is left unedited
+    pub fn take_edits(&mut self) -> PlanetEdits {
+        std::mem::replace(
+            &mut self.edits,
+            PlanetEdits::for_terrain(self.resolution, self.seed),
+        )
+    }
+
+    // puts edits taken from an earlier bake of this planet back; refused (false, nothing restored) when
+    // they were made on another terrain. Not an edit: the generation stays, the near impostor built
+    // after restoring is current
+    pub fn restore_edits(&mut self, edits: PlanetEdits) -> bool {
+        if edits.resolution != self.resolution || edits.noise_seed != self.seed {
+            return false;
+        }
+        self.edits = edits;
+        true
+    }
+
+    pub fn edit_generation(&self) -> u64 {
+        self.edit_generation
     }
 
     fn get_chunk_key(id: BlockId) -> ChunkKey {
@@ -179,16 +227,16 @@ impl PlanetData {
         }
         let natural = self.natural_type(id);
         let key = Self::get_chunk_key(id);
-        let (was_mined, was_placed) = self.chunks.get(&key).map_or((false, false), |m| {
+        let (was_mined, was_placed) = self.edits.chunks.get(&key).map_or((false, false), |m| {
             (m.mined.contains(&id), m.placed.contains_key(&id))
         });
         // putting back what was mined there just restores the terrain
         let restores = natural == Some(ty);
-        if !restores && !was_mined && !was_placed && self.edits >= MAX_EDITS {
+        if !restores && !was_mined && !was_placed && self.edits.count >= MAX_EDITS {
             return Err(EditRefused::EditLimit);
         }
 
-        let mods = Arc::make_mut(&mut self.chunks)
+        let mods = Arc::make_mut(&mut self.edits.chunks)
             .entry(key)
             .or_insert_with(ChunkMods::new);
         let before = mods.mined.len() + mods.placed.len();
@@ -198,7 +246,8 @@ impl PlanetData {
         } else {
             mods.placed.insert(id, ty);
         }
-        self.edits = self.edits + mods.mined.len() + mods.placed.len() - before;
+        self.edits.count = self.edits.count + mods.mined.len() + mods.placed.len() - before;
+        self.edit_generation += 1;
         Ok(())
     }
 
@@ -208,14 +257,14 @@ impl PlanetData {
         }
         let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v);
         let key = Self::get_chunk_key(id);
-        let (was_mined, was_placed) = self.chunks.get(&key).map_or((false, false), |m| {
+        let (was_mined, was_placed) = self.edits.chunks.get(&key).map_or((false, false), |m| {
             (m.mined.contains(&id), m.placed.contains_key(&id))
         });
-        if terrain_below && !was_mined && !was_placed && self.edits >= MAX_EDITS {
+        if terrain_below && !was_mined && !was_placed && self.edits.count >= MAX_EDITS {
             return Err(EditRefused::EditLimit);
         }
 
-        let mods = Arc::make_mut(&mut self.chunks)
+        let mods = Arc::make_mut(&mut self.edits.chunks)
             .entry(key)
             .or_insert_with(ChunkMods::new);
         let before = mods.mined.len() + mods.placed.len();
@@ -223,13 +272,14 @@ impl PlanetData {
         if terrain_below {
             mods.mined.insert(id);
         }
-        self.edits = self.edits + mods.mined.len() + mods.placed.len() - before;
+        self.edits.count = self.edits.count + mods.mined.len() + mods.placed.len() - before;
+        self.edit_generation += 1;
         Ok(())
     }
 
     pub fn exists(&self, id: BlockId) -> bool {
         let key = Self::get_chunk_key(id);
-        if let Some(mods) = self.chunks.get(&key) {
+        if let Some(mods) = self.edits.chunks.get(&key) {
             if mods.placed.contains_key(&id) {
                 return true;
             }
@@ -347,7 +397,7 @@ impl PlanetData {
 
     // the type of an existing block, None for air
     pub fn block_type(&self, id: BlockId) -> Option<BlockType> {
-        if let Some(mods) = self.chunks.get(&Self::get_chunk_key(id)) {
+        if let Some(mods) = self.edits.chunks.get(&Self::get_chunk_key(id)) {
             if let Some(&ty) = mods.placed.get(&id) {
                 return Some(ty);
             }
@@ -599,11 +649,11 @@ pub(crate) mod tests {
             .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
             .unwrap();
         let copy = planet.clone();
-        assert!(Arc::ptr_eq(&planet.chunks, &copy.chunks));
+        assert!(Arc::ptr_eq(&planet.edits.chunks, &copy.edits.chunks));
         planet
             .remove_block(id(0, 4, 4, planet.terrain.get_height(0, 4, 4)))
             .unwrap();
-        assert!(!Arc::ptr_eq(&planet.chunks, &copy.chunks));
+        assert!(!Arc::ptr_eq(&planet.edits.chunks, &copy.edits.chunks));
         assert_eq!(copy.edit_count(), 1, "the copy keeps its own snapshot");
         assert_eq!(planet.edit_count(), 2);
     }
@@ -614,7 +664,7 @@ pub(crate) mod tests {
         let mut planet = PlanetData::new(TEST_RES);
         let h = planet.terrain.get_height(0, 3, 3);
         planet.remove_block(id(0, 3, 3, h)).unwrap();
-        planet.edits = MAX_EDITS; // pretend the planet is full
+        planet.edits.set_count_for_test(MAX_EDITS); // pretend the planet is full
         let h2 = planet.terrain.get_height(0, 5, 5);
         assert_eq!(
             planet.remove_block(id(0, 5, 5, h2)),
@@ -627,7 +677,87 @@ pub(crate) mod tests {
         // putting the mined block back restores the terrain: one entry fewer
         let restore = planet.natural_type(id(0, 3, 3, h)).unwrap();
         assert_eq!(planet.add_block(id(0, 3, 3, h), restore), Ok(()));
-        assert_eq!(planet.edits, MAX_EDITS - 1);
+        assert_eq!(planet.edit_count(), MAX_EDITS - 1);
+    }
+
+    // edits taken from a planet and restored into a fresh bake of the same terrain come back intact
+    #[test]
+    fn edits_survive_take_and_restore() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let h = planet.terrain.get_height(0, 3, 3);
+        planet.remove_block(id(0, 3, 3, h)).unwrap();
+        let h5 = planet.terrain.get_height(0, 5, 5);
+        planet
+            .add_block(id(0, 5, 5, h5 + 1), BlockType::Stone)
+            .unwrap();
+        let edits = planet.take_edits();
+        assert!(planet.edits.is_empty(), "taking leaves the planet unedited");
+        let mut again = PlanetData::new(TEST_RES);
+        assert!(again.restore_edits(edits));
+        assert!(!again.exists(id(0, 3, 3, h)));
+        assert!(again.exists(id(0, 5, 5, h5 + 1)));
+    }
+
+    // edits never land on a different terrain
+    #[test]
+    fn edits_are_not_restored_into_another_terrain() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet
+            .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
+            .unwrap();
+        let edits = planet.take_edits();
+        let mut other_res = PlanetData::new(TEST_RES + 8);
+        assert!(!other_res.restore_edits(edits.clone()));
+        assert!(other_res.edits.is_empty());
+        let mut other_seed = PlanetData::new_seeded(TEST_RES, crate::noise::HOME_SEED + 1);
+        assert!(!other_seed.restore_edits(edits));
+        assert!(other_seed.edits.is_empty());
+    }
+
+    // the edit count travels with the edits, so MAX_EDITS still holds after a revisit
+    #[test]
+    fn restore_keeps_the_edit_count() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet
+            .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
+            .unwrap();
+        planet
+            .remove_block(id(0, 4, 4, planet.terrain.get_height(0, 4, 4)))
+            .unwrap();
+        let edits = planet.take_edits();
+        let mut again = PlanetData::new(TEST_RES);
+        again.restore_edits(edits);
+        assert_eq!(again.edit_count(), 2);
+    }
+
+    // successful edits bump the generation (the near impostor is outdated), refused ones don't
+    #[test]
+    fn edit_generation_counts_successful_edits_only() {
+        let mut planet = PlanetData::new(TEST_RES);
+        let g0 = planet.edit_generation();
+        planet
+            .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
+            .unwrap();
+        assert_eq!(planet.edit_generation(), g0 + 1);
+        let top = planet.build_ceiling();
+        assert!(planet
+            .add_block(id(0, 3, 3, top + 1), BlockType::Stone)
+            .is_err());
+        assert_eq!(planet.edit_generation(), g0 + 1);
+    }
+
+    // restoring isn't an edit: the near impostor built after it is current
+    #[test]
+    fn restore_does_not_bump_the_edit_generation() {
+        let mut planet = PlanetData::new(TEST_RES);
+        planet
+            .remove_block(id(0, 3, 3, planet.terrain.get_height(0, 3, 3)))
+            .unwrap();
+        let edits = planet.take_edits();
+        let mut again = PlanetData::new(TEST_RES);
+        let g = again.edit_generation();
+        again.restore_edits(edits);
+        assert_eq!(again.edit_generation(), g);
     }
 
     fn first_underwater_column(planet: &PlanetData) -> (u8, u32, u32) {
@@ -703,11 +833,12 @@ pub(crate) mod tests {
         planet
             .add_block(id, crate::material::BlockType::Stone)
             .unwrap();
-        assert!(planet.chunks.values().any(|m| !m.placed.is_empty()));
+        assert!(planet.edits.chunks.values().any(|m| !m.placed.is_empty()));
 
         let height_before = planet.terrain.get_height(0, 5, 5);
         planet.switch_planet_type(PlanetType::Volcanic);
         assert!(planet
+            .edits
             .chunks
             .values()
             .all(|m| m.placed.is_empty() && m.mined.is_empty()));
