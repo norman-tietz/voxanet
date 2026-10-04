@@ -1,0 +1,154 @@
+diff --git a/src/main.rs b/src/main.rs
+index 63d3029..f53499e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -287,7 +287,8 @@ impl Game {
+         let impostor_generation = baked.impostor_generation;
+         // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
+         // turned on past noon while baking
+-        let clock = Instant::now();
++        let clock = Instant::now()
++            - std::time::Duration::from_secs_f64(std::env::var("VOXANET_CLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)); // DEBUG-HACK (throwaway)
+         let spawn = noon_spawn(&baked.data, &galaxy, start_planet, 0.0);
+         install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
+         player.spawn(spawn);
+@@ -384,6 +385,62 @@ impl Game {
+         match mode {
+             GameMode::Planet => {
+                 controller.update_player(player, planet, dt);
++                if let Ok(cfg) = std::env::var("VOXANET_SHOWCASE") {
++                    // DEBUG-HACK (throwaway): "<dist radii> <sun deg> <volcano deg>" README showcase pose
++                    let v: Vec<f64> = cfg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
++                    let (d, sun_deg, volc_deg) = (v[0], v[1], v[2]);
++                    let t = clock.elapsed().as_secs_f64();
++                    let me = galaxy.planets[*loaded_world];
++                    let s = me.sun_dir_in_planet_frame(galaxy.star.position(), t).as_dvec3().normalize();
++                    // the volcanic planet that looks biggest from here
++                    let mut best: Option<(usize, glam::DVec3, f64)> = None;
++                    for (j, p) in galaxy.planets.iter().enumerate() {
++                        if p.planet_type != crate::biome::PlanetType::Volcanic { continue; }
++                        let rel = me.to_planet_frame(p.position_at(t), t);
++                        let ang = (p.radius as f64 / rel.length()).asin();
++                        if best.is_none_or(|b| ang > b.2) { best = Some((j, rel.normalize(), ang)); }
++                    }
++                    let (j, w, ang) = best.unwrap();
++                    let k = s.dot(w);
++                    let sw_deg = k.clamp(-1.0, 1.0).acos().to_degrees();
++                    let volc_deg = volc_deg.max((sw_deg - sun_deg).abs() + 0.5).min(sun_deg + sw_deg - 0.5);
++                    let (p_, q_) = (-(sun_deg.to_radians().cos()), -(volc_deg.to_radians().cos()));
++                    let det = 1.0 - k * k;
++                    let a = (p_ - q_ * k) / det;
++                    let b = (q_ - p_ * k) / det;
++                    let rem = 1.0 - (a * a + b * b + 2.0 * a * b * k);
++                    let ok = rem >= 0.0 && det > 1e-6;
++                    if ok {
++                        let n = s.cross(w).normalize();
++                        let u = (s * a + w * b + n * rem.sqrt()).normalize();
++                        let r = planet.resolution as f64 / 2.0;
++                        let up = u.as_vec3();
++                        player.position = (u * d * r).as_vec3();
++                        player.velocity = glam::Vec3::ZERO;
++                        let sv = s.as_vec3();
++                        let h = (sv - up * sv.dot(up)).normalize();
++                        player.rotation = glam::Quat::from_mat3(&glam::Mat3::from_cols(h.cross(up), up, -h));
++                        player.cam_pitch = -1.5;
++                        // roll so the sun sits toward the top-left corner (60.6 deg from up toward left at 16:9)
++                        let target = 60.6f32.to_radians();
++                        let mut best_roll = (0.0f32, f32::MAX);
++                        for i in 0..1440 {
++                            let roll = -std::f32::consts::PI + i as f32 * std::f32::consts::TAU / 1440.0;
++                            let cam = player.rotation * glam::Quat::from_axis_angle(glam::Vec3::X, -1.5) * glam::Quat::from_axis_angle(glam::Vec3::Z, roll);
++                            let (x, y) = (sv.dot(cam * glam::Vec3::X), sv.dot(cam * glam::Vec3::Y));
++                            let err = ((-x).atan2(y) - target).abs();
++                            if err < best_roll.1 { best_roll = (roll, err); }
++                        }
++                        player.cam_roll = best_roll.0;
++                        // centre the planet exactly: put it straight ahead of the camera
++                        let (_, cr) = controller.camera_pose(player);
++                        player.position = -(cr * glam::Vec3::NEG_Z) * (d * r) as f32;
++                        controller.fly_mode = true;
++                    }
++                    if (t * 2.0) as u64 % 4 == 0 {
++                        { let (_, cr) = controller.camera_pose(player); let fwd = (cr * glam::Vec3::NEG_Z).as_dvec3(); println!("DBG showcase t={t:.1} ok={ok} volc_deg={volc_deg:.1} volcano=#{} ang={:.3}deg sun_from_view={:.1} cam_sun_phase={:.1}", j + 1, ang.to_degrees(), fwd.dot(s).acos().to_degrees(), (player.position.as_dvec3().normalize().dot(s)).acos().to_degrees()); }
++                    }
++                }
+ 
+                 // raycast & cursor Update
+                 let width = renderer.config.width as f32;
+@@ -952,7 +1009,12 @@ impl ApplicationHandler for App {
+         }
+         let window = Arc::new(
+             event_loop
+-                .create_window(Window::default_attributes().with_title("voxanet"))
++                .create_window(if std::env::var("VOXANET_SHOWCASE").is_ok() {
++                    // DEBUG-HACK (throwaway): high-resolution showcase window
++                    Window::default_attributes().with_title("voxanet").with_inner_size(winit::dpi::PhysicalSize::new(2560, 1440))
++                } else {
++                    Window::default_attributes().with_title("voxanet")
++                })
+                 .unwrap(),
+         );
+         self.game = Some(Game::new(window, self.initial_biome, self.seed));
+diff --git a/src/renderer.rs b/src/renderer.rs
+index baf49ee..d71f06e 100644
+--- a/src/renderer.rs
++++ b/src/renderer.rs
+@@ -317,7 +317,10 @@ impl Renderer {
+             .await
+             .unwrap();
+ 
+-        let size = window.inner_size();
++        let mut size = window.inner_size();
++        if std::env::var("VOXANET_SHOWCASE").is_ok() {
++            size = winit::dpi::PhysicalSize::new(3840, 2160); // DEBUG-HACK (throwaway)
++        }
+         let mut config = surface
+             .get_default_config(&adapter, size.width, size.height)
+             .unwrap();
+@@ -1069,6 +1072,8 @@ impl Renderer {
+     }
+ 
+     pub fn resize(&mut self, width: u32, height: u32) {
++        // DEBUG-HACK (throwaway): 4K render surface for the README showcase
++        let (width, height) = if std::env::var("VOXANET_SHOWCASE").is_ok() { (3840, 2160) } else { (width, height) };
+         self.config.width = width;
+         self.config.height = height;
+         self.surface.configure(&self.device, &self.config);
+@@ -2412,7 +2417,7 @@ impl Renderer {
+                 pass.draw_indexed(0..self.cursor_inds, 0, 0..1);
+             }
+ 
+-            if controller.first_person {
++            if controller.first_person && std::env::var("VOXANET_SHOWCASE").is_err() { // DEBUG-HACK (throwaway)
+                 pass.set_pipeline(&self.pipeline_line);
+                 pass.set_bind_group(0, &self.global_bind_identity, &[]);
+                 pass.set_bind_group(1, &self.local_bind_identity, &[]);
+@@ -2741,9 +2746,12 @@ impl Renderer {
+             if flare {
+                 self.draw_flare(&mut pass);
+             }
+-            self.text_renderer
+-                .render(&self.text_atlas, &self.text_viewport, &mut pass)
+-                .unwrap();
++            if std::env::var("VOXANET_SHOWCASE").is_err() {
++                // DEBUG-HACK (throwaway): no HUD in the showcase
++                self.text_renderer
++                    .render(&self.text_atlas, &self.text_viewport, &mut pass)
++                    .unwrap();
++            }
+ 
+             // screenshot flash: drawn last (over the text too), so it's visible feedback on screen but,
+             // since it's timed to start only after this frame's capture (below), never in the PNG itself
+diff --git a/src/screenshot.rs b/src/screenshot.rs
+index ce0b9ff..975aa01 100644
+--- a/src/screenshot.rs
++++ b/src/screenshot.rs
+@@ -183,7 +183,7 @@ pub fn capture(
+         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+     );
+     let (out_w, out_h, rgba) = match buf.get_mapped_range(..) {
+-        Ok(view) => downsample_rgba(&view, width, height, padded, bgra, 1280),
++        Ok(view) => downsample_rgba(&view, width, height, padded, bgra, if std::env::var("VOXANET_SHOWCASE").is_ok() { 1 << 20 } else { 1280 }) /* DEBUG-HACK (throwaway) */,
+         Err(e) => {
+             println!("screenshot: readback map failed: {e}");
+             return;
