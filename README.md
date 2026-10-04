@@ -99,6 +99,8 @@ In water deeper than about half a block you swim at half the walking speed; you 
 | Middle mouse button (wheel click) | Pick the targeted block's type as the block type to place |
 | Left mouse button (nothing targeted) | Lock the mouse cursor again (first person) |
 
+Your edits stay on a planet while the game runs: fly to another planet and back and they're still there (they are not saved when you quit). Large builds and excavations also show in the distant terrain and from orbit.
+
 ### Screenshots
 
 | Input | Action |
