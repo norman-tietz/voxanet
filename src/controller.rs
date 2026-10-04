@@ -11,6 +11,18 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 // keyboard turning speed (Q/E), radians per second
 const TURN_SPEED: f32 = 2.0;
+pub const ROLL_SPEED: f32 = 1.5; // rad/s, Q/E in fly mode and galaxy flight
+
+// Q/E as (turn, roll) for this step: first-person fly mode rolls (Q left), everything else turns
+// (walking, swimming, third person, where Q/E are the only way to turn)
+fn q_e_turn_and_roll(q: bool, e: bool, fly_mode: bool, first_person: bool, dt: f32) -> (f32, f32) {
+    let amount = (q as i32 - e as i32) as f32 * dt;
+    if fly_mode && first_person {
+        (0.0, amount * ROLL_SPEED)
+    } else {
+        (amount * TURN_SPEED, 0.0)
+    }
+}
 
 pub struct Controller {
     pub cam_dist: f32,
@@ -84,17 +96,21 @@ impl Controller {
         (input, jump, self.move_down, self.sprint, rotation_delta)
     }
 
+    // galaxy flight: Q/E roll (Q left), radians for this step
+    pub fn galaxy_roll(&self, dt: f32) -> f32 {
+        q_e_turn_and_roll(self.keys[5], self.keys[6], true, true, dt).1
+    }
+
     pub fn update_player(&mut self, player: &mut Player, planet: &PlanetData, dt: f32) {
         let (input, jump, down, sprint, rotation_delta) = self.raw_input();
 
-        // Q/E turn left/right in both views; in third person they are the only way to turn
-        let mut turn = 0.0;
-        if self.keys[5] {
-            turn += TURN_SPEED * dt;
-        } // Q
-        if self.keys[6] {
-            turn -= TURN_SPEED * dt;
-        } // E
+        let (turn, roll) = q_e_turn_and_roll(
+            self.keys[5],
+            self.keys[6],
+            self.fly_mode,
+            self.first_person,
+            dt,
+        );
 
         let touched_down = player.update(
             dt,
@@ -104,6 +120,7 @@ impl Controller {
             down,
             rotation_delta,
             turn,
+            roll,
             self.fly_mode,
             sprint,
         );
@@ -353,6 +370,28 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Q/E: roll in first-person fly mode, turn everywhere else (walking, swimming, third person)
+    #[test]
+    fn q_e_roll_when_flying_in_first_person_and_turn_otherwise() {
+        let dt = 0.5;
+        assert_eq!(
+            q_e_turn_and_roll(true, false, true, true, dt),
+            (0.0, ROLL_SPEED * dt)
+        );
+        assert_eq!(
+            q_e_turn_and_roll(false, true, true, true, dt),
+            (0.0, -ROLL_SPEED * dt)
+        );
+        assert_eq!(
+            q_e_turn_and_roll(true, false, false, true, dt),
+            (TURN_SPEED * dt, 0.0)
+        );
+        assert_eq!(
+            q_e_turn_and_roll(true, false, true, false, dt),
+            (TURN_SPEED * dt, 0.0)
+        );
+    }
 
     fn player_on_a_slope() -> Player {
         let mut player = Player::new();

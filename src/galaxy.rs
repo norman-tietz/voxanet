@@ -321,8 +321,12 @@ impl GalaxyFlight {
         down: bool,
         mouse_delta: (f32, f32),
         sprint: bool,
+        roll: f32, // Q/E for this step: about the view direction, positive rolls left
         up: Option<Vec3>,
     ) {
+        if roll.abs() > 1e-6 {
+            self.rotation = (self.rotation * Quat::from_axis_angle(Vec3::Z, roll)).normalize();
+        }
         let yaw_delta = -mouse_delta.0 * self.mouse_sens;
         if yaw_delta.abs() > 1e-6 {
             self.rotation =
@@ -363,7 +367,7 @@ impl GalaxyFlight {
 // the axis sideways mouse turns the view about. It must agree with the camera's own up, or the turn
 // comes out as a pitch (camera on its side) or mirrored (upside down). Free flight: the camera's up.
 // Captured: the planet's local up, like the planet camera, once roll is about level; while it's
-// still rolled (just captured, level_roll eases it at ROLL_LEVEL_RATE) it blends toward the camera's
+// rolled (Q/E, or captured with any roll) it blends toward the camera's
 // up, and on the side of the local up the camera's up is on, so a turn is never inverted.
 fn yaw_axis(rotation: Quat, up: Option<Vec3>) -> Vec3 {
     let camera_up = rotation * Vec3::Y;
@@ -399,28 +403,6 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) ->
     } else {
         Vec3::ZERO
     }
-}
-
-// how fast roll eases toward level while captured by a planet, radians per second
-pub const ROLL_LEVEL_RATE: f32 = 0.8;
-
-// turns `rotation` about its own view axis by at most `max_angle`, toward the orientation whose
-// right axis is horizontal for the given `up` (the planet camera has no roll). Leaves it alone when
-// looking straight along `up`, where roll is undefined.
-pub fn level_roll(rotation: Quat, up: Vec3, max_angle: f32) -> Quat {
-    let forward = rotation * Vec3::NEG_Z;
-    let level_right = forward.cross(up);
-    if level_right.length_squared() < 1e-6 {
-        return rotation;
-    }
-    let level_right = level_right.normalize();
-    let right = rotation * Vec3::X;
-    let angle = right
-        .cross(level_right)
-        .dot(forward)
-        .atan2(right.dot(level_right));
-    let step = angle.clamp(-max_angle, max_angle);
-    (Quat::from_axis_angle(forward, step) * rotation).normalize()
 }
 
 // Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
@@ -550,6 +532,7 @@ mod tests {
             false,
             (80.0, 0.0),
             false,
+            0.0,
             Some(up),
         );
         let after = flight.rotation * Vec3::NEG_Z;
@@ -568,7 +551,16 @@ mod tests {
             flight.rotation * Vec3::X,
             flight.rotation * Vec3::Y,
         );
-        flight.update(1.0 / 60.0, Vec3::ZERO, false, false, (80.0, 0.0), false, up);
+        flight.update(
+            1.0 / 60.0,
+            Vec3::ZERO,
+            false,
+            false,
+            (80.0, 0.0),
+            false,
+            0.0,
+            up,
+        );
         let after = flight.rotation * Vec3::NEG_Z;
         ((after - before).dot(right), (after - before).dot(cam_up))
     }
@@ -591,7 +583,7 @@ mod tests {
     }
 
     // just captured with the camera upside down or on its side relative to the planet's local up
-    // (roll only eases level at ROLL_LEVEL_RATE): mouse-right still turns right, never mirrored
+    // (or rolled with Q/E): mouse-right still turns right, never mirrored
     #[test]
     fn captured_yaw_is_never_inverted_while_roll_levels() {
         let up = Some(Vec3::Y);
@@ -606,12 +598,44 @@ mod tests {
         }
     }
 
+    // Q/E: roll about the view direction (Q left: the camera's right side comes up); the view direction
+    // itself doesn't move
+    #[test]
+    fn q_e_roll_about_the_view_direction() {
+        for up in [None, Some(Vec3::Y)] {
+            let mut flight = GalaxyFlight::new(DVec3::new(0.0, 600.0, 0.0));
+            flight.rotation = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.2);
+            let (forward, right) = (flight.rotation * Vec3::NEG_Z, flight.rotation * Vec3::X);
+            let camera_up = flight.rotation * Vec3::Y;
+            flight.update(
+                1.0 / 60.0,
+                Vec3::ZERO,
+                false,
+                false,
+                (0.0, 0.0),
+                false,
+                0.3,
+                up,
+            );
+            assert!(
+                (flight.rotation * Vec3::NEG_Z).dot(forward) > 1.0 - 1e-5,
+                "{up:?}"
+            );
+            let new_right = flight.rotation * Vec3::X;
+            assert!(
+                new_right.dot(camera_up) > 0.25,
+                "{up:?}: Q didn't raise the right side"
+            );
+            assert!((new_right.dot(right) - 0.3f32.cos()).abs() < 1e-4, "{up:?}");
+        }
+    }
+
     // free flight: Space/Shift climb and descend along the camera's own up
     #[test]
     fn free_flight_climbs_along_the_camera_up() {
         let mut flight = GalaxyFlight::new(DVec3::ZERO);
         flight.rotation = Quat::from_rotation_z(3.14159); // upside down relative to galaxy +Y
-        flight.update(1.0, Vec3::ZERO, true, false, (0.0, 0.0), false, None);
+        flight.update(1.0, Vec3::ZERO, true, false, (0.0, 0.0), false, 0.0, None);
         assert!(flight.velocity.y < -1.0, "{:?}", flight.velocity);
     }
 
@@ -625,54 +649,6 @@ mod tests {
             compose_fly_direction(Vec3::ZERO, false, true, Vec3::Z),
             -Vec3::Z
         );
-    }
-
-    fn roll_of(rotation: Quat, up: Vec3) -> f32 {
-        // how far the camera's right axis tips out of the horizontal plane
-        (rotation * Vec3::X).dot(up).asin().abs()
-    }
-
-    #[test]
-    fn level_roll_converges_to_level_and_keeps_the_view_direction() {
-        let up = Vec3::Y;
-        let mut rot =
-            Quat::from_axis_angle(Vec3::NEG_Z, 0.5) * Quat::from_axis_angle(Vec3::X, -0.2);
-        let forward = rot * Vec3::NEG_Z;
-        assert!(roll_of(rot, up) > 0.3);
-        for _ in 0..10 {
-            rot = level_roll(rot, up, 0.1);
-        }
-        assert!(
-            roll_of(rot, up) < 1e-3,
-            "still rolled: {}",
-            roll_of(rot, up)
-        );
-        assert!(
-            ((rot * Vec3::NEG_Z) - forward).length() < 1e-4,
-            "view direction moved"
-        );
-    }
-
-    #[test]
-    fn level_roll_turns_at_most_max_angle_per_step() {
-        let up = Vec3::Y;
-        let rot = Quat::from_axis_angle(Vec3::NEG_Z, 0.5);
-        let stepped = level_roll(rot, up, 0.1);
-        assert!((rot.angle_between(stepped) - 0.1).abs() < 1e-4);
-    }
-
-    // looking straight along `up` (at the planet's centre, or straight away) roll is undefined:
-    // leave it alone rather than spin
-    #[test]
-    fn level_roll_leaves_a_straight_up_or_down_view_alone() {
-        let up = Vec3::Y;
-        for rot in [
-            Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::Y),
-            Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::NEG_Y)
-                * Quat::from_axis_angle(Vec3::NEG_Z, 0.7),
-        ] {
-            assert!(level_roll(rot, up, 0.1).dot(rot).abs() > 1.0 - 1e-6);
-        }
     }
 
     #[test]
@@ -1107,6 +1083,7 @@ mod tests {
                 false,
                 (0.0, 0.0),
                 false,
+                0.0,
                 None,
             );
         }

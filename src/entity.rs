@@ -24,6 +24,12 @@ const FLY_LOOKAHEAD_TIME: f32 = 1.5; // seconds of travel to look ahead, scaled 
 const FLY_LOOKAHEAD_MIN: f32 = 5.0;
 const FLY_LOOKAHEAD_MAX: f32 = 60.0;
 const FLY_LOOKAHEAD_SAMPLES: u32 = 4; // points between the player and the lookahead distance
+const LANDING_ROLL_LEVEL_RATE: f32 = 1.5; // rad/s an F landing eases the roll level
+
+// an angle wrapped into -PI..PI
+fn wrap_angle(a: f32) -> f32 {
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
 const FLY_CLIMB_RATE: f32 = 15.0; // world units/s the floor correction may lift the player
 
 // Compute damage amount for this tick. Pure decision logic, testable without a real planet/terrain.
@@ -103,6 +109,7 @@ pub struct Player {
     pub velocity: Vec3,
     pub rotation: Quat,
     pub cam_pitch: f32,
+    pub cam_roll: f32, // fly mode only (Q/E): roll about the view direction; level when walking/swimming
     pub grounded: bool,
     pub debug_mode: bool,
     pub health: f32,
@@ -125,6 +132,7 @@ impl Player {
             velocity: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             cam_pitch: 0.0,
+            cam_roll: 0.0,
             grounded: false,
             debug_mode: false,
             health: MAX_HEALTH,
@@ -147,11 +155,13 @@ impl Player {
         self.spawn_point = pos;
         self.landing = false;
         self.taking_off = None;
+        self.cam_roll = 0.0;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
 
-    // turn: keyboard yaw in radians for this step, positive turns left
+    // turn: keyboard yaw in radians for this step, positive turns left; roll: keyboard roll for this
+    // step (fly mode), positive rolls left
     // returns true when an F-landing touched down this tick (the caller turns fly mode off)
     pub fn update(
         &mut self,
@@ -162,10 +172,29 @@ impl Player {
         down: bool,
         mouse_delta: (f32, f32),
         turn: f32,
+        roll: f32,
         flying: bool,
         sprint: bool,
     ) -> bool {
         let up = Physics::get_up_vector(self.position);
+
+        // --- ROLL ---
+        // walking and swimming are level; an F landing eases the roll level and ignores Q/E, a take-off
+        // climb keeps it as it is; otherwise Q/E roll freely
+        if !flying {
+            self.cam_roll = 0.0;
+        } else if self.landing {
+            let step = LANDING_ROLL_LEVEL_RATE * dt;
+            self.cam_roll -= self.cam_roll.clamp(-step, step);
+        } else if self.taking_off.is_none() {
+            self.cam_roll = wrap_angle(self.cam_roll + roll);
+        }
+        // the mouse moves in screen directions: turn the rolled screen's right/down back into yaw/pitch
+        let (sin, cos) = self.cam_roll.sin_cos();
+        let mouse_delta = (
+            mouse_delta.0 * cos + mouse_delta.1 * sin,
+            -mouse_delta.0 * sin + mouse_delta.1 * cos,
+        );
 
         // --- ROTATION (YAW) ---
         let yaw_delta = -mouse_delta.0 * self.mouse_sens + turn;
@@ -420,12 +449,13 @@ impl Player {
         let up = Physics::get_up_vector(self.position);
         let cam_pos = self.position + (up * Physics::EYE_HEIGHT);
 
-        let pitch_rot = Quat::from_axis_angle(Vec3::X, self.cam_pitch);
-        let final_rot = self.rotation * pitch_rot;
-
+        let final_rot = self.rotation
+            * Quat::from_axis_angle(Vec3::X, self.cam_pitch)
+            * Quat::from_axis_angle(Vec3::Z, self.cam_roll);
         let forward = final_rot * Vec3::NEG_Z;
 
-        glam::camera::rh::view::look_at_mat4(cam_pos, cam_pos + forward, up)
+        // the rolled camera's own up (unrolled it lies in the plane of the planet's up and `forward`)
+        glam::camera::rh::view::look_at_mat4(cam_pos, cam_pos + forward, final_rot * Vec3::Y)
     }
 }
 
@@ -436,6 +466,100 @@ mod tests {
     // Test wrapper that calls the production function
     fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
         damage_this_tick(depth, damaging, dt)
+    }
+
+    // a flying player over flat-ish ground, looking slightly down
+    fn flying_player() -> (Player, PlanetData) {
+        let planet = PlanetData::new(32);
+        let mut player = Player::new();
+        let dir = crate::gen::CoordSystem::get_block_center(0, 10, 10, 30, 32).normalize();
+        player.spawn(dir * crate::gen::CoordSystem::get_layer_radius(30, 32));
+        player.cam_pitch = -0.2;
+        (player, planet)
+    }
+
+    fn tick(player: &mut Player, planet: &PlanetData, mouse: (f32, f32), roll: f32, flying: bool) {
+        player.update(
+            1.0 / 60.0,
+            planet,
+            Vec3::ZERO,
+            false,
+            false,
+            mouse,
+            0.0,
+            roll,
+            flying,
+            false,
+        );
+    }
+
+    // the camera's right and up vectors in world space (the view matrix's inverse)
+    fn camera_axes(player: &Player) -> (Vec3, Vec3, Vec3) {
+        let cam = player.get_view_matrix().inverse();
+        (
+            cam.x_axis.truncate(),
+            cam.y_axis.truncate(),
+            -cam.z_axis.truncate(),
+        )
+    }
+
+    // fly mode: Q/E roll the camera (Q left: its right side comes up); walking is always level
+    #[test]
+    fn fly_mode_rolls_and_walking_is_level() {
+        let (mut player, planet) = flying_player();
+        let (right, up, forward) = camera_axes(&player);
+        tick(&mut player, &planet, (0.0, 0.0), 0.4, true);
+        assert!((player.cam_roll - 0.4).abs() < 1e-6);
+        let (right2, _, forward2) = camera_axes(&player);
+        assert!(
+            forward2.dot(forward) > 1.0 - 1e-4,
+            "rolling moved the view direction"
+        );
+        assert!(
+            right2.dot(up) > 0.3,
+            "Q didn't raise the camera's right side"
+        );
+        assert!((right2.dot(right) - 0.4f32.cos()).abs() < 1e-3);
+        tick(&mut player, &planet, (0.0, 0.0), 0.0, false);
+        assert_eq!(player.cam_roll, 0.0, "walking (or swimming) is level");
+    }
+
+    // rolled 90°, moving the mouse right still turns the view toward the screen's right
+    #[test]
+    fn mouse_turns_toward_the_screen_when_rolled() {
+        let (mut player, planet) = flying_player();
+        player.cam_roll = std::f32::consts::FRAC_PI_2;
+        let (screen_right, screen_up, forward) = camera_axes(&player);
+        tick(&mut player, &planet, (40.0, 0.0), 0.0, true);
+        let (_, _, forward2) = camera_axes(&player);
+        let moved = forward2 - forward;
+        assert!(moved.dot(screen_right) > 0.05, "{moved:?}");
+        assert!(
+            moved.dot(screen_up).abs() < 0.2 * moved.dot(screen_right),
+            "{moved:?}"
+        );
+    }
+
+    // an F landing ignores Q/E and eases the roll level; so does nothing during a take-off climb
+    #[test]
+    fn landing_levels_the_roll_and_ignores_q_e() {
+        let (mut player, planet) = flying_player();
+        player.cam_roll = 1.0;
+        player.landing = true;
+        let mut last = player.cam_roll;
+        for _ in 0..30 {
+            tick(&mut player, &planet, (0.0, 0.0), 0.2, true);
+            if !player.landing {
+                break;
+            }
+            assert!(player.cam_roll < last, "roll didn't ease toward level");
+            last = player.cam_roll;
+        }
+        let (mut player, planet) = flying_player();
+        player.cam_roll = 0.5;
+        player.taking_off = Some(player.position.length() + 20.0);
+        tick(&mut player, &planet, (0.0, 0.0), 0.3, true);
+        assert_eq!(player.cam_roll, 0.5, "Q/E rolled during the take-off climb");
     }
 
     // F take-off: the climb rises smoothly to its target and ends there (fly mode, hovering)
@@ -460,6 +584,7 @@ mod tests {
                 false,
                 false,
                 (0.0, 0.0),
+                0.0,
                 0.0,
                 true,
                 false,

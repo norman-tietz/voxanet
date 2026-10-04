@@ -47,7 +47,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 |-------|--------|
 | `W` `A` `S` `D` | Move |
 | Mouse | Look around (first person) |
-| `Q` / `E` | Turn left / right (first and third person) |
+| `Q` / `E` | Turn left / right (first and third person); while flying in first person, roll left / right instead |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
 | `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground; `F` again cancels it; refused over lava) |
@@ -76,6 +76,7 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | `W` `A` `S` `D` | Fly forward/left/back/right |
 | `Space` / `Left Shift` (hold) | Climb / descend: away from / toward the planet you are orbiting, otherwise along the top of your screen |
 | `Left Ctrl` (hold) | Boost |
+| `Q` / `E` (hold) | Roll left / right (the roll is kept when you enter or leave a planet's voxel world) |
 
 Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
 

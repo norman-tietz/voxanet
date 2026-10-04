@@ -23,9 +23,9 @@ pub fn should_lift_off(distance_radii: f32) -> bool {
 }
 
 // galaxy flight (eye position and orientation, planet frame) -> the planet engine's player: feet
-// position, upright rotation (local Y = up, local -Z = heading) and camera pitch. The eye stays where
-// it is; roll is dropped (captured flight is levelled anyway); pitch is clamped to MAX_PITCH.
-pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32) {
+// position, upright rotation (local Y = up, local -Z = heading), camera pitch and roll. The eye stays
+// where it is and a rolled view stays rolled; pitch is clamped to MAX_PITCH.
+pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32, f32) {
     let up = eye.normalize();
     let forward = rotation * Vec3::NEG_Z;
     let pitch = forward
@@ -45,23 +45,36 @@ pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32) {
     }
     let heading = heading.normalize();
     let player_rotation = Quat::from_mat3(&Mat3::from_cols(heading.cross(up), up, -heading));
+    // roll: how far the camera's right axis is turned about the view from the unrolled camera's
+    // (Player::get_view_matrix applies it after the pitch)
+    let unrolled = player_rotation * Quat::from_axis_angle(Vec3::X, pitch);
+    let right = rotation * Vec3::X;
+    let roll = right
+        .dot(unrolled * Vec3::Y)
+        .atan2(right.dot(unrolled * Vec3::X));
     (
         eye - up * Physics::EYE_HEIGHT,
         player_rotation.normalize(),
         pitch,
+        roll,
     )
 }
 
 // the planet engine's player -> galaxy flight: eye position and the camera's orientation (the same
-// rotation * pitch the first-person view matrix uses, Player::get_view_matrix), so the view doesn't
-// move on liftoff
-pub fn flight_pose_from_player(position: Vec3, rotation: Quat, cam_pitch: f32) -> (Vec3, Quat) {
+// rotation * pitch * roll the first-person view matrix uses, Player::get_view_matrix), so the view
+// doesn't move on liftoff
+pub fn flight_pose_from_player(
+    position: Vec3,
+    rotation: Quat,
+    cam_pitch: f32,
+    cam_roll: f32,
+) -> (Vec3, Quat) {
     let up = position.normalize();
     let eye = position + up * Physics::EYE_HEIGHT;
-    (
-        eye,
-        (rotation * Quat::from_axis_angle(Vec3::X, cam_pitch)).normalize(),
-    )
+    let camera = rotation
+        * Quat::from_axis_angle(Vec3::X, cam_pitch)
+        * Quat::from_axis_angle(Vec3::Z, cam_roll);
+    (eye, camera.normalize())
 }
 
 // the galaxy flight a liftoff hands over to: the planet camera's eye and orientation
@@ -71,9 +84,10 @@ pub fn liftoff_flight(
     position: Vec3,
     rotation: Quat,
     cam_pitch: f32,
+    cam_roll: f32,
     velocity: Vec3,
 ) -> crate::galaxy::GalaxyFlight {
-    let (eye, flight_rotation) = flight_pose_from_player(position, rotation, cam_pitch);
+    let (eye, flight_rotation) = flight_pose_from_player(position, rotation, cam_pitch, cam_roll);
     let mut flight = crate::galaxy::GalaxyFlight::new(eye.as_dvec3());
     flight.rotation = flight_rotation;
     flight.velocity = velocity.as_dvec3();
@@ -213,9 +227,9 @@ mod tests {
         let position = Vec3::new(0.0, 600.0, 0.0);
         let rotation = Quat::IDENTITY; // upright at +Y, looking along -Z
         let velocity = Vec3::new(10.0, 620.0, -5.0);
-        let flight = liftoff_flight(position, rotation, -0.3, velocity);
+        let flight = liftoff_flight(position, rotation, -0.3, 0.0, velocity);
         assert!((flight.velocity - velocity.as_dvec3()).length() < 1e-6);
-        let (eye, flight_rot) = flight_pose_from_player(position, rotation, -0.3);
+        let (eye, flight_rot) = flight_pose_from_player(position, rotation, -0.3, 0.0);
         assert!((flight.position - eye.as_dvec3()).length() < 1e-6);
         assert!(flight.rotation.dot(flight_rot).abs() > 1.0 - 1e-6);
     }
@@ -444,14 +458,19 @@ mod tests {
         let heading = up.cross(Vec3::X).normalize(); // some horizontal direction
         let rotation = Quat::from_mat3(&glam::Mat3::from_cols(heading.cross(up), up, -heading));
         let cam_pitch = -0.6;
+        let cam_roll = 0.7; // a rolled view stays rolled across the handovers
 
-        let (eye, flight_rot) = flight_pose_from_player(position, rotation, cam_pitch);
+        let (eye, flight_rot) = flight_pose_from_player(position, rotation, cam_pitch, cam_roll);
         assert!((eye - (position + up * crate::physics::Physics::EYE_HEIGHT)).length() < 1e-4);
         assert!(((flight_rot * Vec3::NEG_Z) - view_dir(rotation, cam_pitch)).length() < 1e-4);
 
-        let (p2, r2, pitch2) = player_pose_from_flight(eye, flight_rot);
+        let (p2, r2, pitch2, roll2) = player_pose_from_flight(eye, flight_rot);
         assert!((p2 - position).length() < 1e-3, "{p2:?} vs {position:?}");
         assert!((pitch2 - cam_pitch).abs() < 1e-4);
+        assert!(
+            (roll2 - cam_roll).abs() < 1e-4,
+            "roll {roll2} vs {cam_roll}"
+        );
         assert!((view_dir(r2, pitch2) - view_dir(rotation, cam_pitch)).length() < 1e-4);
         assert!(
             ((r2 * Vec3::Y) - up).length() < 1e-4,
@@ -465,7 +484,7 @@ mod tests {
     fn straight_down_flight_becomes_the_steepest_planet_view() {
         let eye = Vec3::new(0.0, 0.0, 500.0);
         let rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -eye.normalize());
-        let (position, player_rot, pitch) = player_pose_from_flight(eye, rotation);
+        let (position, player_rot, pitch, _roll) = player_pose_from_flight(eye, rotation);
         assert!(position.is_finite() && player_rot.is_finite() && pitch.is_finite());
         assert!((pitch + MAX_PITCH).abs() < 1e-6, "pitch {pitch}");
         let dir = view_dir(player_rot, pitch);

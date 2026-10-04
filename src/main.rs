@@ -389,7 +389,8 @@ impl Game {
                     FlightFrame::Free => None,
                     FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
                 };
-                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, up);
+                let roll = controller.galaxy_roll(dt);
+                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, roll, up);
                 let t = clock.elapsed().as_secs_f64();
                 // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
                 let next = crate::galaxy::next_flight_frame(
@@ -405,15 +406,6 @@ impl Game {
                         FlightFrame::Free => println!("Leaving orbit"),
                     }
                     *flight_frame = next;
-                }
-                // in a planet's frame, ease roll level with its horizon: the planet camera has none
-                if let FlightFrame::Captured(_) = *flight_frame {
-                    let up = galaxy_flight.position.normalize_or_zero().as_vec3();
-                    galaxy_flight.rotation = crate::galaxy::level_roll(
-                        galaxy_flight.rotation,
-                        up,
-                        crate::galaxy::ROLL_LEVEL_RATE * dt,
-                    );
                 }
                 if let FlightFrame::Captured(i) = *flight_frame {
                     // the impostor is all there is until the voxel world is ready: don't sink into it
@@ -447,16 +439,18 @@ impl Game {
         }
 
         if let Some(i) = land_on {
-            // galaxy flight -> voxel engine: same eye, same view direction, in fly mode
-            let (position, rotation, cam_pitch) = crate::landing::player_pose_from_flight(
+            // galaxy flight -> voxel engine: same eye, same view direction and roll, in fly mode
+            let (position, rotation, cam_pitch, cam_roll) = crate::landing::player_pose_from_flight(
                 galaxy_flight.position.as_vec3(),
                 galaxy_flight.rotation,
             );
             player.position = position;
             player.rotation = rotation;
             player.cam_pitch = cam_pitch;
+            player.cam_roll = cam_roll;
             player.velocity = glam::Vec3::ZERO;
             player.landing = false;
+            player.taking_off = None;
             player.handover_altitude =
                 Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
             // dying here respawns on dry land below, not back in orbit
@@ -468,11 +462,12 @@ impl Game {
             println!("Landing handover onto #{}", i + 1);
         }
         if let Some(i) = lift_off_from {
-            // voxel engine -> captured galaxy flight: same eye, same view direction, same velocity
+            // voxel engine -> captured galaxy flight: same eye, same view direction and roll, same velocity
             *galaxy_flight = crate::landing::liftoff_flight(
                 player.position,
                 player.rotation,
                 player.cam_pitch,
+                player.cam_roll,
                 player.velocity,
             );
             *flight_frame = FlightFrame::Captured(i);
