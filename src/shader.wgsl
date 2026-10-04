@@ -45,6 +45,7 @@ struct Biome {
     star_limb: vec4<f32>,
     star_corona: vec4<f32>,  // rgb, w: corona_size
     star_params: vec4<f32>,  // granulation, granule_scale, sunspots, unused
+    star_frame: vec4<f32>,   // quaternion: planet frame -> galaxy space (GalaxyPlanet::orientation)
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
@@ -435,6 +436,7 @@ fn engine_atmosphere() -> Atmosphere {
         StarLook(biome.star_surface.rgb, biome.star_limb.rgb, biome.star_corona.rgb, biome.star_params.x,
                  biome.star_params.y, biome.star_params.z, biome.star_corona.w),
         biome.sun.w,
+        biome.star_frame,
         global.screen.w,
     );
 }

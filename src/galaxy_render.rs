@@ -74,9 +74,12 @@ pub(crate) fn star_on_screen(
         return None;
     }
     let dist = offset.length();
-    let r = galaxy.star.radius as f32;
+    // the radius fs_star draws (at least the minimum angular size); its nearest point along the view
+    // axis is `along - r` for a star anywhere on screen (an off-axis star's edge is nearer than the
+    // point on its centre's line of sight)
+    let r = (galaxy.star.radius as f32).max(dist * STAR_MIN_ANGULAR_RADIUS);
     let along = offset.dot(camera.rotation * Vec3::NEG_Z);
-    let nearest = ((dist - r) * along / dist).max(NEAR_PLANE);
+    let nearest = (along - r).max(NEAR_PLANE);
     Some((
         glam::Vec2::new(clip.x / clip.w, clip.y / clip.w),
         star_depth(nearest),
@@ -938,6 +941,29 @@ mod tests {
         let small_near_back = depth_of(dir * (1_000_000.0 + 40.0));
         let big_far_front = depth_of(dir * (3_000_000.0 - 5_000.0));
         assert!(small_near_back > big_far_front);
+    }
+
+    // an unobstructed sun off the view axis: the flare's expected depth must not be exceeded by any point
+    // of the drawn star (its edge toward the screen border is nearer along the view axis than its centre's
+    // line of sight), or the star occludes its own flare
+    #[test]
+    fn the_flare_depth_covers_an_off_axis_star() {
+        let galaxy = Galaxy::generate(1);
+        let r = galaxy.star.radius;
+        for (dist, yaw) in [(2.2 * r, 0.25f32), (6.0 * r, 0.35), (30.0 * r, 0.5)] {
+            let camera = GalaxyCamera {
+                position: DVec3::new(0.0, 0.0, dist),
+                rotation: Quat::from_rotation_y(yaw), // the star (at -Z) off to the side
+                fov_y: FOV_Y_RADIANS,
+            };
+            let (_, expected, _) = star_on_screen(&camera, &galaxy, 16.0 / 9.0).unwrap();
+            let along = (dist as f32) * yaw.cos();
+            let nearest_point_depth = star_depth(along - r as f32);
+            assert!(
+                expected >= nearest_point_depth * 0.999,
+                "dist {dist}, yaw {yaw}: expected {expected} < the star's own {nearest_point_depth}"
+            );
+        }
     }
 
     #[test]

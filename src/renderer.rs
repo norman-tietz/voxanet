@@ -80,6 +80,7 @@ pub struct BiomeUniform {
     pub star_limb: [f32; 4],
     pub star_corona: [f32; 4], // rgb, w: corona_size
     pub star_params: [f32; 4], // granulation, granule_scale, sunspots, unused
+    pub star_frame: [f32; 4], // quaternion planet frame -> galaxy space, so the sky disc shows the star's own surface
 }
 
 impl BiomeUniform {
@@ -88,6 +89,7 @@ impl BiomeUniform {
         def: &crate::biome::PlanetTypeDef,
         star: &crate::galaxy::Star,
         angular_radius: f32,
+        star_frame: glam::Quat,
     ) -> Self {
         let look = star.star_type.def();
         let (shallow, deep, behavior) = match def.liquid {
@@ -116,6 +118,7 @@ impl BiomeUniform {
             star_limb: v4(look.limb_color, 0.0),
             star_corona: v4(look.corona_color, look.corona_size),
             star_params: [look.granulation, look.granule_scale, look.sunspots, 0.0],
+            star_frame: star_frame.to_array(),
         }
     }
 }
@@ -2124,16 +2127,21 @@ impl Renderer {
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
 
         // the installed planet is the one the backdrop leaves out (the voxel engine draws it)
-        let angular_radius = match backdrop.content {
+        let (angular_radius, star_frame) = match backdrop.content {
             crate::galaxy_render::GalaxyContent::AllButPlanet(i) => {
-                backdrop.galaxy.planets[i].star_angular_radius(&backdrop.galaxy.star)
+                let p = &backdrop.galaxy.planets[i];
+                (
+                    p.star_angular_radius(&backdrop.galaxy.star),
+                    p.orientation(backdrop.t),
+                )
             }
-            crate::galaxy_render::GalaxyContent::Everything => 0.0,
+            crate::galaxy_render::GalaxyContent::Everything => (0.0, glam::Quat::IDENTITY),
         };
         let biome_data = BiomeUniform::from_def(
             &planet.planet_type.def(),
             &backdrop.galaxy.star,
             angular_radius,
+            star_frame,
         );
         // lens flare: the sun projected far along its direction; none at night (below the horizon) or
         // under water, dimmed by clouds on the GPU
@@ -3052,10 +3060,10 @@ pub(crate) mod tests {
         assert_valid_wgsl(FLARE_SHADER);
     }
 
-    // the Rust BiomeUniform must match the WGSL struct: 8 vec4s now (the sun added)
+    // the Rust BiomeUniform must match the WGSL struct: 13 vec4s (the sun, the star's look and frame)
     #[test]
     fn biome_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<BiomeUniform>(), 12 * 16);
+        assert_eq!(std::mem::size_of::<BiomeUniform>(), 13 * 16);
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did
@@ -3064,7 +3072,7 @@ pub(crate) mod tests {
         let def = crate::biome::PlanetType::EarthLike.def();
         let galaxy = crate::galaxy::Galaxy::generate(1);
         assert_eq!(galaxy.star.star_type, crate::galaxy::StarType::Yellow);
-        let u = BiomeUniform::from_def(&def, &galaxy.star, 0.3);
+        let u = BiomeUniform::from_def(&def, &galaxy.star, 0.3, glam::Quat::IDENTITY);
         assert_eq!(&u.sun[..3], &[1.6, 1.5, 1.3]);
         assert_eq!(u.sun[3], 0.3, "the star's angular radius");
     }

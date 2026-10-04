@@ -43,6 +43,7 @@ struct Atmosphere {
     sun_color: vec3<f32>, // sunlight: the star type's (galaxy.rs StarTypeDef.sunlight)
     star: StarLook,       // the star's look (star.wgsl), for the sun disc in the sky
     star_angle: f32,      // the star's angular radius from this planet; 0 = no disc (impostor shells)
+    star_frame: vec4<f32>, // quaternion: planet frame -> galaxy space, so the disc shows the star's own surface
     time: f32,            // seconds, for the star's boiling surface
 }
 
@@ -226,17 +227,21 @@ fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     if (a.star_angle <= 0.0) {
         return vec3<f32>(0.0);
     }
-    let cos_a = clamp(dot(ray_dir, L), -1.0, 1.0);
-    let angle = acos(cos_a);
-    if (angle < a.star_angle) {
-        // the point of the star's sphere this ray sees: `x` across the disc, mu = cos of its tilt
-        let x = angle / a.star_angle;
-        let mu = sqrt(max(1.0 - x * x, 0.0));
-        let side = ray_dir - L * cos_a;
-        let n = normalize(L * mu + side * (x / max(length(side), 1e-6)));
-        return star_surface(n, mu, a.time, a.star);
+    // the star scaled to distance 1: centre at L, radius sin(star_angle); the near side's hit point, as
+    // fs_star finds it, turned into galaxy space so the same granules and spots show (star_shading.rs
+    // sky_disc_normal mirrors this)
+    let r = sin(a.star_angle);
+    let along = dot(ray_dir, L);
+    let closest = length(L - ray_dir * along);
+    if (closest < r && along > 0.0) {
+        let hit = along - sqrt(r * r - closest * closest);
+        let n_planet = (ray_dir * hit - L) / r;
+        let mu = max(dot(n_planet, -ray_dir), 0.0);
+        let q = a.star_frame;
+        let n = n_planet + 2.0 * cross(q.xyz, cross(q.xyz, n_planet) + q.w * n_planet);
+        return star_surface(normalize(n), mu, a.time, a.star);
     }
-    return star_corona((angle - a.star_angle) / a.star_angle, a.star);
+    return star_corona((closest - r) / r, a.star);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what

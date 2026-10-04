@@ -126,6 +126,7 @@ fn planet_atmosphere() -> Atmosphere {
         // impostor shells draw the sky dome only: the galaxy draws the star itself
         StarLook(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 1.0, 0.0, 1.0),
         0.0,
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
         camera.screen.z,
     );
 }
