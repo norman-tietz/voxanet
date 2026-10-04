@@ -78,7 +78,7 @@ In space there is no gravity and no terrain floor; a compass strip at the top of
 | `Left Ctrl` (hold) | Boost |
 | `Q` / `E` (hold) | Roll left / right (the roll is kept when you enter or leave a planet's voxel world) |
 
-Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain.
+Fly close to a planet and you are captured by it: the planet holds still while the sky turns, and its terrain is generated in the background. Descend below about three planet radii once it is ready and you are back in planet flight, over the real terrain. If you come in heading straight at the planet, the view eases up toward the horizon a little (move the mouse to take over).
 
 ### Swimming
 
