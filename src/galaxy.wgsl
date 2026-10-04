@@ -56,6 +56,7 @@ struct PlanetUniform {
     space_color: vec4<f32>,
     cloud_light: vec4<f32>,
     cloud_dark: vec4<f32>,
+    sun_color: vec4<f32>,   // sunlight (rgb): the galaxy star type's
     model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
@@ -69,6 +70,7 @@ fn planet_atmosphere() -> Atmosphere {
         planet.space_color.rgb,
         planet.cloud_light.rgb,
         planet.cloud_dark.rgb,
+        planet.sun_color.rgb,
     );
 }
 
@@ -117,7 +119,7 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
 
     let albedo = pow(in.color, vec3<f32>(2.2));
     let NdotL = max(dot(N, L), 0.0);
-    let direct = SUN_COLOR * NdotL * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
+    let direct = a.sun_color * NdotL * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
     let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi) * sky_light;

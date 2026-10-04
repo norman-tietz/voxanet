@@ -61,6 +61,7 @@ struct GalaxyPlanetUniform {
     space_color: [f32; 4],
     cloud_light: [f32; 4],
     cloud_dark: [f32; 4],
+    sun_color: [f32; 4],  // the galaxy star type's sunlight (rgb)
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
@@ -586,6 +587,7 @@ impl GalaxyRenderer {
                 space_color: v4(atmosphere.space_color),
                 cloud_light: v4(atmosphere.cloud_light),
                 cloud_dark: v4(atmosphere.cloud_dark),
+                sun_color: v4(galaxy.star.star_type.def().sunlight),
                 model: [
                     model.x_axis.extend(0.0).to_array(),
                     model.y_axis.extend(0.0).to_array(),
@@ -778,7 +780,7 @@ mod tests {
     // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 7 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 8 * 16 + 3 * 16);
     }
 
     #[test]

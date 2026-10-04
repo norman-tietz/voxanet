@@ -65,10 +65,11 @@ pub struct BiomeUniform {
     pub cloud_light: [f32; 4],
     pub cloud_dark: [f32; 4],
     pub space_color: [f32; 4],
+    pub sun: [f32; 4], // rgb: the star type's sunlight (Atmosphere.sun_color); w: star angular radius
 }
 
 impl BiomeUniform {
-    pub fn from_def(def: &crate::biome::PlanetTypeDef) -> Self {
+    pub fn from_def(def: &crate::biome::PlanetTypeDef, sunlight: [f32; 3]) -> Self {
         let (shallow, deep, behavior) = match def.liquid {
             Some(l) => (
                 l.shallow_color,
@@ -90,6 +91,7 @@ impl BiomeUniform {
             cloud_light: v4(def.atmosphere.cloud_light, 0.0),
             cloud_dark: v4(def.atmosphere.cloud_dark, 0.0),
             space_color: v4(def.atmosphere.space_color, 0.0),
+            sun: v4(sunlight, 0.0),
         }
     }
 }
@@ -1919,7 +1921,10 @@ impl Renderer {
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
 
-        let biome_data = BiomeUniform::from_def(&planet.planet_type.def());
+        let biome_data = BiomeUniform::from_def(
+            &planet.planet_type.def(),
+            backdrop.galaxy.star.star_type.def().sunlight,
+        );
         self.queue
             .write_buffer(&self.biome_buf, 0, bytemuck::cast_slice(&[biome_data]));
 
@@ -2779,6 +2784,20 @@ impl Renderer {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // the Rust BiomeUniform must match the WGSL struct: 8 vec4s now (the sun added)
+    #[test]
+    fn biome_uniform_matches_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<BiomeUniform>(), 8 * 16);
+    }
+
+    // a Yellow star lights its planets exactly as the old SUN_COLOR did
+    #[test]
+    fn yellow_sunlight_is_todays_sun_color() {
+        let def = crate::biome::PlanetType::EarthLike.def();
+        let u = BiomeUniform::from_def(&def, crate::galaxy::StarType::Yellow.def().sunlight);
+        assert_eq!(&u.sun[..3], &[1.6, 1.5, 1.3]);
+    }
 
     #[test]
     fn console_covers_a_quarter_of_the_screen() {

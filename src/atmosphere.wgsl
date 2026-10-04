@@ -5,7 +5,6 @@
 // the voxel engine at the landing handover. Everything here is in the planet's own frame (centre at
 // the origin) and takes the planet's radius and colours as an `Atmosphere`, never engine globals.
 
-const SUN_COLOR       = vec3<f32>(1.6, 1.5, 1.3);    // High intensity warm sun
 const GROUND_COLOR    = vec3<f32>(0.05, 0.04, 0.03); // Dark earth ambient bounce
 
 const CLOUD_ALT           = 1.32;  // cloud shell radius, as a multiple of the planet radius
@@ -41,6 +40,7 @@ struct Atmosphere {
     space_color: vec3<f32>,
     cloud_light: vec3<f32>,
     cloud_dark: vec3<f32>,
+    sun_color: vec3<f32>, // sunlight: the star type's (galaxy.rs StarTypeDef.sunlight)
 }
 
 // --- TONE MAPPING (ACES) ---
@@ -152,7 +152,7 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>, a:
     density *= 0.25;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(a.cloud_dark, a.cloud_light, ndotl) * SUN_COLOR * 0.55;
+    let lit = mix(a.cloud_dark, a.cloud_light, ndotl) * a.sun_color * 0.55;
     let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light;
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
@@ -199,7 +199,7 @@ fn atmo_sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, planet
 // atmosphere seen beyond the clouds: a stylised gradient from deep space into a blue dome that warms
 // toward the sun, plus a glow where the view ray grazes the planet's limb (seen from orbit/third person)
 fn atmo_sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
-    return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L);
+    return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L, a);
 }
 
 // the sky without the sun disc: for the galaxy impostors' atmosphere shell, where the galaxy draws
@@ -216,9 +216,9 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
 // white-hot. Only ever drawn where the ray truly reaches deep space (never for a ray that hit terrain
 // first), so it's automatically hidden on the planet's own night side and correctly occluded wherever
 // callers composite clouds on top afterwards.
-fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     let sun_cos = max(dot(ray_dir, L), 0.0);
-    return SUN_COLOR * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
+    return a.sun_color * (pow(sun_cos, 500.0) * 3.0 + pow(sun_cos, 4000.0) * 40.0);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what

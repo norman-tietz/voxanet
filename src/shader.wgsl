@@ -40,6 +40,7 @@ struct Biome {
     cloud_light: vec4<f32>,
     cloud_dark: vec4<f32>,
     space_color: vec4<f32>,
+    sun: vec4<f32>, // rgb: sunlight (the star type's), w: star angular radius
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
@@ -426,6 +427,7 @@ fn engine_atmosphere() -> Atmosphere {
         biome.space_color.rgb,
         biome.cloud_light.rgb,
         biome.cloud_dark.rgb,
+        biome.sun.rgb,
     );
 }
 
@@ -478,7 +480,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
     // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below the sea surface
-    var direct_light = SUN_COLOR * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
+    var direct_light = biome.sun.rgb * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
     let sea_depth = global.screen.z - length(world_pos);
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
     // which doesn't focus light the same way (matches fs_water's reflective-vs-glowing branch)
@@ -768,7 +770,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
     let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L);
-    var color = body * (SUN_COLOR * NdotL * shadow + sky_fill);
+    var color = body * (biome.sun.rgb * NdotL * shadow + sky_fill);
     if (glowing) {
         color = body * 2.5; // emissive: pushed above 1.0 so ACES gives it a hot, blown-out look
     }
@@ -790,7 +792,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         let refl = mix(sky_over_black(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
         color = mix(color, refl * 1.2, fresnel);
         spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;
-        color += SUN_COLOR * spec * 3.0;
+        color += biome.sun.rgb * spec * 3.0;
     }
     alpha = clamp(max(alpha, fresnel) + spec, 0.25, 0.95);
     // nothing behind the surface (the view ray leaves the water again without reaching the sea floor):
@@ -814,7 +816,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         let edge = 1.0 - smoothstep(0.05, 0.3, vdepth);
         let froth = shore * (0.55 * bands + 0.45 * patches) + shore * 0.3;
         let foam = max(edge, smoothstep(0.45, 0.8, froth) * band_fade) * 0.9;
-        let foam_col = FOAM_COLOR * (SUN_COLOR * NdotL * shadow + sky_fill);
+        let foam_col = FOAM_COLOR * (biome.sun.rgb * NdotL * shadow + sky_fill);
         color = mix(color, foam_col, foam);
         alpha = max(alpha, foam);
     }
