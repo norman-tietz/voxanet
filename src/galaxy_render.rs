@@ -34,7 +34,6 @@ fn projection(fov_y: f32, aspect: f32) -> Mat4 {
 }
 const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
 const DEPTH_CLEAR: f32 = 0.0;
-const MAX_BODIES: usize = MAX_PLANETS + 1; // the star + every planet the galaxy can hold
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -42,15 +41,27 @@ struct GalaxyCameraUniform {
     view_proj: [f32; 16],
     screen: [f32; 4],
     ray_dirs: [[f32; 4]; 3],
+    forward: [f32; 4], // the view direction (xyz), for the star's reversed-Z depth
 }
 
+// the star's uniform for vs_star/fs_star (must match StarUniform in galaxy.wgsl)
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct GalaxyBodyUniform {
-    offset: [f32; 4],
-    color: [f32; 4],
-    light_dir: [f32; 4],
+struct GalaxyStarUniform {
+    offset: [f32; 4],  // camera-relative centre (xyz), radius (w)
+    surface: [f32; 4], // StarTypeDef.surface_color
+    limb: [f32; 4],    // StarTypeDef.limb_color
+    corona: [f32; 4],  // rgb corona colour, w corona_size
+    params: [f32; 4],  // granulation, granule_scale, sunspots, minimum angular radius (rad)
 }
+
+// a point `distance` along the view axis in reversed-Z (projection: NEAR_PLANE / distance)
+fn star_depth(distance: f32) -> f32 {
+    NEAR_PLANE / distance
+}
+
+// the star is never drawn smaller than this angular radius, so a distant sun stays a visible point
+const STAR_MIN_ANGULAR_RADIUS: f32 = 0.0025; // ~0.14 degrees, a few pixels at 1080p
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -172,9 +183,9 @@ pub struct Backdrop<'a> {
 pub struct GalaxyRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
-    body_buf: wgpu::Buffer,
-    body_bind: wgpu::BindGroup,
-    body_pipeline: wgpu::RenderPipeline,
+    star_buf: wgpu::Buffer,
+    star_bind: wgpu::BindGroup,
+    star_pipeline: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     v_buf: wgpu::Buffer,
     i_buf: wgpu::Buffer,
@@ -231,31 +242,31 @@ impl GalaxyRenderer {
             }],
         });
 
-        let body_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("galaxy_body_layout"),
+        let star_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("galaxy_star_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
                 count: None,
             }],
         });
-        let body_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Galaxy Body Storage"),
-            size: (std::mem::size_of::<GalaxyBodyUniform>() * MAX_BODIES) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let star_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Galaxy Star Uniform"),
+            size: std::mem::size_of::<GalaxyStarUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let body_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("galaxy_body_bind"),
-            layout: &body_layout,
+        let star_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("galaxy_star_bind"),
+            layout: &star_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: body_buf.as_entire_binding(),
+                resource: star_buf.as_entire_binding(),
             }],
         });
 
@@ -266,7 +277,12 @@ impl GalaxyRenderer {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("galaxy_pipeline_layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&body_layout)],
+            bind_group_layouts: &[Some(&camera_layout)],
+            immediate_size: 0,
+        });
+        let star_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("galaxy_star_pipeline_layout"),
+            bind_group_layouts: &[Some(&camera_layout), Some(&star_layout)],
             immediate_size: 0,
         });
 
@@ -283,32 +299,29 @@ impl GalaxyRenderer {
             bias: Default::default(),
         };
 
-        let body_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Body Pipeline"),
-            layout: Some(&layout),
+        // the star: one camera-facing quad, ray-cast in fs_star (round at any size, its true sphere depth),
+        // the corona blended around it (premultiplied)
+        let star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Galaxy Star Pipeline"),
+            layout: Some(&star_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_body"),
+                entry_point: Some("vs_star"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<[f32; 3]>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                })],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_body"),
+                entry_point: Some("fs_star"),
                 compilation_options: Default::default(),
-                targets: &[Some(color_target.clone())],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil.clone()),
@@ -493,9 +506,9 @@ impl GalaxyRenderer {
         Self {
             camera_buf,
             camera_bind,
-            body_buf,
-            body_bind,
-            body_pipeline,
+            star_buf,
+            star_bind,
+            star_pipeline,
             background_pipeline,
             v_buf,
             i_buf,
@@ -536,30 +549,31 @@ impl GalaxyRenderer {
                 // z: cloud animation time, wrapped like the engine's GlobalUniform.screen.w
                 screen: [screen.0, screen.1, (t % 3600.0) as f32, 0.0],
                 ray_dirs,
+                forward: (camera.rotation * Vec3::NEG_Z).extend(0.0).to_array(),
             }]),
         );
 
-        let mut bodies = Vec::with_capacity(1 + galaxy.planets.len());
+        // the star (always drawn: only planets can be left out)
         {
-            // the star is always part of the view (only planets can be left out)
-            let star_offset = (galaxy.star.position() - camera.position).as_vec3();
-            bodies.push(GalaxyBodyUniform {
-                offset: [
-                    star_offset.x,
-                    star_offset.y,
-                    star_offset.z,
-                    galaxy.star.radius as f32,
-                ],
-                color: [1.6, 1.4, 0.9, 1.0],
-                light_dir: [0.0, 1.0, 0.0, 0.0],
-            });
-        }
-        debug_assert!(
-            bodies.len() <= MAX_BODIES,
-            "galaxy has more bodies than the storage buffer was sized for"
-        );
-        if !bodies.is_empty() {
-            queue.write_buffer(&self.body_buf, 0, bytemuck::cast_slice(&bodies));
+            let star = galaxy.star.star_type.def();
+            let offset = (galaxy.star.position() - camera.position).as_vec3();
+            let v4 = |c: [f32; 3], w: f32| [c[0], c[1], c[2], w];
+            queue.write_buffer(
+                &self.star_buf,
+                0,
+                bytemuck::cast_slice(&[GalaxyStarUniform {
+                    offset: [offset.x, offset.y, offset.z, galaxy.star.radius as f32],
+                    surface: v4(star.surface_color, 0.0),
+                    limb: v4(star.limb_color, 0.0),
+                    corona: v4(star.corona_color, star.corona_size),
+                    params: [
+                        star.granulation,
+                        star.granule_scale,
+                        star.sunspots,
+                        STAR_MIN_ANGULAR_RADIUS,
+                    ],
+                }]),
+            );
         }
 
         let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
@@ -637,17 +651,15 @@ impl GalaxyRenderer {
             });
 
             pass.set_bind_group(0, &self.camera_bind, &[]);
-            pass.set_bind_group(1, &self.body_bind, &[]);
 
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
 
-            if !bodies.is_empty() {
-                pass.set_pipeline(&self.body_pipeline);
-                pass.set_vertex_buffer(0, self.v_buf.slice(..));
-                pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.num_indices, 0, 0..(bodies.len() as u32));
-            }
+            // the star right after the background: planets in front cover its disc and corona (depth),
+            // and their atmosphere shells, drawn last, blend over it
+            pass.set_pipeline(&self.star_pipeline);
+            pass.set_bind_group(1, &self.star_bind, &[]);
+            pass.draw(0..6, 0..1);
 
             pass.set_pipeline(&self.planet_pipeline);
             pass.set_bind_group(0, &self.camera_bind, &[]);
@@ -865,7 +877,6 @@ mod tests {
     // included, is in the depth range at its real distance with its near side in front of its far
     // side, and the body buffer holds the star plus every planet
     #[test]
-    #[allow(clippy::int_plus_one)]
     fn a_full_galaxy_seen_from_its_outermost_planet_has_ordered_depths() {
         let mut galaxy = Galaxy::generate(1);
         while galaxy.planets.len() < MAX_PLANETS {
@@ -893,7 +904,6 @@ mod tests {
                 "body {i}: front {front} not in front of back {back}"
             );
         }
-        assert!(galaxy.planets.len() + 1 <= MAX_BODIES);
     }
 
     // two bodies on the same line of sight far out: the nearer one is in front, even when the
@@ -904,6 +914,20 @@ mod tests {
         let small_near_back = depth_of(dir * (1_000_000.0 + 40.0));
         let big_far_front = depth_of(dir * (3_000_000.0 - 5_000.0));
         assert!(small_near_back > big_far_front);
+    }
+
+    #[test]
+    fn star_uniform_matches_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<GalaxyStarUniform>(), 5 * 16);
+    }
+
+    // the star writes its sphere's depth in reversed-Z, as the projection does for geometry
+    #[test]
+    fn star_depth_is_reversed_z() {
+        for d in [10.0f32, 3_000.0, 250_000.0] {
+            let clip = projection(FOV_Y_RADIANS, 16.0 / 9.0) * Vec3::new(0.0, 0.0, -d).extend(1.0);
+            assert!((star_depth(d) - clip.z / clip.w).abs() < 1e-6 * (1.0 + 1.0 / d));
+        }
     }
 
     // ray_dirs packs the camera frustum as a corner (ray_dirs[0]) plus two edge vectors

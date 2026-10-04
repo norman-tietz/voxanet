@@ -8,44 +8,96 @@ struct Camera {
     view_proj: mat4x4<f32>, // camera-relative: positions are pre-translated so the camera is at the origin
     screen: vec4<f32>,      // x, y: width/height in pixels, z: cloud animation time (seconds, wrapped at 3600)
     ray_dirs: array<vec4<f32>, 3>, // camera basis corners for the starfield background
-}
-
-struct Body {
-    offset: vec4<f32>,    // camera-relative position (xyz), radius (w)
-    color: vec4<f32>,     // rgb, w: 1.0 = emissive (the star), 0.0 = lit (a planet)
-    light_dir: vec4<f32>, // direction from this body toward the star (xyz)
+    forward: vec4<f32>,     // the view direction (xyz), for the star's reversed-Z depth
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var<storage, read> bodies: array<Body>;
 
-struct VertexOut {
+// --- the star: one camera-facing quad, ray-cast here (star.wgsl shades it) ---
+
+struct StarUniform {
+    offset: vec4<f32>,  // camera-relative centre (xyz), radius (w)
+    surface: vec4<f32>,
+    limb: vec4<f32>,
+    corona: vec4<f32>,  // rgb, w: corona_size
+    params: vec4<f32>,  // granulation, granule_scale, sunspots, minimum angular radius (rad)
+}
+@group(1) @binding(0) var<uniform> star: StarUniform;
+
+// just in front of the cleared far plane (0 in reversed-Z): the corona passes over the background
+// and fails behind any planet, so a planet in front hides it
+const STAR_CORONA_DEPTH: f32 = 1e-9;
+
+fn star_look() -> StarLook {
+    return StarLook(star.surface.rgb, star.limb.rgb, star.corona.rgb, star.params.x, star.params.y, star.params.z, star.corona.w);
+}
+
+// the drawn radius: the real one, or larger so the star subtends at least the minimum angular radius
+fn star_drawn_radius() -> f32 {
+    return max(star.offset.w, length(star.offset.xyz) * star.params.w);
+}
+
+struct StarOut {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) world_normal: vec3<f32>, // unit-sphere vertex position IS the normal, pre-scale
-    @location(1) @interpolate(flat) color: vec4<f32>,
-    @location(2) @interpolate(flat) light_dir: vec3<f32>,
+    @location(0) view_ray: vec3<f32>, // camera-relative point on the quad (the ray through it)
+    @location(1) quad: vec2<f32>,     // position within the quad, -1..1
 }
 
 @vertex
-fn vs_body(@location(0) pos: vec3<f32>, @builtin(instance_index) instance: u32) -> VertexOut {
-    let body = bodies[instance];
-    let world_pos = body.offset.xyz + pos * body.offset.w;
-    var out: VertexOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.world_normal = pos;
-    out.color = body.color;
-    out.light_dir = body.light_dir.xyz;
+fn vs_star(@builtin(vertex_index) vi: u32) -> StarOut {
+    // a camera-facing quad around the star covering its corona (3 corona sizes beyond the limb)
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let c = star.offset.xyz;
+    let to_star = normalize(c);
+    var side = cross(to_star, vec3<f32>(0.0, 1.0, 0.0));
+    if (length(side) < 1e-4) {
+        side = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    side = normalize(side);
+    let up = cross(side, to_star);
+    let half_size = star_drawn_radius() * (1.0 + 3.0 * star.corona.w);
+    let p = c + (side * corners[vi].x + up * corners[vi].y) * half_size;
+    var out: StarOut;
+    out.clip_pos = camera.view_proj * vec4<f32>(p, 1.0);
+    out.view_ray = p;
+    out.quad = corners[vi];
     return out;
 }
 
+struct StarFragOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+
 @fragment
-fn fs_body(in: VertexOut) -> @location(0) vec4<f32> {
-    if (in.color.w > 0.5) {
-        return vec4<f32>(in.color.rgb, 1.0); // emissive: the star, unlit
+fn fs_star(in: StarOut) -> StarFragOut {
+    let ray = normalize(in.view_ray);
+    let c = star.offset.xyz;
+    let r = star_drawn_radius();
+    let along = dot(c, ray);
+    let closest = length(c - ray * along); // the ray's closest approach to the centre
+    var out: StarFragOut;
+    if (closest < r && along > 0.0) {
+        let hit = along - sqrt(r * r - closest * closest);
+        let n = normalize(ray * hit - c);
+        let mu = max(dot(n, -ray), 0.0);
+        let col = star_surface(n, mu, camera.screen.z, star_look());
+        out.color = vec4<f32>(aces_and_gamma(col), 1.0);
+        // reversed-Z: NEAR_PLANE (1) / distance along the view axis
+        out.depth = 1.0 / max(hit * dot(ray, camera.forward.xyz), 1.0);
+    } else {
+        // fades to nothing before the quad's edge, or the faint outskirts, lifted by tone mapping, would
+        // show the quad's square outline (measured within the quad: up close, rays toward its edge pass
+        // the star well inside the corona)
+        let glow = star_corona((closest - r) / r, star_look()) * (1.0 - smoothstep(0.55, 0.95, length(in.quad)));
+        let coverage = clamp(max(glow.r, max(glow.g, glow.b)), 0.0, 1.0);
+        out.color = vec4<f32>(aces_and_gamma(glow), coverage); // premultiplied: the glow adds, dimming what it covers
+        out.depth = STAR_CORONA_DEPTH;
     }
-    let n = normalize(in.world_normal);
-    let ndotl = max(dot(n, in.light_dir), 0.05); // small ambient floor so the dark side isn't pure black
-    return vec4<f32>(in.color.rgb * ndotl, 1.0);
+    return out;
 }
 
 struct PlanetUniform {

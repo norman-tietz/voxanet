@@ -39,8 +39,8 @@ pub struct StarTypeDef {
 const STAR_TYPES: [StarTypeDef; 5] = [
     StarTypeDef {
         name: "Red dwarf",
-        surface_color: [2.2, 0.9, 0.45],
-        limb_color: [1.4, 0.35, 0.12],
+        surface_color: [1.10, 0.45, 0.23],
+        limb_color: [0.83, 0.21, 0.07],
         radius: 1_800.0,
         granulation: 0.35,
         granule_scale: 14.0,
@@ -51,8 +51,8 @@ const STAR_TYPES: [StarTypeDef; 5] = [
     },
     StarTypeDef {
         name: "Orange",
-        surface_color: [2.2, 1.35, 0.7],
-        limb_color: [1.5, 0.6, 0.22],
+        surface_color: [1.10, 0.68, 0.35],
+        limb_color: [0.83, 0.33, 0.12],
         radius: 2_400.0,
         granulation: 0.3,
         granule_scale: 16.0,
@@ -63,8 +63,8 @@ const STAR_TYPES: [StarTypeDef; 5] = [
     },
     StarTypeDef {
         name: "Yellow",
-        surface_color: [2.0, 1.75, 1.25],
-        limb_color: [1.5, 0.95, 0.45],
+        surface_color: [1.10, 0.96, 0.69],
+        limb_color: [0.83, 0.52, 0.25],
         radius: 3_000.0,
         granulation: 0.25,
         granule_scale: 18.0,
@@ -75,8 +75,8 @@ const STAR_TYPES: [StarTypeDef; 5] = [
     },
     StarTypeDef {
         name: "White",
-        surface_color: [1.85, 1.85, 1.9],
-        limb_color: [1.3, 1.2, 1.05],
+        surface_color: [1.07, 1.07, 1.10],
+        limb_color: [0.82, 0.76, 0.67],
         radius: 3_300.0,
         granulation: 0.2,
         granule_scale: 20.0,
@@ -87,8 +87,8 @@ const STAR_TYPES: [StarTypeDef; 5] = [
     },
     StarTypeDef {
         name: "Blue giant",
-        surface_color: [1.5, 1.75, 2.3],
-        limb_color: [1.0, 1.15, 1.6],
+        surface_color: [0.72, 0.84, 1.10],
+        limb_color: [0.52, 0.59, 0.83],
         radius: 3_600.0,
         granulation: 0.15,
         granule_scale: 22.0,
