@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt;
 // galaxy mode's shader: the shared atmosphere maths (atmosphere.wgsl) followed by galaxy.wgsl
 pub(crate) const GALAXY_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
+    include_str!("star.wgsl"),
     "\n",
     include_str!("galaxy.wgsl")
 );

@@ -23,6 +23,7 @@ mod rt_blur;
 mod rt_shadow;
 mod screenshot;
 mod smoothing;
+mod star_shading;
 mod system_diagnostics;
 
 use crate::cmd::Console;

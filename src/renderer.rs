@@ -28,6 +28,7 @@ use winit::window::Window;
 // followed by the voxel engine's own shader
 pub(crate) const SCENE_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
+    include_str!("star.wgsl"),
     "\n",
     include_str!("shader.wgsl")
 );
