@@ -100,8 +100,26 @@ struct GalaxyPlanetUniform {
     space_color: [f32; 4],
     cloud_light: [f32; 4],
     cloud_dark: [f32; 4],
-    sun_color: [f32; 4],  // the galaxy star type's sunlight (rgb)
+    sun_color: [f32; 4],     // the galaxy star type's sunlight (rgb)
+    glow: [f32; 4],          // the planet type's glowing liquid colour (rgb), w = 1 if it has one
+    glow_emission: [f32; 4], // what it emits (rgb): lava_emission
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
+}
+
+// what a glowing liquid emits on an impostor: the engine's fs_water look (the body, darkening from
+// the shallow toward the deep colour with depth, x 2.5, unlit, blended over the floor at the depth's
+// opacity) for a typical depth, LAVA_TYPICAL_DEPTH (calibrated against the voxel world at the landing
+// handover: lava lakes are deep, nearly the deep colour); the floor is dark basalt, so the blend
+// mostly dims
+const LAVA_TYPICAL_DEPTH: f32 = 20.0;
+
+fn lava_emission(liquid: &crate::biome::LiquidDef) -> [f32; 3] {
+    let deep = 1.0 - (-LAVA_TYPICAL_DEPTH * 0.15f32).exp();
+    let alpha = 1.0 - (-LAVA_TYPICAL_DEPTH * 0.35f32).exp();
+    // fs_water blends after tone mapping: dimming by alpha there is about alpha^2.2 before it
+    let dim = alpha.powf(2.2);
+    [0, 1, 2]
+        .map(|i| (liquid.shallow_color[i] * (1.0 - deep) + liquid.deep_color[i] * deep) * 2.5 * dim)
 }
 
 struct PlanetMesh {
@@ -822,6 +840,17 @@ impl GalaxyRenderer {
             cloud_light: v4(atmosphere.cloud_light),
             cloud_dark: v4(atmosphere.cloud_dark),
             sun_color: v4(galaxy.star.star_type.def().sunlight),
+            glow: match p.planet_type.def().liquid {
+                Some(l) if matches!(l.behavior, crate::biome::LiquidBehavior::Glowing) => {
+                    let c = l.shallow_color;
+                    [c[0], c[1], c[2], 1.0]
+                }
+                _ => [0.0; 4],
+            },
+            glow_emission: match p.planet_type.def().liquid {
+                Some(l) => v4(lava_emission(&l)),
+                None => [0.0; 4],
+            },
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -985,7 +1014,7 @@ mod tests {
     // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 8 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 10 * 16 + 3 * 16);
     }
 
     #[test]

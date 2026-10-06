@@ -109,6 +109,8 @@ struct PlanetUniform {
     cloud_light: vec4<f32>,
     cloud_dark: vec4<f32>,
     sun_color: vec4<f32>,   // sunlight (rgb): the galaxy star type's
+    glow: vec4<f32>,        // rgb: the planet type's glowing liquid colour (lava), w: 1 if it has one
+    glow_emission: vec4<f32>, // rgb: what that liquid emits (galaxy_render.rs lava_emission)
     model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
@@ -192,7 +194,12 @@ fn planet_color(in: PlanetVertexOut) -> vec3<f32> {
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
     let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi) * sky_light;
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
-    var color = atmo_air_fog(albedo * (direct + ambient + rim), in.local_pos, cam, L, a);
+    var lit = albedo * (direct + ambient + rim);
+    // a glowing liquid (lava) is emissive like the engine's (fs_water); impostor vertices carry the
+    // liquid colour itself, so match on it, fading over shore blends
+    let glowing = planet.glow.w * (1.0 - smoothstep(0.0, 0.3, distance(in.color, planet.glow.rgb)));
+    lit = mix(lit, planet.glow_emission.rgb, glowing);
+    var color = atmo_air_fog(lit, in.local_pos, cam, L, a);
 
     // clouds in front of the surface, like the engine's shade_pixel
     let ray_dir = normalize(in.local_pos - cam);
