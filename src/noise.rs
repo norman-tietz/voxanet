@@ -269,7 +269,7 @@ pub const HOME_SEED: u32 = 42;
 pub struct PlanetTerrain {
     // Flattened height map
     heights: Arc<Vec<u16>>,
-    // per column: which water body's level is its water level (0 = the sea, k + 1 = lake k), separate
+    // per column: which water body's level is its water level (0 = the sea, k + 1 = lake k's region), separate
     // from the heights so solidity checks (heights only, the hot path) don't fetch it
     water_body: Arc<Vec<u8>>,
     water_levels: Arc<Vec<u32>>, // layer whose top is the water surface, per water body
@@ -313,11 +313,10 @@ impl PlanetTerrain {
                     let s = shape.sample(&generator, dir);
                     let h = (sea_level as f32 + s.height).round().max(1.0) as u16;
                     out[u] = h;
-                    // a lake column: inside a region and below that lake's level (islands stay dry)
-                    body[u] = match s.lake {
-                        Some(k) if (h as u32) < water_levels[k + 1] => (k + 1) as u8,
-                        _ => 0,
-                    };
+                    // every column inside a lake's region takes that lake's level: below it the column
+                    // holds water; above it (shores, islands) its beach band and any hole dug into it
+                    // follow the lake, not the sea
+                    body[u] = s.lake.map_or(0, |k| (k + 1) as u8);
                 }
             });
 
@@ -677,11 +676,11 @@ mod tests {
                     if w == t.sea_level() {
                         sea_cols += 1;
                     } else {
-                        assert!(
-                            w > t.sea_level() && h < w,
-                            "lake column {face}/{u}/{v}: h {h} w {w}"
-                        );
-                        lake_cols += 1;
+                        // a lake region's column: underwater (h < w) or its shore/islands
+                        assert!(w > t.sea_level(), "lake column {face}/{u}/{v}: h {h} w {w}");
+                        if h < w {
+                            lake_cols += 1;
+                        }
                     }
                 }
             }
@@ -702,12 +701,13 @@ mod tests {
                     for v in 1..res - 1 {
                         for u in 1..res - 1 {
                             let w = t.water_level(face, u, v);
-                            if w == t.sea_level() {
-                                continue;
+                            if w == t.sea_level() || t.get_height(face, u, v) >= w {
+                                continue; // only wet lake columns
                             }
                             for (du, dv) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                                 let (nu, nv) = ((u as i32 + du) as u32, (v as i32 + dv) as u32);
-                                let dry = t.water_level(face, nu, nv) != w;
+                                let dry = t.water_level(face, nu, nv) != w
+                                    || t.get_height(face, nu, nv) >= w;
                                 assert!(
                                     !dry || t.get_height(face, nu, nv) >= w,
                                     "res {res} seed {seed}: wall at {face}/{u}/{v} -> {nu}/{nv}"

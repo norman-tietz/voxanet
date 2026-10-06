@@ -1076,9 +1076,6 @@ impl Renderer {
         })
     }
 
-    // the lens flare's uniform for a sun at `ndc` (None: behind the camera), with `angular_radius`;
-    // `boost` scales it (heat, night, underwater); returns whether there's anything to draw
-    #[allow(clippy::too_many_arguments)]
     // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
     // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
     pub(crate) fn camera_water_radius(planet: &PlanetData, cam_pos: Vec3) -> f32 {
@@ -1086,6 +1083,9 @@ impl Renderer {
             .map_or(0.0, |id| planet.water_surface_radius(id.face, id.u, id.v))
     }
 
+    // the lens flare's uniform for a sun at `ndc` (None: behind the camera), with `angular_radius`;
+    // `boost` scales it (heat, night, underwater); returns whether there's anything to draw
+    #[allow(clippy::too_many_arguments)]
     fn update_flare(
         &self,
         ndc: Option<glam::Vec2>,

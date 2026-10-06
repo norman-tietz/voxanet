@@ -270,4 +270,43 @@ mod tests {
             palette.beach
         );
     }
+
+    // a dry shore column right at the waterline of a lake well above the sea is beach, not ground
+    #[test]
+    fn lake_shores_are_beach_at_any_height() {
+        use crate::biome::PlanetType;
+        for seed in 1..80 {
+            let planet = crate::common::PlanetData::new_for_type(128, seed, PlanetType::EarthLike);
+            let t = &planet.terrain;
+            for face in 0..6u8 {
+                for v in 1..127 {
+                    for u in 1..127 {
+                        let level = t.water_level(face, u, v);
+                        // a wet lake column at least 3 layers above the sea ...
+                        if level < t.sea_level() + 3 || t.get_height(face, u, v) >= level {
+                            continue;
+                        }
+                        // ... next to a dry column at the waterline
+                        let (nu, nv) = (u + 1, v);
+                        if t.get_height(face, nu, nv) != level {
+                            continue;
+                        }
+                        let palette = earth_palette();
+                        let rel = (level - t.sea_level()) as f32
+                            / (t.height_range().1 - t.sea_level()) as f32;
+                        if rel >= 0.4 {
+                            continue; // high mountain lakes: the rock line wins
+                        }
+                        assert_eq!(
+                            surface_type(t, &palette, face, nu, nv),
+                            palette.beach,
+                            "seed {seed} {face}/{nu}/{nv}"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        panic!("no lake shore found");
+    }
 }
