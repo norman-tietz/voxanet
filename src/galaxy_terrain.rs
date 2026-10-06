@@ -26,8 +26,8 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     // the same resolution GalaxyPlanet::bake uses, so impostor and voxel world agree to the unit
     let res = planet.voxel_resolution();
     let sea_level = (res / 2) as f32;
-    let shape = TerrainShape::new(res);
     let generator = NoiseGenerator::new(planet.noise_seed);
+    let shape = TerrainShape::new(res, &generator, false);
 
     // TerrainShape::height returns an offset in layers from sea level, like the real engine's
     let heights: Vec<f32> = unit_verts
@@ -162,8 +162,8 @@ mod tests {
         for planet_type in PlanetType::ALL {
             let planet = test_planet(1, planet_type);
             let res = planet.voxel_resolution();
-            let shape = TerrainShape::new(res);
             let generator = NoiseGenerator::new(planet.noise_seed);
+            let shape = TerrainShape::new(res, &generator, false);
             let (unit_verts, _) = crate::icosphere::generate(2);
             let (verts, _) = generate_planet_mesh(&planet, 2);
             let sea = (res / 2) as f32;
