@@ -61,7 +61,7 @@ pub struct GlobalUniform {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct LocalUniform {
     pub model: [f32; 16],
-    pub params: [f32; 4], // x = opacity
+    pub params: [f32; 4], // x = opacity, y = 1 while fading out (complementary dither)
 }
 
 #[repr(C)]

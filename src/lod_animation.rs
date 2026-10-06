@@ -25,8 +25,9 @@ impl LodAnimator {
         Self {
             dying_chunks: HashMap::new(),
             spawning_chunks: HashMap::new(),
-            // CHANGED: Increased to 2.0 seconds for a very slow, cinematic transition
-            fade_duration: 2.0,
+            // short: with complementary dithering (shader.wgsl dither_discard) a swap is a clean
+            // cross-fade, and descending passes several LOD levels whose fades shouldn't pile up
+            fade_duration: 0.5,
         }
     }
 

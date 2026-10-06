@@ -53,7 +53,7 @@ struct Biome {
 
 struct Local {
     model: mat4x4<f32>,
-    params: vec4<f32>, // x = opacity
+    params: vec4<f32>, // x = opacity, y = 1 while fading out (complementary dither)
 }
 @group(1) @binding(0) var<uniform> local: Local;
 
@@ -400,10 +400,13 @@ fn cs_march(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // --- UTILS ---
 
-fn dither_opacity(pos: vec4<f32>, alpha: f32) -> bool {
-    // 4x4 Ordered Dithering Matrix
-    let dither_threshold = dot(vec2<f32>(171.0, 231.0), pos.xy);
-    return fract(dither_threshold / 71.0) > alpha;
+// screen-door transparency for LOD/chunk fades: true = discard this pixel. A mesh fading in keeps the
+// pixels whose threshold is below its opacity, a mesh fading out (`fading_out`, params.y = 1) those at
+// or above 1 - opacity, so a swap whose two fades start together covers every pixel exactly once
+// (the same test for both left the pixels above max(a, 1 - a) empty: half the area see-through mid-fade)
+fn dither_discard(pos: vec4<f32>, alpha: f32, fading_out: bool) -> bool {
+    let threshold = fract(dot(vec2<f32>(171.0, 231.0), pos.xy) / 71.0);
+    return select(threshold >= alpha, threshold < 1.0 - alpha, fading_out);
 }
 
 fn triplanar_detail(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
@@ -558,7 +561,7 @@ fn post_process(lit: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // 1. Transparency Dithering
-    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+    if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
     return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), 1.0);
@@ -576,7 +579,7 @@ struct GeomOut {
 
 @fragment
 fn fs_geom(in: VertexOut) -> GeomOut {
-    if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
+    if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
     var out: GeomOut;
