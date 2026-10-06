@@ -267,6 +267,7 @@ struct Game {
     edits_by_planet: std::collections::HashMap<usize, crate::common::PlanetEdits>,
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
+    landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
 }
 
 impl Game {
@@ -325,6 +326,7 @@ impl Game {
             bake_rx: None,
             baking: None,
             voxel_ready_announced: false,
+            landed_at: None,
             clock,
             loaded_world: start_planet,
             start_planet,
@@ -351,6 +353,7 @@ impl Game {
             bake_rx,
             baking,
             voxel_ready_announced,
+            landed_at,
             clock,
             loaded_world,
             start_planet,
@@ -500,6 +503,7 @@ impl Game {
             controller.fly_mode = true;
             controller.first_person = true;
             *mode = GameMode::Planet;
+            *landed_at = Some(now);
             println!("Landing handover onto #{}", i + 1);
         }
         if let Some(i) = lift_off_from {
@@ -921,11 +925,19 @@ impl Game {
                             t,
                         );
                         let content = GalaxyContent::AllButPlanet(i);
+                        // the galaxy's impostor fading out over the voxel world after a landing
+                        let handover_overlay = self
+                            .landed_at
+                            .and_then(|at| {
+                                crate::landing::handover_overlay_opacity(at.elapsed().as_secs_f32())
+                            })
+                            .map(|opacity| (i, opacity));
                         let backdrop = Backdrop {
                             galaxy: &self.galaxy,
                             camera,
                             content,
                             t,
+                            handover_overlay,
                         };
                         renderer.render(controller, player, planet, console, t, sun, &backdrop)
                     }

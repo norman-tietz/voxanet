@@ -213,6 +213,9 @@ pub struct Backdrop<'a> {
     pub camera: GalaxyCamera,
     pub content: GalaxyContent,
     pub t: f64,
+    // the landing handover's cross-fade: (planet index, opacity) of the near impostor drawn over the
+    // voxel frame (GalaxyRenderer::draw_handover_overlay), None once it has faded out
+    pub handover_overlay: Option<(usize, f32)>,
 }
 
 pub struct GalaxyRenderer {
@@ -226,6 +229,7 @@ pub struct GalaxyRenderer {
     i_buf: wgpu::Buffer,
     num_indices: u32,
     planet_pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline, // the landing handover's cross-fade (draw_handover_overlay)
     atmosphere_pipeline: wgpu::RenderPipeline,
     planet_uniform_buf: wgpu::Buffer,
     planet_uniform_bind: wgpu::BindGroup,
@@ -460,6 +464,61 @@ impl GalaxyRenderer {
             cache: None,
         });
 
+        // the landing handover's cross-fade: the planet pipeline, alpha-blended over the finished voxel
+        // frame (draw_handover_overlay); its own cleared depth keeps only the impostor's front surface
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Galaxy Handover Overlay Pipeline"),
+            layout: Some(&planet_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_planet"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::common::Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 24,
+                            shader_location: 2,
+                        },
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_planet_overlay"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // no culling, like the voxel engine's own geometry pass: the near impostor is the engine's LOD
+                // meshes, whose triangle winding isn't consistent (back-face culling punched holes at
+                // cube-face corners and seams); the depth test hides the far side of the closed sphere
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil.clone()),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // atmosphere shell: the star's unit icosphere scaled per planet in vs_atmosphere; back faces
         // only (so it also renders with the camera inside it), depth-tested against the planets but not
         // writing depth, premultiplied over whatever is behind
@@ -549,6 +608,7 @@ impl GalaxyRenderer {
             i_buf,
             num_indices: indices.len() as u32,
             planet_pipeline,
+            overlay_pipeline,
             atmosphere_pipeline,
             planet_uniform_buf,
             planet_uniform_bind,
@@ -571,22 +631,7 @@ impl GalaxyRenderer {
         t: f64,
         screen: (f32, f32),
     ) {
-        let proj = projection(camera.fov_y, screen.0 / screen.1);
-        let view = Mat4::from_quat(camera.rotation).inverse();
-        let view_proj = proj * view;
-
-        let ray_dirs = Self::ray_dirs(camera.rotation, camera.fov_y, screen.0 / screen.1);
-        queue.write_buffer(
-            &self.camera_buf,
-            0,
-            bytemuck::cast_slice(&[GalaxyCameraUniform {
-                view_proj: view_proj.to_cols_array(),
-                // z: cloud animation time, wrapped like the engine's GlobalUniform.screen.w
-                screen: [screen.0, screen.1, (t % 3600.0) as f32, 0.0],
-                ray_dirs,
-                forward: (camera.rotation * Vec3::NEG_Z).extend(0.0).to_array(),
-            }]),
-        );
+        self.write_camera(queue, camera, t, screen, 0.0);
 
         // the star (always drawn: only planets can be left out)
         {
@@ -613,37 +658,13 @@ impl GalaxyRenderer {
 
         let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
         for (i, p) in galaxy.planets.iter().enumerate() {
-            let body_pos = p.position_at(t);
-            let camera_relative = (body_pos - camera.position).as_vec3(); // already computed here
-                                                                          // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
+            let camera_relative = (p.position_at(t) - camera.position).as_vec3();
+            // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
             if content.draws_planet(i) && !self.has_near_impostor(i) {
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 self.ensure_planet_mesh(device, i, p, subdivision);
             }
-            let light_dir = (-body_pos).normalize_or_zero().as_vec3();
-            let atmosphere = p.planet_type.def().atmosphere;
-            let model = glam::Mat3::from_quat(p.orientation(t));
-            let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
-            planet_uniforms.push(GalaxyPlanetUniform {
-                offset: [
-                    camera_relative.x,
-                    camera_relative.y,
-                    camera_relative.z,
-                    p.voxel_resolution() as f32 / 2.0,
-                ],
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-                sky_zenith: v4(atmosphere.sky_zenith),
-                sky_horizon: v4(atmosphere.sky_horizon_warm),
-                space_color: v4(atmosphere.space_color),
-                cloud_light: v4(atmosphere.cloud_light),
-                cloud_dark: v4(atmosphere.cloud_dark),
-                sun_color: v4(galaxy.star.star_type.def().sunlight),
-                model: [
-                    model.x_axis.extend(0.0).to_array(),
-                    model.y_axis.extend(0.0).to_array(),
-                    model.z_axis.extend(0.0).to_array(),
-                ],
-            });
+            planet_uniforms.push(Self::planet_uniform(galaxy, i, camera, t));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
         for (i, u) in planet_uniforms.iter().enumerate() {
@@ -744,6 +765,129 @@ impl GalaxyRenderer {
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    fn write_camera(
+        &self,
+        queue: &wgpu::Queue,
+        camera: &GalaxyCamera,
+        t: f64,
+        screen: (f32, f32),
+        overlay_opacity: f32,
+    ) {
+        let proj = projection(camera.fov_y, screen.0 / screen.1);
+        let view = Mat4::from_quat(camera.rotation).inverse();
+        let view_proj = proj * view;
+
+        let ray_dirs = Self::ray_dirs(camera.rotation, camera.fov_y, screen.0 / screen.1);
+        queue.write_buffer(
+            &self.camera_buf,
+            0,
+            bytemuck::cast_slice(&[GalaxyCameraUniform {
+                view_proj: view_proj.to_cols_array(),
+                // z: cloud animation time, wrapped like the engine's GlobalUniform.screen.w;
+                // w: the handover overlay's opacity (fs_planet_overlay)
+                screen: [screen.0, screen.1, (t % 3600.0) as f32, overlay_opacity],
+                ray_dirs,
+                forward: (camera.rotation * Vec3::NEG_Z).extend(0.0).to_array(),
+            }]),
+        );
+    }
+
+    // planet i's uniform slot as seen from `camera`
+    fn planet_uniform(
+        galaxy: &Galaxy,
+        i: usize,
+        camera: &GalaxyCamera,
+        t: f64,
+    ) -> GalaxyPlanetUniform {
+        let p = &galaxy.planets[i];
+        let body_pos = p.position_at(t);
+        let camera_relative = (body_pos - camera.position).as_vec3();
+        let light_dir = (-body_pos).normalize_or_zero().as_vec3();
+        let atmosphere = p.planet_type.def().atmosphere;
+        let model = glam::Mat3::from_quat(p.orientation(t));
+        let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
+        GalaxyPlanetUniform {
+            offset: [
+                camera_relative.x,
+                camera_relative.y,
+                camera_relative.z,
+                p.voxel_resolution() as f32 / 2.0,
+            ],
+            light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+            sky_zenith: v4(atmosphere.sky_zenith),
+            sky_horizon: v4(atmosphere.sky_horizon_warm),
+            space_color: v4(atmosphere.space_color),
+            cloud_light: v4(atmosphere.cloud_light),
+            cloud_dark: v4(atmosphere.cloud_dark),
+            sun_color: v4(galaxy.star.star_type.def().sunlight),
+            model: [
+                model.x_axis.extend(0.0).to_array(),
+                model.y_axis.extend(0.0).to_array(),
+                model.z_axis.extend(0.0).to_array(),
+            ],
+        }
+    }
+
+    // the landing handover's cross-fade: planet `index`'s near impostor alpha-blended at `opacity` over
+    // the finished voxel frame in `color_view`, recorded into the frame's encoder. `depth_view` is
+    // cleared and reused for the impostor's own depth, so it must not be needed after this pass. Does
+    // nothing without a near impostor for that planet. Writes the camera and planet uniforms, so record it
+    // after any render() this frame has already submitted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_handover_overlay(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        camera: &GalaxyCamera,
+        galaxy: &Galaxy,
+        index: usize,
+        t: f64,
+        screen: (f32, f32),
+        opacity: f32,
+    ) {
+        let Some((_, mesh)) = self.near_impostor.as_ref().filter(|(n, _)| *n == index) else {
+            return;
+        };
+        self.write_camera(queue, camera, t, screen, opacity);
+        let slot = index as u64 * self.planet_uniform_stride;
+        queue.write_buffer(
+            &self.planet_uniform_buf,
+            slot,
+            bytemuck::cast_slice(&[Self::planet_uniform(galaxy, index, camera, t)]),
+        );
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Handover Overlay Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                depth_slice: None,
+                view: color_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.overlay_pipeline);
+        pass.set_bind_group(0, &self.camera_bind, &[]);
+        pass.set_bind_group(1, &self.planet_uniform_bind, &[slot as u32]);
+        pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
+        pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
     }
 
     // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain

@@ -6,7 +6,7 @@
 
 struct Camera {
     view_proj: mat4x4<f32>, // camera-relative: positions are pre-translated so the camera is at the origin
-    screen: vec4<f32>,      // x, y: width/height in pixels, z: cloud animation time (seconds, wrapped at 3600)
+    screen: vec4<f32>,      // x, y: width/height in pixels, z: cloud animation time (seconds, wrapped at 3600), w: handover overlay opacity (fs_planet_overlay)
     ray_dirs: array<vec4<f32>, 3>, // camera basis corners for the starfield background
     forward: vec4<f32>,     // the view direction (xyz), for the star's reversed-Z depth
 }
@@ -167,6 +167,17 @@ fn vs_planet(
 // caustics and the per-voxel grain — sun, sky ambient, rim, cloud shadow and air fog are the same
 @fragment
 fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(planet_color(in), 1.0);
+}
+
+// the landing handover's cross-fade (GalaxyRenderer::draw_handover_overlay): the near impostor blended
+// over the finished voxel frame at camera.screen.w opacity, fading out
+@fragment
+fn fs_planet_overlay(in: PlanetVertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(planet_color(in), camera.screen.w);
+}
+
+fn planet_color(in: PlanetVertexOut) -> vec3<f32> {
     let a = planet_atmosphere();
     let cam = planet_frame_camera();
     let L = planet_frame_light();
@@ -190,7 +201,7 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
         let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
         color = mix(color, cl.rgb, cl.a);
     }
-    return vec4<f32>(aces_and_gamma(color), 1.0);
+    return aces_and_gamma(color);
 }
 
 // the atmosphere shell around each planet: a sphere this many planet radii out, comfortably past where

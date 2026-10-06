@@ -2529,6 +2529,23 @@ impl Renderer {
             }
         }
 
+        // the landing handover's cross-fade: the galaxy's near impostor alpha-blended over the finished
+        // voxel frame, fading out; Deferred::depth is free again now (the passes above were its last use)
+        if let Some((index, opacity)) = backdrop.handover_overlay {
+            self.galaxy.draw_handover_overlay(
+                &self.queue,
+                &mut enc,
+                &view,
+                &self.deferred.depth,
+                &backdrop.camera,
+                backdrop.galaxy,
+                index,
+                backdrop.t,
+                screen,
+                opacity,
+            );
+        }
+
         // --- FPS CALCULATION ---
         self.update_fps();
 

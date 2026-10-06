@@ -22,6 +22,17 @@ pub fn should_lift_off(distance_radii: f32) -> bool {
     distance_radii > LIFTOFF_HANDOVER_RADII
 }
 
+// after the landing handover the galaxy's near impostor stays over the voxel world this long, fading
+// out (alpha-blended, GalaxyRenderer::draw_handover_overlay), so the switch between the two renderings
+// is a cross-fade instead of a cut
+pub const HANDOVER_FADE_SECONDS: f32 = 1.0;
+
+// the impostor's opacity `elapsed` seconds after the landing handover; None once it has faded out
+pub fn handover_overlay_opacity(elapsed: f32) -> Option<f32> {
+    let t = (elapsed / HANDOVER_FADE_SECONDS).max(0.0);
+    (t < 1.0).then_some(1.0 - t * t * (3.0 - 2.0 * t))
+}
+
 // galaxy flight (eye position and orientation, planet frame) -> the planet engine's player: feet
 // position, upright rotation (local Y = up, local -Z = heading), camera pitch and roll. The eye stays
 // where it is and a rolled view stays rolled; pitch is clamped to MAX_PITCH.
@@ -259,6 +270,17 @@ pub fn keep_above_planet(pos: glam::DVec3, planet_radius: f64) -> glam::DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the handover overlay starts as the impostor alone and fades out smoothly, then stops
+    #[test]
+    fn handover_overlay_fades_out() {
+        assert_eq!(handover_overlay_opacity(0.0), Some(1.0));
+        let mid = handover_overlay_opacity(HANDOVER_FADE_SECONDS / 2.0).unwrap();
+        assert!((mid - 0.5).abs() < 1e-6);
+        let late = handover_overlay_opacity(HANDOVER_FADE_SECONDS * 0.9).unwrap();
+        assert!(late > 0.0 && late < mid);
+        assert_eq!(handover_overlay_opacity(HANDOVER_FADE_SECONDS), None);
+    }
 
     // liftoff must keep the climb going: galaxy flight starts with the player's velocity, not
     // from rest (both are in the planet frame)
