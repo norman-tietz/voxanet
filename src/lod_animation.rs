@@ -25,9 +25,10 @@ impl LodAnimator {
         Self {
             dying_chunks: HashMap::new(),
             spawning_chunks: HashMap::new(),
-            // short: with complementary dithering (shader.wgsl dither_discard) a swap is a clean
-            // cross-fade, and descending passes several LOD levels whose fades shouldn't pile up
-            fade_duration: 0.5,
+            // LOD <-> LOD swaps are invisible (geomorphing: renderer.rs morph_factor), so this only
+            // shows where voxel chunks and LOD meshes hand over: a complementary dithered cross-fade
+            // (shader.wgsl dither_discard) between their different shapes
+            fade_duration: 1.0,
         }
     }
 

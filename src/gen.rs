@@ -691,16 +691,19 @@ impl MeshGen {
         (verts, inds)
     }
 
-    pub fn generate_lod_mesh(
+    // LOD meshes are a LOD_GRID x LOD_GRID quad grid over their node, each vertex point-sampling a column
+    // (so a child node's even grid vertices lie exactly on its parent's)
+    const LOD_GRID: u32 = 64;
+
+    // a LOD node's grid vertex (gx, gy may lie outside 0..=LOD_GRID, for normals): position, normal, colour
+    fn lod_sample(
         key: crate::common::LodKey,
         data: &PlanetData,
-    ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut verts = Vec::new();
-        let mut inds = Vec::new();
+        gx: i32,
+        gy: i32,
+    ) -> (glam::Vec3, glam::Vec3, [f32; 3]) {
         let def = data.planet_type.def();
-
-        let grid_res = 64;
-        let row_len = grid_res + 1;
+        let grid_res = Self::LOD_GRID;
 
         // calculate global pos for any grid index (even outside this chunk)
         // this allows us to "peek" into neighbor chunks for perfect normals.
@@ -720,72 +723,164 @@ impl MeshGen {
             CoordSystem::get_vertex_pos(key.face, abs_u, abs_v, h, data.resolution)
         };
 
+        let pos = get_sample_pos(gx, gy);
+
+        // seamless normal fix
+        // instead of clamping to grid edges, we look -1 and +1 in global grid Space
+        // this ensures the normal at the chunk edge matches the neighbor's normal perfectly
+
+        let p_right = get_sample_pos(gx + 1, gy);
+        let p_left = get_sample_pos(gx - 1, gy);
+        let p_down = get_sample_pos(gx, gy + 1);
+        let p_up = get_sample_pos(gx, gy - 1);
+
+        // central Difference
+        let tangent_u = p_right - p_left;
+        let tangent_v = p_down - p_up;
+
+        let mut normal = tangent_u.cross(tangent_v).normalize();
+        if normal.dot(pos.normalize()) < 0.0 {
+            normal = -normal;
+        }
+
+        // --- COLORING ---
+        let slope = normal.dot(pos.normalize()).abs();
+
+        // same material as the voxel surface here
+        let offset_u = (gx.max(0) as u32 * key.size) / grid_res;
+        let offset_v = (gy.max(0) as u32 * key.size) / grid_res;
+        let (su, sv) = (
+            (key.x + offset_u).min(data.resolution - 1),
+            (key.y + offset_v).min(data.resolution - 1),
+        );
+        let h = data.surface(key.face, su, sv);
+        // the block on top, edits included (the natural material where unedited)
+        let surface = data
+            .block_type(BlockId {
+                face: key.face,
+                layer: h,
+                u: su,
+                v: sv,
+            })
+            .unwrap_or(def.palette.beach);
+        let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
+        let sea = data.terrain.sea_level();
+        // a liquid-less planet's filled-in basin: its surface is the sea-level fill over natural
+        // terrain below sea level, coloured flat like the rest of the basin (no rim shading)
+        let filled_basin =
+            def.liquid.is_none() && h == sea && data.terrain.get_height(key.face, su, sv) < sea;
+        // below the column's water level: a lake's or the sea's (Ice: always sea level)
+        let water = data.terrain.water_level(key.face, su, sv);
+        let color = if h < water || filled_basin {
+            match def.liquid {
+                // distant water: the planet type's own shallow liquid color, not a
+                // hardcoded Earth-specific one
+                Some(liquid) => liquid.shallow_color,
+                // liquid-less planet (e.g. Ice): the filled-in beach material
+                // (PlanetData::exists's liquid-less solidity rule), not water — a filled
+                // basin, or edits that dug below sea level
+                None => def.palette.beach.color(),
+            }
+        } else {
+            surface.color().map(|c| c * shade)
+        };
+        (pos, normal, color)
+    }
+
+    // the geomorph targets of generate_lod_mesh's vertices (same order: the grid, then the skirts): the
+    // parent node's piecewise-linear surface at each vertex. Even vertices take the parent's own
+    // sample, odd ones the midpoint of the parent edge they lie on (for a quad's centre, the diagonal
+    // tr-bl generate_lod_mesh splits it along), so at morph 1 the mesh lies exactly on its parent's
+    // triangles. A root node (no parent, `logical_size` = the quadtree's) morphs to itself.
+    pub fn generate_lod_morph(
+        key: crate::common::LodKey,
+        data: &PlanetData,
+        logical_size: u32,
+    ) -> Vec<LodMorph> {
+        let grid = Self::LOD_GRID;
+        let row_len = grid + 1;
+        let own: Vec<_> = (0..=grid)
+            .flat_map(|y| (0..=grid).map(move |x| (x, y)))
+            .map(|(x, y)| Self::lod_sample(key, data, x as i32, y as i32))
+            .collect();
+        let mut targets: Vec<LodMorph> = if key.size >= logical_size {
+            own.iter()
+                .map(|&(_, n, c)| LodMorph::new(0.0, n, c))
+                .collect()
+        } else {
+            let psize = key.size * 2;
+            let parent = crate::common::LodKey {
+                face: key.face,
+                x: key.x - key.x % psize,
+                y: key.y - key.y % psize,
+                size: psize,
+            };
+            // this node's grid in half-steps of the parent's: 0 or LOD_GRID offset into its quadrant
+            let (ox, oy) = (
+                (key.x - parent.x) * grid / key.size,
+                (key.y - parent.y) * grid / key.size,
+            );
+            // the parent's samples over this quadrant (indices ox/2..=ox/2 + grid/2)
+            let half = grid / 2 + 1;
+            let psamples: Vec<_> = (0..half)
+                .flat_map(|y| (0..half).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    Self::lod_sample(parent, data, (ox / 2 + x) as i32, (oy / 2 + y) as i32)
+                })
+                .collect();
+            let p = |hx: u32, hy: u32| psamples[((hy - oy) / 2 * half + (hx - ox) / 2) as usize];
+            let mut out = Vec::with_capacity(own.len());
+            for y in 0..=grid {
+                for x in 0..=grid {
+                    let (hx, hy) = (x + ox, y + oy);
+                    let (a, b) = match (hx % 2, hy % 2) {
+                        (0, 0) => (p(hx, hy), p(hx, hy)),
+                        (1, 0) => (p(hx - 1, hy), p(hx + 1, hy)),
+                        (0, _) => (p(hx, hy - 1), p(hx, hy + 1)),
+                        _ => (p(hx + 1, hy - 1), p(hx - 1, hy + 1)),
+                    };
+                    let pos = (a.0 + b.0) * 0.5;
+                    let normal = (a.1 + b.1).normalize();
+                    let color = [0, 1, 2].map(|i| (a.2[i] + b.2[i]) * 0.5);
+                    let own_pos = own[(y * row_len + x) as usize].0;
+                    out.push(LodMorph::new(
+                        pos.length() - own_pos.length(),
+                        normal,
+                        color,
+                    ));
+                }
+            }
+            out
+        };
+        // skirts: copies of the edge vertices, in generate_lod_mesh's order (top, bottom, left, right)
+        let edges = [
+            (0..=grid).map(|x| (x, 0)).collect::<Vec<_>>(),
+            (0..=grid).map(|x| (x, grid)).collect(),
+            (0..=grid).map(|y| (0, y)).collect(),
+            (0..=grid).map(|y| (grid, y)).collect(),
+        ];
+        for edge in edges {
+            for (x, y) in edge {
+                targets.push(targets[(y * row_len + x) as usize]);
+            }
+        }
+        targets
+    }
+
+    pub fn generate_lod_mesh(
+        key: crate::common::LodKey,
+        data: &PlanetData,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut verts = Vec::new();
+        let mut inds = Vec::new();
+
+        let grid_res = Self::LOD_GRID;
+        let row_len = grid_res + 1;
+
         // 1. Generate Vertices
         for vy in 0..=grid_res {
             for ux in 0..=grid_res {
-                let pos = get_sample_pos(ux as i32, vy as i32);
-
-                // seamless normal fix
-                // instead of clamping to grid edges, we look -1 and +1 in global grid Space
-                // this ensures the normal at the chunk edge matches the neighbor's normal perfectly
-
-                let p_right = get_sample_pos(ux as i32 + 1, vy as i32);
-                let p_left = get_sample_pos(ux as i32 - 1, vy as i32);
-                let p_down = get_sample_pos(ux as i32, vy as i32 + 1);
-                let p_up = get_sample_pos(ux as i32, vy as i32 - 1);
-
-                // central Difference
-                let tangent_u = p_right - p_left;
-                let tangent_v = p_down - p_up;
-
-                let mut normal = tangent_u.cross(tangent_v).normalize();
-                if normal.dot(pos.normalize()) < 0.0 {
-                    normal = -normal;
-                }
-
-                // --- COLORING ---
-                let slope = normal.dot(pos.normalize()).abs();
-
-                // same material as the voxel surface here
-                let offset_u = (ux * key.size) / grid_res;
-                let offset_v = (vy * key.size) / grid_res;
-                let (su, sv) = (
-                    (key.x + offset_u).min(data.resolution - 1),
-                    (key.y + offset_v).min(data.resolution - 1),
-                );
-                let h = data.surface(key.face, su, sv);
-                // the block on top, edits included (the natural material where unedited)
-                let surface = data
-                    .block_type(BlockId {
-                        face: key.face,
-                        layer: h,
-                        u: su,
-                        v: sv,
-                    })
-                    .unwrap_or(def.palette.beach);
-                let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
-                let sea = data.terrain.sea_level();
-                // a liquid-less planet's filled-in basin: its surface is the sea-level fill over natural
-                // terrain below sea level, coloured flat like the rest of the basin (no rim shading)
-                let filled_basin = def.liquid.is_none()
-                    && h == sea
-                    && data.terrain.get_height(key.face, su, sv) < sea;
-                // below the column's water level: a lake's or the sea's (Ice: always sea level)
-                let water = data.terrain.water_level(key.face, su, sv);
-                let color = if h < water || filled_basin {
-                    match def.liquid {
-                        // distant water: the planet type's own shallow liquid color, not a
-                        // hardcoded Earth-specific one
-                        Some(liquid) => liquid.shallow_color,
-                        // liquid-less planet (e.g. Ice): the filled-in beach material
-                        // (PlanetData::exists's liquid-less solidity rule), not water — a filled
-                        // basin, or edits that dug below sea level
-                        None => def.palette.beach.color(),
-                    }
-                } else {
-                    surface.color().map(|c| c * shade)
-                };
-
+                let (pos, normal, color) = Self::lod_sample(key, data, ux as i32, vy as i32);
                 verts.push(Vertex {
                     pos: pos.to_array(),
                     color,
@@ -1510,5 +1605,69 @@ mod biome_tests {
         assert!(verts
             .iter()
             .all(|vx| vx.water == 0.0 || vx.water >= Vec3::from_array(vx.pos).length() - 1.5));
+    }
+
+    // at morph factor 1 a LOD node shows its parent's surface: even vertices sit on the parent's own
+    // vertices, odd ones (moved along their own up) on the parent's triangles
+    #[test]
+    fn lod_morph_targets_lie_on_the_parent_mesh() {
+        let planet = PlanetData::new(256);
+        let parent = crate::common::LodKey {
+            face: 2,
+            x: 128,
+            y: 0,
+            size: 128,
+        };
+        let key = crate::common::LodKey {
+            face: 2,
+            x: 192,
+            y: 64,
+            size: 64,
+        };
+        let (pv, _) = MeshGen::generate_lod_mesh(parent, &planet);
+        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let morph = MeshGen::generate_lod_morph(key, &planet, 256);
+        assert_eq!(morph.len(), verts.len());
+        let grid = MeshGen::LOD_GRID;
+        let pos =
+            |v: &[Vertex], x: u32, y: u32| Vec3::from_array(v[(y * (grid + 1) + x) as usize].pos);
+        let step = pos(&pv, 1, 0).distance(pos(&pv, 0, 0));
+        for y in 0..=grid {
+            for x in 0..=grid {
+                let own = pos(&verts, x, y);
+                let m = morph[(y * (grid + 1) + x) as usize];
+                let morphed = own + own.normalize() * m.height;
+                let (hx, hy) = (x + grid, y + grid); // this node is the parent's bottom-right quadrant
+                let p = |hx: u32, hy: u32| pos(&pv, hx / 2, hy / 2);
+                let expected = match (hx % 2, hy % 2) {
+                    (0, 0) => p(hx, hy),
+                    (1, 0) => (p(hx - 1, hy) + p(hx + 1, hy)) * 0.5,
+                    (0, _) => (p(hx, hy - 1) + p(hx, hy + 1)) * 0.5,
+                    _ => (p(hx + 1, hy - 1) + p(hx - 1, hy + 1)) * 0.5,
+                };
+                assert!(
+                    morphed.distance(expected) < 0.02 * step,
+                    "({x}, {y}): {morphed} vs {expected}"
+                );
+                if hx % 2 == 0 && hy % 2 == 0 {
+                    assert_eq!(m.height, 0.0);
+                }
+            }
+        }
+    }
+
+    // a root node has no parent: it morphs to itself
+    #[test]
+    fn root_lod_nodes_morph_to_themselves() {
+        let planet = PlanetData::new(64);
+        let key = crate::common::LodKey {
+            face: 0,
+            x: 0,
+            y: 0,
+            size: 64,
+        };
+        assert!(MeshGen::generate_lod_morph(key, &planet, 64)
+            .iter()
+            .all(|m| m.height == 0.0));
     }
 }

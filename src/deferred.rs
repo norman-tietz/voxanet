@@ -8,7 +8,7 @@
 // The translucent water surface (fs_water) and the overlays (cursor box, collision lines, crosshair,
 // console) are drawn forward after the lighting pass, depth-tested against the G-buffer depth.
 
-use crate::common::Vertex;
+use crate::common::{LodMorph, Vertex};
 use crate::rt_blur::RtBlur;
 
 const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -19,6 +19,8 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub struct Deferred {
     pub geom_fill: wgpu::RenderPipeline,
     pub geom_wire: wgpu::RenderPipeline, // the same as geom_fill on devices without POLYGON_MODE_LINE
+    pub geom_lod_fill: wgpu::RenderPipeline, // LOD meshes: vs_lod with the LodMorph vertex buffer
+    pub geom_lod_wire: wgpu::RenderPipeline,
     pub light_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
     down_pipeline: wgpu::ComputePipeline,
@@ -46,19 +48,31 @@ impl Deferred {
         width: u32,
         height: u32,
     ) -> Self {
-        let geom = |polygon_mode| {
+        // lod: LOD meshes, with their geomorph targets in a second vertex buffer (vs_lod)
+        let geom = |polygon_mode, lod: bool| {
+            let vertex = Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &Vertex::ATTRIBUTES,
+            });
+            let morph = Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LodMorph>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &LodMorph::ATTRIBUTES,
+            });
+            let buffers = [vertex, morph];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Geometry Pipeline"),
+                label: Some(if lod {
+                    "LOD Geometry Pipeline"
+                } else {
+                    "Geometry Pipeline"
+                }),
                 layout: Some(scene_layout),
                 vertex: wgpu::VertexState {
                     module: shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(if lod { "vs_lod" } else { "vs_main" }),
                     compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &Vertex::ATTRIBUTES,
-                    })],
+                    buffers: &buffers[..if lod { 2 } else { 1 }],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: shader,
@@ -88,12 +102,15 @@ impl Deferred {
                 cache: None,
             })
         };
-        let geom_fill = geom(wgpu::PolygonMode::Fill);
-        let geom_wire = geom(if wireframe {
+        let wire_mode = if wireframe {
             wgpu::PolygonMode::Line
         } else {
             wgpu::PolygonMode::Fill
-        });
+        };
+        let geom_fill = geom(wgpu::PolygonMode::Fill, false);
+        let geom_wire = geom(wire_mode, false);
+        let geom_lod_fill = geom(wgpu::PolygonMode::Fill, true);
+        let geom_lod_wire = geom(wire_mode, true);
 
         let tex_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
             binding,
@@ -249,6 +266,8 @@ impl Deferred {
         Self {
             geom_fill,
             geom_wire,
+            geom_lod_fill,
+            geom_lod_wire,
             light_pipeline,
             water_pipeline,
             down_pipeline,

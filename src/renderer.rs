@@ -126,7 +126,7 @@ impl BiomeUniform {
 // a voxel chunk's meshes from a worker thread: key, terrain vertices/indices, water vertices/indices
 // mesh worker results, tagged with the reload generation they were started in (Renderer::generation)
 type ChunkGeometry = (u64, ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
-type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>);
+type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>, Vec<LodMorph>);
 
 // --- RENDERER STRUCT ---
 
@@ -1191,12 +1191,12 @@ impl Renderer {
         let res = planet.resolution;
         let player_id = CoordSystem::pos_to_id(player_pos, res);
         let mut upload_count = 0;
-        while let Ok((generation, key, v, i)) = self.lod_rx.try_recv() {
+        while let Ok((generation, key, v, i, m)) = self.lod_rx.try_recv() {
             if generation != self.generation {
                 continue;
             } // meshed for a previous planet
             self.pending_lods.remove(&key);
-            self.upload_lod_buffer(key, v, i);
+            self.upload_lod_buffer(key, v, i, m);
             upload_count += 1;
             if upload_count > 20 {
                 break;
@@ -1247,6 +1247,16 @@ impl Renderer {
             })
         };
 
+        // geomorphing: every LOD mesh's blend toward its parent's shape, for this view
+        for (key, mesh) in self.lod_chunks.iter_mut() {
+            mesh.morph_factor = Self::morph_factor(*key, player_pos, planet, player_id);
+        }
+        for (key, state) in self.animator.dying_chunks.iter_mut() {
+            if let AnyKey::Lod(k) = key {
+                state.mesh.morph_factor = Self::morph_factor(*k, player_pos, planet, player_id);
+            }
+        }
+
         let current_lods: Vec<LodKey> = self.lod_chunks.keys().cloned().collect();
         for k in current_lods {
             if required_lods.contains(&k) || uncovered(k.face, k.x, k.y, k.size) {
@@ -1269,7 +1279,8 @@ impl Renderer {
                 let p = planet.clone();
                 std::thread::spawn(move || {
                     let (v, i) = MeshGen::generate_lod_mesh(key, &p);
-                    let _ = tx.send((generation, key, v, i));
+                    let m = MeshGen::generate_lod_morph(key, &p, logical_size);
+                    let _ = tx.send((generation, key, v, i, m));
                 });
                 spawn_count += 1;
             }
@@ -1316,6 +1327,93 @@ impl Renderer {
         self.process_load_queue(player_pos, planet);
     }
 
+    // the distance process_quadtree splits a node by: from the camera to the node's centre at sea level,
+    // or, for the node under the camera, its height above sea level (that node's closest point is
+    // straight down; this used to be 0 at any altitude, which split the column under the camera down
+    // to a voxel chunk even from orbit)
+    fn node_distance(
+        face: u8,
+        x: u32,
+        y: u32,
+        size: u32,
+        cam_pos: Vec3,
+        planet: &PlanetData,
+        player_id: Option<BlockId>,
+    ) -> f32 {
+        let center_u = (x + size / 2).min(planet.resolution - 1);
+        let center_v = (y + size / 2).min(planet.resolution - 1);
+        let h = planet.resolution / 2;
+        let world_pos = CoordSystem::get_vertex_pos(face, center_u, center_v, h, planet.resolution);
+        let dist = world_pos.distance(cam_pos);
+        match player_id {
+            Some(pid)
+                if pid.face == face
+                    && pid.u >= x
+                    && pid.u < x + size
+                    && pid.v >= y
+                    && pid.v < y + size =>
+            {
+                let altitude =
+                    cam_pos.length() - CoordSystem::get_layer_radius(h, planet.resolution);
+                dist.min(altitude.abs())
+            }
+            _ => dist,
+        }
+    }
+
+    // a node of this size splits once node_distance is below this
+    fn split_distance(size: u32, resolution: u32) -> f32 {
+        let node_radius_world = (size as f32
+            * CoordSystem::get_layer_radius(resolution / 2, resolution))
+            / resolution as f32;
+
+        let mut lod_factor = 4.0;
+        if size <= CHUNK_SIZE * 8 {
+            lod_factor = 5.0;
+        }
+        if size <= CHUNK_SIZE * 4 {
+            lod_factor = 7.0;
+        }
+        if size <= CHUNK_SIZE * 2 {
+            lod_factor = 12.0;
+        }
+        if size <= CHUNK_SIZE {
+            lod_factor = 18.0;
+        }
+        node_radius_world * lod_factor
+    }
+
+    // a LOD node's geomorph factor (vs_lod): 1 = its parent's shape, 0 = its own. A node exists while its
+    // parent's node_distance is below the parent's split distance, so it starts at 1 there (taking over
+    // from the parent without a visible change) and reaches 0 before it can split itself (its own
+    // centre lies half a node diagonally from the parent's: ~0.71 of its size in columns of up to
+    // ~1.6 R/res world units; 1.6 node radii leaves a margin), so its children take over from its own
+    // shape. The smallest LOD nodes hand over to voxel chunks, which can't morph (dithered fade): they
+    // morph over a longer stretch instead, their own split window being short.
+    fn morph_factor(
+        key: LodKey,
+        cam_pos: Vec3,
+        planet: &PlanetData,
+        player_id: Option<BlockId>,
+    ) -> f32 {
+        let res = planet.resolution;
+        let psize = key.size * 2;
+        if psize > res.next_power_of_two() {
+            return 0.0; // a root node: no parent
+        }
+        let (px, py) = (key.x - key.x % psize, key.y - key.y % psize);
+        let parent_dist = Self::node_distance(key.face, px, py, psize, cam_pos, planet, player_id);
+        let start = Self::split_distance(psize, res);
+        let end = if key.size <= CHUNK_SIZE * 2 {
+            0.6 * start
+        } else {
+            let node_radius_world =
+                (key.size as f32 * CoordSystem::get_layer_radius(res / 2, res)) / res as f32;
+            (Self::split_distance(key.size, res) + 1.6 * node_radius_world).min(0.9 * start)
+        };
+        ((parent_dist - end) / (start - end)).clamp(0.0, 1.0)
+    }
+
     // QUADTREE LOGIC
     fn process_quadtree(
         &self,
@@ -1333,40 +1431,8 @@ impl Renderer {
             return;
         }
 
-        let center_u = (x + size / 2).min(planet.resolution - 1);
-        let center_v = (y + size / 2).min(planet.resolution - 1);
-        let h = planet.resolution / 2;
-
-        let world_pos = CoordSystem::get_vertex_pos(face, center_u, center_v, h, planet.resolution);
-
-        let mut dist = world_pos.distance(cam_pos);
-
-        if let Some(pid) = player_id {
-            if pid.face == face {
-                if pid.u >= x && pid.u < x + size && pid.v >= y && pid.v < y + size {
-                    dist = 0.0;
-                }
-            }
-        }
-
-        let node_radius_world = (size as f32 * CoordSystem::get_layer_radius(h, planet.resolution))
-            / planet.resolution as f32;
-
-        let mut lod_factor = 4.0;
-        if size <= CHUNK_SIZE * 8 {
-            lod_factor = 5.0;
-        }
-        if size <= CHUNK_SIZE * 4 {
-            lod_factor = 7.0;
-        }
-        if size <= CHUNK_SIZE * 2 {
-            lod_factor = 12.0;
-        }
-        if size <= CHUNK_SIZE {
-            lod_factor = 18.0;
-        }
-
-        let split_distance = node_radius_world * lod_factor;
+        let dist = Self::node_distance(face, x, y, size, cam_pos, planet, player_id);
+        let split_distance = Self::split_distance(size, planet.resolution);
         let is_smallest = size <= CHUNK_SIZE;
 
         if dist < split_distance && !is_smallest {
@@ -1424,7 +1490,7 @@ impl Renderer {
         }
     }
 
-    fn upload_lod_buffer(&mut self, key: LodKey, v: Vec<Vertex>, i: Vec<u32>) {
+    fn upload_lod_buffer(&mut self, key: LodKey, v: Vec<Vertex>, i: Vec<u32>, m: Vec<LodMorph>) {
         // with hardware ray tracing every chunk mesh also gets a BLAS, built from the same buffers
         let blas_input = if self.hw_rt.is_some() {
             wgpu::BufferUsages::BLAS_INPUT
@@ -1455,6 +1521,14 @@ impl Renderer {
                 i.len() as u32,
             )
         });
+
+        let morph_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("LOD Morph"),
+                contents: bytemuck::cast_slice(&m),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
         let uniform_data = LocalUniform {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -1502,6 +1576,9 @@ impl Renderer {
                 radius: real_radius, // <--- ADDED
                 blas,
                 water: None,
+                morph: Some(morph_buf),
+                morph_factor: 1.0, // the parent's shape until update_view says otherwise
+                params: [0.0, 0.0, 0.0, 0.0],
             },
         );
         self.animator.start_spawn(AnyKey::Lod(key));
@@ -1779,6 +1856,9 @@ impl Renderer {
                 radius: real_radius,
                 blas,
                 water,
+                morph: None,
+                morph_factor: 0.0,
+                params: [start_opacity, 0.0, 0.0, 0.0],
             },
         );
 
@@ -2167,44 +2247,38 @@ impl Renderer {
 
         let now = std::time::Instant::now();
 
-        let dying_status = self.animator.update_dying(now);
-        for (key, alpha) in dying_status {
-            if let Some(state) = self.animator.dying_chunks.get(&key) {
-                let data = LocalUniform {
-                    model: glam::Mat4::IDENTITY.to_cols_array(),
-                    params: [alpha, 1.0, 0.0, 0.0],
-                };
-                self.queue
-                    .write_buffer(&state.mesh.uniform_buf, 0, bytemuck::cast_slice(&[data]));
-            }
-        }
-
+        // per-mesh LocalUniform params (opacity, 1 while fading out, geomorph factor), written only when
+        // they change; the model matrix stays the identity
         let queue = &self.queue;
-        let animator = &mut self.animator;
-
-        let mut update_opacity = |key: AnyKey, mesh: &ChunkMesh| {
-            let alpha = animator.get_opacity(key, now);
-            if alpha < 1.0 {
-                let data = LocalUniform {
-                    model: glam::Mat4::IDENTITY.to_cols_array(),
-                    params: [alpha, 0.0, 0.0, 0.0],
-                };
-                queue.write_buffer(&mesh.uniform_buf, 0, bytemuck::cast_slice(&[data]));
-            } else if animator.spawning_chunks.contains_key(&key) {
-                let data = LocalUniform {
-                    model: glam::Mat4::IDENTITY.to_cols_array(),
-                    params: [1.0, 0.0, 0.0, 0.0],
-                };
-                queue.write_buffer(&mesh.uniform_buf, 0, bytemuck::cast_slice(&[data]));
-                animator.spawning_chunks.remove(&key);
+        let write_params = |mesh: &mut ChunkMesh, params: [f32; 4]| {
+            if mesh.params != params {
+                let offset = std::mem::offset_of!(LocalUniform, params) as u64;
+                queue.write_buffer(&mesh.uniform_buf, offset, bytemuck::cast_slice(&params));
+                mesh.params = params;
             }
         };
-
-        for (key, mesh) in &self.lod_chunks {
-            update_opacity(AnyKey::Lod(*key), mesh);
+        let dying_status = self.animator.update_dying(now);
+        for (key, alpha) in dying_status {
+            if let Some(state) = self.animator.dying_chunks.get_mut(&key) {
+                let morph = state.mesh.morph_factor;
+                write_params(&mut state.mesh, [alpha, 1.0, morph, 0.0]);
+            }
         }
-        for (key, mesh) in &self.chunks {
-            update_opacity(AnyKey::Voxel(*key), mesh);
+        let animator = &mut self.animator;
+        let mut opacity = |key: AnyKey| {
+            let alpha = animator.get_opacity(key, now);
+            if alpha >= 1.0 {
+                animator.spawning_chunks.remove(&key);
+            }
+            alpha
+        };
+        for (key, mesh) in self.lod_chunks.iter_mut() {
+            let alpha = opacity(AnyKey::Lod(*key));
+            let morph = mesh.morph_factor;
+            write_params(mesh, [alpha, 0.0, morph, 0.0]);
+        }
+        for (key, mesh) in self.chunks.iter_mut() {
+            write_params(mesh, [opacity(AnyKey::Voxel(*key)), 0.0, 0.0, 0.0]);
         }
 
         let mut enc = self
@@ -2253,38 +2327,55 @@ impl Renderer {
             pass.set_bind_group(0, &self.global_bind, &[]);
             pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
 
-            for mesh in self.lod_chunks.values() {
-                if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
-                    rendered_lods += 1; // Count
-                    pass.set_bind_group(1, &mesh.bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
-                    pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+            // voxel meshes (chunks and the player) with vs_main, then LOD meshes and their geomorph
+            // targets with vs_lod; fading meshes are dithered (fs_geom discards), so they work in the
+            // G-buffer too
+            let draw = |pass: &mut wgpu::RenderPass, mesh: &ChunkMesh| {
+                pass.set_bind_group(1, &mesh.bind_group, &[]);
+                pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
+                if let Some(morph) = &mesh.morph {
+                    pass.set_vertex_buffer(1, morph.slice(..));
                 }
-            }
+                pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+            };
             for mesh in self.chunks.values() {
                 if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
                     rendered_chunks += 1; // Count
-                    pass.set_bind_group(1, &mesh.bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
-                    pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+                    draw(&mut pass, mesh);
                 }
             }
-            // fading chunks are dithered (fs_geom discards), so they work in the G-buffer too
-            for state in self.animator.dying_chunks.values() {
-                if frustum.intersects_sphere(state.mesh.center, state.mesh.radius) {
-                    pass.set_bind_group(1, &state.mesh.bind_group, &[]);
-                    pass.set_vertex_buffer(0, state.mesh.v_buf.slice(..));
-                    pass.set_index_buffer(state.mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..state.mesh.num_inds, 0, 0..1);
-                }
+            let dying = |lod: bool| {
+                self.animator
+                    .dying_chunks
+                    .values()
+                    .map(|state| &state.mesh)
+                    .filter(move |mesh| mesh.morph.is_some() == lod)
+                    .filter(|mesh| frustum.intersects_sphere(mesh.center, mesh.radius))
+            };
+            for mesh in dying(false) {
+                draw(&mut pass, mesh);
             }
             if !controller.first_person {
                 pass.set_bind_group(1, &self.local_bind_player, &[]);
                 pass.set_vertex_buffer(0, self.player_v_buf.slice(..));
                 pass.set_index_buffer(self.player_i_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.player_inds, 0, 0..1);
+            }
+
+            pass.set_pipeline(if controller.is_wireframe {
+                &self.deferred.geom_lod_wire
+            } else {
+                &self.deferred.geom_lod_fill
+            });
+            for mesh in self.lod_chunks.values() {
+                if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
+                    rendered_lods += 1; // Count
+                    draw(&mut pass, mesh);
+                }
+            }
+            for mesh in dying(true) {
+                draw(&mut pass, mesh);
             }
         }
 
@@ -3033,6 +3124,68 @@ impl Renderer {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // geomorphing: a LOD node starts with its parent's shape where it appears (its parent splits) and
+    // has reached its own before it can split itself (its children start from its own shape), for
+    // camera positions all around and above a face
+    #[test]
+    fn lod_morph_runs_between_appearing_and_splitting() {
+        let planet = PlanetData::new(512);
+        let res = planet.resolution;
+        let logical = res.next_power_of_two();
+        let radius = CoordSystem::get_layer_radius(res / 2, res);
+        let mut checked = 0;
+        for i in 0..400u32 {
+            // camera positions over face 0, from just above sea level to 4 radii
+            let (u, v) = ((i * 37) % res, (i * 101) % res);
+            let altitude = radius * 3.0 * ((i % 20) as f32 / 19.0).powi(3) + 2.0;
+            let up = CoordSystem::get_vertex_pos(0, u, v, res / 2, res).normalize();
+            let cam = up * (radius + altitude);
+            let pid = CoordSystem::pos_to_id(cam, res);
+            let mut size = CHUNK_SIZE * 2;
+            while size < logical {
+                let psize = size * 2;
+                for (x, y) in [(u - u % size, v - v % size), (0, 0), (size, size)] {
+                    let key = LodKey {
+                        face: 0,
+                        x,
+                        y,
+                        size,
+                    };
+                    let m = Renderer::morph_factor(key, cam, &planet, pid);
+                    let (px, py) = (x - x % psize, y - y % psize);
+                    let pd = Renderer::node_distance(0, px, py, psize, cam, &planet, pid);
+                    if pd >= Renderer::split_distance(psize, res) {
+                        assert_eq!(m, 1.0, "{key:?} appears with its parent's shape");
+                    }
+                    let d = Renderer::node_distance(0, x, y, size, cam, &planet, pid);
+                    if size > CHUNK_SIZE * 2 && d < Renderer::split_distance(size, res) {
+                        assert_eq!(m, 0.0, "{key:?} splits from its own shape");
+                        checked += 1;
+                    }
+                }
+                size = psize;
+            }
+        }
+        assert!(checked > 50, "only {checked} splits checked");
+    }
+
+    // high above the planet the column under the camera is no longer split down to a voxel chunk
+    #[test]
+    fn the_column_under_a_high_camera_is_not_forced_to_split() {
+        let planet = PlanetData::new(512);
+        let res = planet.resolution;
+        let radius = CoordSystem::get_layer_radius(res / 2, res);
+        let cam = Vec3::Y * radius * 3.0;
+        let pid = CoordSystem::pos_to_id(cam, res);
+        let id = pid.unwrap();
+        let (x, y) = (
+            id.u - id.u % (CHUNK_SIZE * 2),
+            id.v - id.v % (CHUNK_SIZE * 2),
+        );
+        let d = Renderer::node_distance(id.face, x, y, CHUNK_SIZE * 2, cam, &planet, pid);
+        assert!(d > Renderer::split_distance(CHUNK_SIZE * 2, res));
+    }
 
     #[test]
     fn flare_shader_is_valid_wgsl() {

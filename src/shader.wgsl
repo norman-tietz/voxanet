@@ -53,7 +53,7 @@ struct Biome {
 
 struct Local {
     model: mat4x4<f32>,
-    params: vec4<f32>, // x = opacity, y = 1 while fading out (complementary dither)
+    params: vec4<f32>, // x = opacity, y = 1 while fading out, z = LOD geomorph factor (vs_lod)
 }
 @group(1) @binding(0) var<uniform> local: Local;
 
@@ -99,6 +99,29 @@ struct VertexOut {
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
+    return transform(in);
+}
+
+// a LOD mesh vertex's geomorph target (common.rs LodMorph): the parent LOD level's surface here
+struct LodMorphIn {
+    @location(4) height: f32,         // parent radius minus this vertex's, along its own up
+    @location(5) normal: vec4<f32>,
+    @location(6) color: vec4<f32>,
+};
+
+// LOD meshes: blended toward their parent's shape, normal and colour by local.params.z (1 = the
+// parent's), so LOD levels hand over without a visible change and sharpen as the camera closes in
+@vertex
+fn vs_lod(in: VertexIn, morph: LodMorphIn) -> VertexOut {
+    let t = local.params.z;
+    var v = in;
+    v.pos = in.pos + normalize(in.pos) * morph.height * t;
+    v.normal = normalize(mix(in.normal, morph.normal.xyz, t));
+    v.color = mix(in.color, morph.color.rgb, t);
+    return transform(v);
+}
+
+fn transform(in: VertexIn) -> VertexOut {
     var out: VertexOut;
     
     // World Position

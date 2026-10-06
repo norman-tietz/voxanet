@@ -57,6 +57,33 @@ impl Vertex {
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32];
 }
 
+// geomorphing (LOD meshes only, a second vertex buffer beside Vertex): what the parent LOD level shows at
+// this vertex, which vs_lod blends toward by the mesh's morph factor (LocalUniform params.z), so a node
+// appears with exactly its parent's shape and sharpens into its own as the camera closes in
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct LodMorph {
+    pub height: f32, // parent surface radius minus this vertex's radius (moved along its own up)
+    pub normal: u32, // the parent's normal, Snorm8x4
+    pub color: u32,  // the parent's colour, Unorm8x4
+}
+
+impl LodMorph {
+    // shader.wgsl LodMorphIn
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![4 => Float32, 5 => Snorm8x4, 6 => Unorm8x4];
+
+    pub fn new(height: f32, normal: glam::Vec3, color: [f32; 3]) -> Self {
+        let snorm = |x: f32| ((x.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8) as u32;
+        let unorm = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+        Self {
+            height,
+            normal: snorm(normal.x) | snorm(normal.y) << 8 | snorm(normal.z) << 16,
+            color: unorm(color[0]) | unorm(color[1]) << 8 | unorm(color[2]) << 16,
+        }
+    }
+}
+
 pub struct ChunkMesh {
     pub v_buf: wgpu::Buffer,
     pub i_buf: wgpu::Buffer,
@@ -68,6 +95,9 @@ pub struct ChunkMesh {
     pub radius: f32,
     pub blas: Option<wgpu::Blas>, // for hardware ray-traced shadows (hw_rt.rs), when supported
     pub water: Option<WaterMesh>, // voxel chunks with ocean columns
+    pub morph: Option<wgpu::Buffer>, // LOD meshes: LodMorph per vertex (drawn with the vs_lod pipeline)
+    pub morph_factor: f32, // LOD meshes: 1 = the parent's shape, 0 = its own (Renderer::update_view)
+    pub params: [f32; 4],  // LocalUniform params last written to uniform_buf
 }
 
 // translucent water surface of a voxel chunk, drawn by fs_water after the deferred lighting
