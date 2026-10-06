@@ -128,6 +128,16 @@ impl BiomeUniform {
 type ChunkGeometry = (u64, ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
 type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>, Vec<LodMorph>);
 
+// planets up to this many voxel chunks (6 faces x 16 x 16: every generated planet, radius <= 250) are
+// streamed whole as voxel chunks instead of through the LOD quadtree; near the ground they'd be all or
+// nearly all voxel chunks anyway (voxel chunks load within ~12 x 64 columns), so this costs from the
+// handover what the ground level always did, and leaves nothing to dither in during a descent
+const ALL_VOXEL_MAX_CHUNKS: u32 = 6 * 16 * 16;
+
+fn all_voxel(resolution: u32) -> bool {
+    6 * resolution.div_ceil(CHUNK_SIZE).pow(2) <= ALL_VOXEL_MAX_CHUNKS
+}
+
 // --- RENDERER STRUCT ---
 
 pub struct Renderer {
@@ -207,6 +217,7 @@ pub struct Renderer {
     generation: u64,
     pending_lods: HashSet<LodKey>,
     view_missing: usize, // required meshes not loaded yet, as of the last update_view
+    all_voxel: bool, // the planet is small enough to be all voxel chunks (all_voxel), as of update_view
 
     // --- FPS ---
     last_fps_time: std::time::Instant,
@@ -944,6 +955,7 @@ impl Renderer {
             generation: 0,
             pending_lods: HashSet::new(),
             view_missing: usize::MAX,
+            all_voxel: false,
 
             last_fps_time: std::time::Instant::now(),
             frame_count: 0,
@@ -1206,18 +1218,33 @@ impl Renderer {
         let mut required_lods: HashSet<LodKey> = HashSet::new();
         let logical_size = res.next_power_of_two();
 
-        for face in 0..6 {
-            self.process_quadtree(
-                face,
-                0,
-                0,
-                logical_size,
-                player_pos,
-                planet,
-                player_id,
-                &mut required_voxels,
-                &mut required_lods,
-            );
+        self.all_voxel = all_voxel(res);
+        if self.all_voxel {
+            // the whole planet as voxel chunks (nearest first, see the load queue): meshed while the
+            // approach is still in galaxy flight (the landing handover waits for view_covered), so
+            // there are no LOD meshes and no voxel <-> LOD hand-overs left to fade during the descent
+            let per_face = res.div_ceil(CHUNK_SIZE);
+            for face in 0..6 {
+                for u_idx in 0..per_face {
+                    for v_idx in 0..per_face {
+                        required_voxels.insert(ChunkKey { face, u_idx, v_idx });
+                    }
+                }
+            }
+        } else {
+            for face in 0..6 {
+                self.process_quadtree(
+                    face,
+                    0,
+                    0,
+                    logical_size,
+                    player_pos,
+                    planet,
+                    player_id,
+                    &mut required_voxels,
+                    &mut required_lods,
+                );
+            }
         }
 
         // a mesh that is no longer required (voxel chunk or LOD node) stays until every required mesh
@@ -1303,8 +1330,9 @@ impl Renderer {
         }
 
         self.load_queue.retain(|k| required_voxels.contains(k));
+        let queued: HashSet<ChunkKey> = self.load_queue.iter().copied().collect();
         for k in required_voxels {
-            if !self.chunks.contains_key(&k) && !self.load_queue.contains(&k) {
+            if !self.chunks.contains_key(&k) && !queued.contains(&k) {
                 self.load_queue.push(k);
             }
         }
@@ -1862,7 +1890,8 @@ impl Renderer {
             },
         );
 
-        if !is_update {
+        // a whole-planet voxel world has no LOD mesh underneath to cross-fade from: show it at once
+        if !is_update && !self.all_voxel {
             self.animator.start_spawn(AnyKey::Voxel(key));
         }
     }
@@ -3124,6 +3153,16 @@ impl Renderer {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // every generated planet (radius 40..=250, galaxy.rs) is streamed whole as voxel chunks; the
+    // bigger ones /galaxy add makes (up to radius 500) keep the LOD quadtree
+    #[test]
+    fn generated_planets_are_all_voxel() {
+        assert!(all_voxel(2 * 250));
+        assert!(all_voxel(2 * 40));
+        assert!(!all_voxel(2 * 300));
+        assert!(!all_voxel(2 * 500));
+    }
 
     // geomorphing: a LOD node starts with its parent's shape where it appears (its parent splits) and
     // has reached its own before it can split itself (its children start from its own shape), for
