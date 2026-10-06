@@ -590,6 +590,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), 1.0);
 }
 
+// block cursor: lit like fs_main, but translucent (renderer.rs draws a depth pre-pass first, so only
+// its nearest surface blends)
+const CURSOR_OPACITY: f32 = 0.55;
+
+@fragment
+fn fs_cursor(in: VertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), CURSOR_OPACITY);
+}
+
 // --- DEFERRED SHADING (deferred.rs) ---
 // The geometry pass writes vertex colour, normal and camera distance per screen pixel; fs_light shades
 // each pixel once and cs_gbuf_down derives the shadow-resolution G-buffer for the shadow passes.

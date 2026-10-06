@@ -164,7 +164,8 @@ pub struct Renderer {
     animator: LodAnimator,
     local_layout: wgpu::BindGroupLayout,
 
-    pipeline_fill: wgpu::RenderPipeline,
+    pipeline_cursor_depth: wgpu::RenderPipeline,
+    pipeline_cursor: wgpu::RenderPipeline,
     pipeline_line: wgpu::RenderPipeline,
 
     chunks: HashMap<ChunkKey, ChunkMesh>,
@@ -256,6 +257,9 @@ const HEAT_WARNING: f32 = 0.35;
 
 // timed HUD status line (Renderer::show_status): fully visible, then fading out over the last
 // STATUS_FADE_SECONDS
+// block cursor: 12 edge bars of 6 quads each
+const CURSOR_VERTS: usize = 12 * 6 * 4;
+const CURSOR_INDS: usize = 12 * 6 * 6;
 const STATUS_SECONDS: f32 = 2.5;
 const STATUS_FADE_SECONDS: f32 = 0.5;
 
@@ -602,21 +606,49 @@ impl Renderer {
             config.height,
         );
 
-        let pipeline_fill = Self::create_pipeline(
+        // the block cursor is translucent: a depth-only pass first, then a blended pass that only
+        // keeps the nearest surface (LessEqual), so overlapping edge bars and their back faces don't
+        // stack up into darker spots
+        let pipeline_cursor_depth = Self::create_pipeline(
             &device,
-            &config,
             &layout,
             &shader,
             wgpu::PrimitiveTopology::TriangleList,
             false,
+            "fs_main",
+            wgpu::ColorTargetState {
+                format: config.format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            },
+            true,
+            wgpu::CompareFunction::Less,
+        );
+        let pipeline_cursor = Self::create_pipeline(
+            &device,
+            &layout,
+            &shader,
+            wgpu::PrimitiveTopology::TriangleList,
+            false,
+            "fs_cursor",
+            wgpu::ColorTargetState {
+                format: config.format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+            false,
+            wgpu::CompareFunction::LessEqual,
         );
         let pipeline_line = Self::create_pipeline(
             &device,
-            &config,
             &layout,
             &shader,
             wgpu::PrimitiveTopology::LineList,
             false,
+            "fs_main",
+            config.format.into(),
+            true,
+            wgpu::CompareFunction::Less,
         );
         let deferred = Deferred::new(
             &device,
@@ -813,13 +845,13 @@ impl Renderer {
 
         let cursor_v_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cursor V"),
-            size: 4096,
+            size: (CURSOR_VERTS * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let cursor_i_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cursor I"),
-            size: 4096,
+            size: (CURSOR_INDS * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -896,7 +928,8 @@ impl Renderer {
             device,
             queue,
             config,
-            pipeline_fill,
+            pipeline_cursor_depth,
+            pipeline_cursor,
             pipeline_line,
             chunks: HashMap::new(),
             lod_chunks: HashMap::new(),
@@ -978,13 +1011,17 @@ impl Renderer {
         self.screenshot_request = Some(path);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_pipeline(
         device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
         layout: &wgpu::PipelineLayout,
         shader: &wgpu::ShaderModule,
         topology: wgpu::PrimitiveTopology,
         wireframe: bool,
+        fs_entry: &str,
+        target: wgpu::ColorTargetState,
+        depth_write: bool,
+        depth_compare: wgpu::CompareFunction,
     ) -> wgpu::RenderPipeline {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
@@ -1001,9 +1038,9 @@ impl Renderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs_entry),
                 compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
+                targets: &[Some(target)],
             }),
             primitive: wgpu::PrimitiveState {
                 topology,
@@ -1017,8 +1054,8 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(depth_compare),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -1922,77 +1959,62 @@ impl Renderer {
                 CoordSystem::get_vertex_pos(id.face, id.u + u, id.v + v, id.layer + l, res)
             };
 
-            let corners = [
-                p(0, 0, 0),
-                p(1, 0, 0),
-                p(0, 1, 0),
-                p(1, 1, 0),
-                p(0, 0, 1),
-                p(1, 0, 1),
-                p(0, 1, 1),
-                p(1, 1, 1),
-            ];
+            // corner c sits at u = c & 1, v = (c >> 1) & 1, layer = (c >> 2) & 1
+            let corners: [Vec3; 8] = std::array::from_fn(|c| {
+                p((c & 1) as u32, ((c >> 1) & 1) as u32, ((c >> 2) & 1) as u32)
+            });
+            // the block's edge along `bit` through corner c, pointing toward the bit being set
+            let axis = |c: usize, bit: usize| (corners[c | bit] - corners[c & !bit]).normalize();
 
-            let edges = [
-                (0, 1),
-                (1, 3),
-                (3, 2),
-                (2, 0),
-                (4, 5),
-                (5, 7),
-                (7, 6),
-                (6, 4),
-                (0, 4),
-                (1, 5),
-                (2, 6),
-                (3, 7),
-            ];
-
-            let mut verts = Vec::new();
-            let mut inds = Vec::new();
+            let mut verts = Vec::with_capacity(CURSOR_VERTS);
+            let mut inds = Vec::with_capacity(CURSOR_INDS);
             let thickness = 0.025;
             let color = [1.0, 1.0, 0.0];
-            let mut idx_base = 0;
+            let mut quad = |q: [Vec3; 4], normal: Vec3| {
+                let base = verts.len() as u32;
+                for pos in q {
+                    verts.push(Vertex {
+                        pos: pos.to_array(),
+                        color,
+                        normal: normal.to_array(),
+                        water: 0.0,
+                    });
+                }
+                inds.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+            };
 
-            for (start, end) in edges {
-                let a = corners[start];
-                let b = corners[end];
-                let dir = (b - a).normalize();
-                let ref_up = if dir.dot(Vec3::Y).abs() > 0.9 {
-                    Vec3::X
-                } else {
-                    Vec3::Y
+            // each edge is a square bar whose sides follow the block's other two axes, extended by
+            // the bar's half-width past both corners, so the three bars at a corner close it fully
+            for bit in [1, 2, 4] {
+                let (s, t) = match bit {
+                    1 => (2, 4),
+                    2 => (4, 1),
+                    _ => (1, 2),
                 };
-                let right = dir.cross(ref_up).normalize() * thickness;
-                let up = dir.cross(right).normalize() * thickness;
-                let offsets = [(-right - up), (right - up), (right + up), (-right + up)];
-
-                for off in offsets {
-                    verts.push(Vertex {
-                        pos: (a + off).to_array(),
-                        color,
-                        normal: [0.0; 3],
-                        water: 0.0,
-                    });
-                    verts.push(Vertex {
-                        pos: (b + off).to_array(),
-                        color,
-                        normal: [0.0; 3],
-                        water: 0.0,
-                    });
+                for c in (0..8).filter(|c| c & bit == 0) {
+                    let (a, b) = (c, c | bit);
+                    let dir = axis(a, bit);
+                    let end = |k: usize, f: f32| {
+                        let (ss, tt) = (axis(k, s) * thickness, axis(k, t) * thickness);
+                        let centre = corners[k] + dir * (f * thickness);
+                        [
+                            centre - ss - tt,
+                            centre + ss - tt,
+                            centre + ss + tt,
+                            centre - ss + tt,
+                        ]
+                    };
+                    let (ra, rb) = (end(a, -1.0), end(b, 1.0));
+                    let sides = [axis(a, t) * -1.0, axis(a, s), axis(a, t), axis(a, s) * -1.0];
+                    for (k, n) in sides.into_iter().enumerate() {
+                        let k1 = (k + 1) % 4;
+                        quad([ra[k], ra[k1], rb[k1], rb[k]], n);
+                    }
+                    quad(ra, -dir);
+                    quad(rb, dir);
                 }
-
-                let faces = [(0, 1, 3, 2), (2, 3, 5, 4), (4, 5, 7, 6), (6, 7, 1, 0)];
-                for (i0, i1, i2, i3) in faces {
-                    inds.push(idx_base + i0);
-                    inds.push(idx_base + i1);
-                    inds.push(idx_base + i2);
-                    inds.push(idx_base + i2);
-                    inds.push(idx_base + i3);
-                    inds.push(idx_base + i0);
-                }
-                idx_base += 8;
             }
+            debug_assert_eq!((verts.len(), inds.len()), (CURSOR_VERTS, CURSOR_INDS));
 
             self.queue
                 .write_buffer(&self.cursor_v_buf, 0, bytemuck::cast_slice(&verts));
@@ -2502,11 +2524,13 @@ impl Renderer {
             }
 
             if self.cursor_inds > 0 {
-                pass.set_pipeline(&self.pipeline_fill);
                 pass.set_bind_group(0, &self.global_bind, &[]);
                 pass.set_bind_group(1, &self.local_bind_identity, &[]);
                 pass.set_vertex_buffer(0, self.cursor_v_buf.slice(..));
                 pass.set_index_buffer(self.cursor_i_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_pipeline(&self.pipeline_cursor_depth);
+                pass.draw_indexed(0..self.cursor_inds, 0, 0..1);
+                pass.set_pipeline(&self.pipeline_cursor);
                 pass.draw_indexed(0..self.cursor_inds, 0, 0..1);
             }
 
