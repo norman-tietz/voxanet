@@ -264,9 +264,14 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 // the home planet's noise seed (the value every planet used before galaxy planets had their own)
 pub const HOME_SEED: u32 = 42;
 
+#[derive(Clone)]
 pub struct PlanetTerrain {
     // Flattened height map
     heights: Arc<Vec<u16>>,
+    // per column: which water body's level is its water level (0 = the sea, k + 1 = lake k), separate
+    // from the heights so solidity checks (heights only, the hot path) don't fetch it
+    water_body: Arc<Vec<u8>>,
+    water_levels: Arc<Vec<u32>>, // layer whose top is the water surface, per water body
     resolution: u32,
     height_range: (u32, u32), // lowest and highest column
     sea_level: u32,
@@ -274,24 +279,44 @@ pub struct PlanetTerrain {
 
 impl PlanetTerrain {
     pub fn new(resolution: u32, seed: u32) -> Self {
+        Self::generate(resolution, seed, false)
+    }
+
+    // a liquid planet's terrain: lakes carved, each with its own water level
+    pub fn with_lakes(resolution: u32, seed: u32) -> Self {
+        Self::generate(resolution, seed, true)
+    }
+
+    fn generate(resolution: u32, seed: u32, lakes: bool) -> Self {
         use rayon::prelude::*;
         let generator = NoiseGenerator::new(seed);
-        let shape = TerrainShape::new(resolution, &generator, false);
+        let shape = TerrainShape::new(resolution, &generator, lakes);
         let sea_level = resolution / 2;
-        let mut heights = vec![0u16; (6 * resolution * resolution) as usize];
+        // index 0: the sea; k + 1: lake k
+        let water_levels: Vec<u32> = std::iter::once(sea_level)
+            .chain(shape.lakes().iter().map(|l| l.level))
+            .collect();
+        let n = (6 * resolution * resolution) as usize;
+        let (mut heights, mut water_body) = (vec![0u16; n], vec![0u8; n]);
 
         // rows are independent, so generate them in parallel
         heights
             .par_chunks_mut(resolution as usize)
+            .zip(water_body.par_chunks_mut(resolution as usize))
             .enumerate()
-            .for_each(|(row, out)| {
+            .for_each(|(row, (out, body))| {
                 let face = (row as u32 / resolution) as u8;
                 let v = row as u32 % resolution;
-                for (u, h) in out.iter_mut().enumerate() {
+                for u in 0..resolution as usize {
                     let dir = CoordSystem::get_direction(face, u as u32, v, resolution);
-                    *h = (sea_level as f32 + shape.height(&generator, dir))
-                        .round()
-                        .max(1.0) as u16;
+                    let s = shape.sample(&generator, dir);
+                    let h = (sea_level as f32 + s.height).round().max(1.0) as u16;
+                    out[u] = h;
+                    // a lake column: inside a region and below that lake's level (islands stay dry)
+                    body[u] = match s.lake {
+                        Some(k) if (h as u32) < water_levels[k + 1] => (k + 1) as u8,
+                        _ => 0,
+                    };
                 }
             });
 
@@ -303,10 +328,23 @@ impl PlanetTerrain {
         // Wrap in Arc for cheap cloning
         Self {
             heights: Arc::new(heights),
+            water_body: Arc::new(water_body),
+            water_levels: Arc::new(water_levels),
             resolution,
             height_range,
             sea_level,
         }
+    }
+
+    // the layer whose top is this column's water surface: its lake's level, else sea level (the water
+    // table dug holes fill to). Whether the column holds water is PlanetData::holds_water's question
+    pub fn water_level(&self, face: u8, u: u32, v: u32) -> u32 {
+        let (u, v) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
+        self.water_levels[self.water_body[Self::get_index(face, u, v, self.resolution)] as usize]
+    }
+
+    pub fn lake_count(&self) -> usize {
+        self.water_levels.len() - 1
     }
 
     // the layer of the water surface: columns at or below it are sea floor
@@ -331,17 +369,6 @@ impl PlanetTerrain {
 
         let idx = Self::get_index(face, u_safe, v_safe, self.resolution);
         self.heights[idx] as u32
-    }
-}
-
-impl Clone for PlanetTerrain {
-    fn clone(&self) -> Self {
-        Self {
-            heights: self.heights.clone(),
-            resolution: self.resolution,
-            height_range: self.height_range,
-            sea_level: self.sea_level,
-        }
     }
 }
 
@@ -634,5 +661,60 @@ mod tests {
         assert_eq!(shape.sample(&g, inside).lake, Some(0));
         let far = -lake.center;
         assert_eq!(shape.height(&g, far), shape.natural_height(&g, far));
+    }
+    #[test]
+    fn water_level_is_sea_level_except_in_lakes() {
+        let seed = seeds_with_lakes(128, 1)[0];
+        let t = PlanetTerrain::with_lakes(128, seed);
+        assert!(t.lake_count() >= 1);
+        let (mut lake_cols, mut sea_cols) = (0, 0);
+        for face in 0..6u8 {
+            for v in 0..128 {
+                for u in 0..128 {
+                    let (h, w) = (t.get_height(face, u, v), t.water_level(face, u, v));
+                    if w == t.sea_level() {
+                        sea_cols += 1;
+                    } else {
+                        assert!(
+                            w > t.sea_level() && h < w,
+                            "lake column {face}/{u}/{v}: h {h} w {w}"
+                        );
+                        lake_cols += 1;
+                    }
+                }
+            }
+        }
+        assert!(lake_cols > 0 && sea_cols > lake_cols);
+        let plain = PlanetTerrain::new(128, seed);
+        assert_eq!(plain.lake_count(), 0);
+        assert_eq!(plain.water_level(0, 5, 5), plain.sea_level());
+    }
+
+    // no wall of water: a lake column never borders a dry column lower than the lake's level
+    #[test]
+    fn lakes_have_no_water_walls() {
+        for res in [80u32, 256] {
+            for seed in seeds_with_lakes(res, 1).into_iter().take(4) {
+                let t = PlanetTerrain::with_lakes(res, seed);
+                for face in 0..6u8 {
+                    for v in 1..res - 1 {
+                        for u in 1..res - 1 {
+                            let w = t.water_level(face, u, v);
+                            if w == t.sea_level() {
+                                continue;
+                            }
+                            for (du, dv) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                                let (nu, nv) = ((u as i32 + du) as u32, (v as i32 + dv) as u32);
+                                let dry = t.water_level(face, nu, nv) != w;
+                                assert!(
+                                    !dry || t.get_height(face, nu, nv) >= w,
+                                    "res {res} seed {seed}: wall at {face}/{u}/{v} -> {nu}/{nv}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

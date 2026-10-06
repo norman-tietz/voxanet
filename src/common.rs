@@ -143,13 +143,34 @@ impl PlanetData {
         println!("Generating Terrain Noise Map for res {}...", resolution);
         let terrain = PlanetTerrain::new(resolution, seed); // calculate once
         println!("Terrain Generation Complete.");
+        Self::from_terrain(resolution, seed, terrain, PlanetType::EarthLike)
+    }
 
+    // a planet baked for its type: liquid planets get lakes (decided here, at bake time; switching the
+    // type later keeps the terrain)
+    pub fn new_for_type(resolution: u32, seed: u32, planet_type: PlanetType) -> Self {
+        println!("Generating Terrain Noise Map for res {}...", resolution);
+        let terrain = if planet_type.def().liquid.is_some() {
+            PlanetTerrain::with_lakes(resolution, seed)
+        } else {
+            PlanetTerrain::new(resolution, seed)
+        };
+        println!("Terrain Generation Complete.");
+        Self::from_terrain(resolution, seed, terrain, planet_type)
+    }
+
+    fn from_terrain(
+        resolution: u32,
+        seed: u32,
+        terrain: PlanetTerrain,
+        planet_type: PlanetType,
+    ) -> Self {
         Self {
             edits: PlanetEdits::for_terrain(resolution, seed),
             edit_generation: 0,
             resolution,
-            terrain, // <--- Store it
-            planet_type: PlanetType::EarthLike,
+            terrain,
+            planet_type,
             seed,
         }
     }
@@ -521,6 +542,43 @@ pub(crate) mod tests {
     // res 32: small enough to generate fast in a test, large enough that continent noise
     // reliably produces both land and ocean columns
     const TEST_RES: u32 = 32;
+    // a baked planet with a lake and one of its columns at least 2 layers under the lake's water
+    pub(crate) fn lake_planet(planet_type: PlanetType) -> (PlanetData, (u8, u32, u32)) {
+        for seed in 1..80 {
+            let planet = PlanetData::new_for_type(128, seed, planet_type);
+            for face in 0..6u8 {
+                for v in 0..128 {
+                    for u in 0..128 {
+                        let w = planet.terrain.water_level(face, u, v);
+                        if w > planet.terrain.sea_level()
+                            && planet.terrain.get_height(face, u, v) + 2 <= w
+                        {
+                            return (planet, (face, u, v));
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no seed gave a lake at resolution 128");
+    }
+
+    #[test]
+    fn baking_a_liquid_planet_carves_lakes() {
+        let (planet, _) = lake_planet(PlanetType::EarthLike);
+        assert!(planet.terrain.lake_count() >= 1);
+    }
+
+    #[test]
+    fn ice_bake_has_no_lakes() {
+        for seed in 1..10 {
+            assert_eq!(
+                PlanetData::new_for_type(128, seed, PlanetType::Ice)
+                    .terrain
+                    .lake_count(),
+                0
+            );
+        }
+    }
 
     #[test]
     fn new_uses_the_home_seed() {

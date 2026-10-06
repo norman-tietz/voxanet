@@ -382,10 +382,11 @@ impl GalaxyPlanet {
 
     // the real voxel planet for this galaxy planet: own seed, matching size, own planet type
     pub fn bake(&self) -> crate::common::PlanetData {
-        let mut data =
-            crate::common::PlanetData::new_seeded(self.voxel_resolution(), self.noise_seed);
-        data.switch_planet_type(self.planet_type);
-        data
+        crate::common::PlanetData::new_for_type(
+            self.voxel_resolution(),
+            self.noise_seed,
+            self.planet_type,
+        )
     }
 
     // bake() plus the edits kept from an earlier visit (refused if they belong to another terrain)
