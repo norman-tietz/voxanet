@@ -343,6 +343,7 @@ impl PlanetTerrain {
         self.water_levels[self.water_body[Self::get_index(face, u, v, self.resolution)] as usize]
     }
 
+    #[cfg(test)]
     pub fn lake_count(&self) -> usize {
         self.water_levels.len() - 1
     }

@@ -645,9 +645,9 @@ impl MeshGen {
     }
 
     // generates a simplified heightmap mesh for distant terrain
-    // the water surface of a chunk: one quad at the top of layer sea level (flush with sea-level beaches)
-    // over every column whose sea-level cell holds water (PlanetData::sea_cell_is_water: natural ocean
-    // and holes dug below sea level alike) and whose cell above is open — under a ceiling (a tunnel dug at
+    // the water surface of a chunk: one quad at the top of each column's water level (its lake's, else
+    // sea level; flush with the beaches) over every column that holds water (PlanetData::holds_water:
+    // natural ocean and lakes, holes dug below their level alike) and whose cell above is open — under a ceiling (a tunnel dug at
     // sea level) the surface would lie against the solid face above and flicker; that water has none.
     pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
         if data.planet_type.def().liquid.is_none() {
@@ -655,22 +655,22 @@ impl MeshGen {
         }
         let (mut verts, mut inds, mut idx) = (Vec::new(), Vec::new(), 0u32);
         let res = data.resolution;
-        let sea = data.terrain.sea_level();
         let u_start = key.u_idx * CHUNK_SIZE;
         let v_start = key.v_idx * CHUNK_SIZE;
         for u in u_start..(u_start + CHUNK_SIZE).min(res) {
             for v in v_start..(v_start + CHUNK_SIZE).min(res) {
+                let level = data.terrain.water_level(key.face, u, v);
                 let above = BlockId {
                     face: key.face,
-                    layer: sea + 1,
+                    layer: level + 1,
                     u,
                     v,
                 };
-                if !data.sea_cell_is_water(key.face, u, v) || data.exists(above) {
+                if !data.holds_water(key.face, u, v) || data.exists(above) {
                     continue;
                 }
                 let p =
-                    |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, sea + 1, res);
+                    |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, level + 1, res);
                 let corners = [p(0, 0), p(1, 0), p(1, 1), p(0, 1)];
                 // liquid is Some here (checked above); color is unused by fs_water (which shades
                 // purely from the biome uniform) but should still match the active planet type
@@ -1422,5 +1422,23 @@ mod biome_tests {
         planet.switch_planet_type(PlanetType::Ice);
         let (verts, inds) = MeshGen::build_water(key, &planet);
         assert!(verts.is_empty() && inds.is_empty());
+    }
+    #[test]
+    fn lake_water_surfaces_sit_at_the_lake_level() {
+        let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::EarthLike);
+        let key = ChunkKey {
+            face,
+            u_idx: u / CHUNK_SIZE,
+            v_idx: v / CHUNK_SIZE,
+        };
+        let (verts, _) = MeshGen::build_water(key, &planet);
+        let level = planet.terrain.water_level(face, u, v);
+        let lake_r = CoordSystem::get_layer_radius(level + 1, planet.resolution);
+        assert!(
+            verts
+                .iter()
+                .any(|vx| (Vec3::from_array(vx.pos).length() - lake_r).abs() < 1e-3),
+            "no water quad at the lake's level"
+        );
     }
 }

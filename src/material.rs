@@ -111,6 +111,8 @@ pub fn surface_type(
     let j = jitter(face, u, v);
     let above_sea = h as f32 - sea;
     let rel = above_sea / peak + j * 0.04; // borders wander by about 4% of the relief
+                                           // beaches and underwater floors follow the column's own water: a lake's shore, else the sea's
+    let above_water = h as f32 - terrain.water_level(face, u, v) as f32;
     let beach = (BEACH * peak).min(MAX_BEACH);
 
     let neighbours = [
@@ -125,7 +127,7 @@ pub fn surface_type(
         palette.peak
     } else if steep || rel >= ROCK_LINE {
         palette.rock
-    } else if above_sea <= beach * (1.0 + 0.5 * j) {
+    } else if above_water <= beach * (1.0 + 0.5 * j) {
         palette.beach
     } else {
         palette.ground
@@ -257,5 +259,15 @@ mod tests {
         ] {
             assert_eq!(ty.friction_scale(), 1.0);
         }
+    }
+    #[test]
+    fn lake_beds_and_shores_are_beach() {
+        let (planet, (face, u, v)) =
+            crate::common::tests::lake_planet(crate::biome::PlanetType::EarthLike);
+        let palette = earth_palette();
+        assert_eq!(
+            surface_type(&planet.terrain, &palette, face, u, v),
+            palette.beach
+        );
     }
 }

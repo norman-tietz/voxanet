@@ -146,7 +146,8 @@ pub fn takeoff_target_layer(planet: &crate::common::PlanetData, position: Vec3) 
     let in_water = planet.water_depth(position).is_some_and(|d| d > 0.0);
     let ground = match crate::gen::CoordSystem::pos_to_id(position, planet.resolution) {
         Some(id) if !in_water => planet.surface(id.face, id.u, id.v) + 1,
-        _ => sea + 1,
+        Some(id) => planet.terrain.water_level(id.face, id.u, id.v) + 1,
+        None => sea + 1,
     };
     let relief = peak.saturating_sub(sea) as f32;
     let climb = ((relief * TAKEOFF_RELIEF_SHARE).round() as u32).max(TAKEOFF_MIN_CLEARANCE);
@@ -190,9 +191,14 @@ pub fn dive_assist(velocity: Vec3, up: Vec3, altitude: f32, dt: f32) -> f32 {
 pub fn surface_radius(planet: &crate::common::PlanetData, position: Vec3) -> f32 {
     let res = planet.resolution;
     let sea = planet.terrain.sea_level();
-    let top = crate::gen::CoordSystem::pos_to_id(position, res)
-        .map_or(sea + 1, |id| planet.surface(id.face, id.u, id.v) + 1);
-    crate::gen::CoordSystem::get_layer_radius(top.max(sea + 1), res)
+    // the column's water level: its lake's, else the sea (dry land stands above it anyway)
+    let top = crate::gen::CoordSystem::pos_to_id(position, res).map_or(sea + 1, |id| {
+        planet
+            .surface(id.face, id.u, id.v)
+            .max(planet.terrain.water_level(id.face, id.u, id.v))
+            + 1
+    });
+    crate::gen::CoordSystem::get_layer_radius(top, res)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,7 +238,7 @@ pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) 
     let probe = position.normalize_or_zero() * (res as f32 / 2.0);
     // the same water rule as swimming and the rendered surface, so a dug, lava-filled hole counts too
     crate::gen::CoordSystem::pos_to_id(probe, res)
-        .is_some_and(|id| planet.sea_cell_is_water(id.face, id.u, id.v))
+        .is_some_and(|id| planet.holds_water(id.face, id.u, id.v))
 }
 
 // captured galaxy flight can't go below this distance from the planet's centre (in its radii):
@@ -589,5 +595,16 @@ mod tests {
             dir.dot(-eye.normalize()) > MAX_PITCH.sin() - 1e-4,
             "still looking down: {dir:?}"
         );
+    }
+    #[test]
+    fn lava_lakes_refuse_landing_and_surfaces_use_the_lake_level() {
+        use crate::biome::PlanetType;
+        let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::Volcanic);
+        let res = planet.resolution;
+        let level = planet.terrain.water_level(face, u, v);
+        let above = crate::gen::CoordSystem::get_block_center(face, u, v, level + 5, res);
+        assert!(over_damaging_liquid(&planet, above));
+        let lake_surface = crate::gen::CoordSystem::get_layer_radius(level + 1, res);
+        assert!((surface_radius(&planet, above) - lake_surface).abs() < 1e-3);
     }
 }

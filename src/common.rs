@@ -177,6 +177,7 @@ impl PlanetData {
 
     // switches the active planet type in place: clears edits (they reference the old palette)
     // but keeps the same terrain shape — phase 1 reuses one noise map for every planet type
+    #[cfg(test)]
     pub fn switch_planet_type(&mut self, to: PlanetType) {
         self.planet_type = to;
         self.edits = PlanetEdits::for_terrain(self.resolution, self.seed);
@@ -353,22 +354,22 @@ impl PlanetData {
 
     // picks a spawn direction: `preferred` unless the active liquid is damaging and `preferred`'s
     // column is underwater (an unescapable death loop, since floating alone still ticks damage), in
-    // which case it searches a dense, evenly-spread set of directions over the whole sphere for one
-    // at or above sea level
+    // which case it searches a dense, evenly-spread set of directions over the whole sphere for a dry
+    // one
     pub fn safe_spawn_direction(&self, preferred: glam::Vec3) -> glam::Vec3 {
         let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging);
         if !damaging {
             return preferred;
         }
-        let sea_level = self.terrain.sea_level();
-        let probe_height = |dir: glam::Vec3| {
+        // whether the column under `dir` holds the liquid (a lake or the sea)
+        let probe_wet = |dir: glam::Vec3| {
             crate::gen::CoordSystem::pos_to_id(
                 dir * (self.resolution as f32 / 2.0),
                 self.resolution,
             )
-            .map(|id| self.terrain.get_height(id.face, id.u, id.v))
+            .map(|id| self.holds_water(id.face, id.u, id.v))
         };
-        if !probe_height(preferred).is_some_and(|h| h < sea_level) {
+        if probe_wet(preferred) != Some(true) {
             return preferred;
         }
         // Fibonacci-sphere sampling: far denser than the 6 cube-axis points this used to check
@@ -383,7 +384,7 @@ impl PlanetData {
                 let azim = 2.0 * std::f32::consts::PI * (i as f32) / phi;
                 glam::Vec3::new(incl.sin() * azim.cos(), incl.sin() * azim.sin(), incl.cos())
             })
-            .find(|&dir| probe_height(dir).is_some_and(|h| h >= sea_level))
+            .find(|&dir| probe_wet(dir) == Some(false))
             .unwrap_or(preferred)
     }
 
@@ -423,23 +424,32 @@ impl PlanetData {
         Self::get_chunk_key(id)
     }
 
-    // whether the column's sea-level cell holds the planet's liquid. Water table: any empty cell at sea
-    // level does, natural ocean or dug out, so holes dug below sea level fill (not only those that
-    // connect to the sea). Shared by the rendered water (MeshGen::build_water) and swimming.
-    pub fn sea_cell_is_water(&self, face: u8, u: u32, v: u32) -> bool {
-        let layer = self.terrain.sea_level();
+    // the water rule: the planet has a liquid and the column's water-level cell is empty — natural lake
+    // or ocean, a pit dug into a lake bed, a hole dug below sea level elsewhere (no flow between them)
+    pub fn holds_water(&self, face: u8, u: u32, v: u32) -> bool {
+        let layer = self.terrain.water_level(face, u, v);
         self.planet_type.def().liquid.is_some() && !self.exists(BlockId { face, layer, u, v })
     }
 
-    // how far `pos` lies below the sea surface (negative above it), or None outside water: the column's
-    // sea-level cell must hold water (sea_cell_is_water)
+    // the radius of this column's water surface, 0 when it holds none
+    pub fn water_surface_radius(&self, face: u8, u: u32, v: u32) -> f32 {
+        if !self.holds_water(face, u, v) {
+            return 0.0;
+        }
+        crate::gen::CoordSystem::get_layer_radius(
+            self.terrain.water_level(face, u, v) + 1,
+            self.resolution,
+        )
+    }
+
+    // how far `pos` lies below its column's water surface (negative above it), or None outside water
+    // (holds_water)
     pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
         let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
-        if !self.sea_cell_is_water(id.face, id.u, id.v) {
+        if !self.holds_water(id.face, id.u, id.v) {
             return None;
         }
-        let sea = self.terrain.sea_level();
-        Some(crate::gen::CoordSystem::get_layer_radius(sea + 1, self.resolution) - pos.length())
+        Some(self.water_surface_radius(id.face, id.u, id.v) - pos.length())
     }
 
     // the type of an existing block, None for air
@@ -542,7 +552,8 @@ pub(crate) mod tests {
     // res 32: small enough to generate fast in a test, large enough that continent noise
     // reliably produces both land and ocean columns
     const TEST_RES: u32 = 32;
-    // a baked planet with a lake and one of its columns at least 2 layers under the lake's water
+    // a baked planet with a lake at least 2 layers above the sea, and one of its columns at least 2
+    // layers under the lake's water
     pub(crate) fn lake_planet(planet_type: PlanetType) -> (PlanetData, (u8, u32, u32)) {
         for seed in 1..80 {
             let planet = PlanetData::new_for_type(128, seed, planet_type);
@@ -550,7 +561,7 @@ pub(crate) mod tests {
                 for v in 0..128 {
                     for u in 0..128 {
                         let w = planet.terrain.water_level(face, u, v);
-                        if w > planet.terrain.sea_level()
+                        if w >= planet.terrain.sea_level() + 2
                             && planet.terrain.get_height(face, u, v) + 2 <= w
                         {
                             return (planet, (face, u, v));
@@ -1013,5 +1024,87 @@ pub(crate) mod tests {
         // Ice (no liquid): effective height is clamped up to sea level
         planet.switch_planet_type(PlanetType::Ice);
         assert_eq!(planet.effective_height(face, u, v), sea);
+    }
+    #[test]
+    fn lake_columns_hold_water_at_the_lake_level() {
+        let (mut planet, (face, u, v)) = lake_planet(PlanetType::EarthLike);
+        let level = planet.terrain.water_level(face, u, v);
+        assert!(planet.holds_water(face, u, v));
+        // water_depth is measured from the lake's surface, not the sea's
+        let floor = planet.terrain.get_height(face, u, v);
+        let pos =
+            crate::gen::CoordSystem::get_block_center(face, u, v, floor + 1, planet.resolution);
+        let depth = planet.water_depth(pos).unwrap();
+        let expected =
+            crate::gen::CoordSystem::get_layer_radius(level + 1, planet.resolution) - pos.length();
+        assert!(
+            (depth - expected).abs() < 1e-3 && depth > 1.0,
+            "{depth} vs {expected}"
+        );
+        assert!(planet.water_surface_radius(face, u, v) > 0.0);
+        // mining the bed keeps it flooded to the lake level
+        planet
+            .remove_block(BlockId {
+                face,
+                layer: floor,
+                u,
+                v,
+            })
+            .unwrap();
+        assert!(planet.holds_water(face, u, v));
+        // a block on the water cell displaces the water
+        planet
+            .add_block(
+                BlockId {
+                    face,
+                    layer: level,
+                    u,
+                    v,
+                },
+                BlockType::Stone,
+            )
+            .unwrap();
+        assert!(!planet.holds_water(face, u, v));
+        assert_eq!(planet.water_surface_radius(face, u, v), 0.0);
+    }
+
+    #[test]
+    fn a_hole_beside_a_lake_fills_only_to_sea_level() {
+        let (mut planet, (face, u, v)) = lake_planet(PlanetType::EarthLike);
+        let level = planet.terrain.water_level(face, u, v);
+        // walk away from the lake until the column is no lake column
+        let mut du = u;
+        while planet.terrain.water_level(face, du, v) == level && du + 1 < planet.resolution {
+            du += 1;
+        }
+        assert_eq!(
+            planet.terrain.water_level(face, du, v),
+            planet.terrain.sea_level()
+        );
+        let (h, sea) = (
+            planet.terrain.get_height(face, du, v),
+            planet.terrain.sea_level(),
+        );
+        assert!(
+            level >= sea + 2,
+            "lake level {level} leaves no room between it and the sea"
+        );
+        // down to just above the sea: below the lake's level
+        for layer in (sea + 1..=h).rev() {
+            let _ = planet.remove_block(BlockId {
+                face,
+                layer,
+                u: du,
+                v,
+            });
+        }
+        assert!(!planet.exists(BlockId {
+            face,
+            layer: level - 1,
+            u: du,
+            v
+        }));
+        // dug below the lake's level but above the sea: dry (no flow from the lake)
+        assert!(!planet.holds_water(face, du, v));
     }
 }
