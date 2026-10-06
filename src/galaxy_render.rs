@@ -247,7 +247,8 @@ pub struct GalaxyRenderer {
     i_buf: wgpu::Buffer,
     num_indices: u32,
     planet_pipeline: wgpu::RenderPipeline,
-    overlay_pipeline: wgpu::RenderPipeline, // the landing handover's cross-fade (draw_handover_overlay)
+    overlay_depth_pipeline: wgpu::RenderPipeline, // the landing handover's cross-fade: depth pre-pass
+    overlay_pipeline: wgpu::RenderPipeline,       // and its blended pass (draw_handover_overlay)
     atmosphere_pipeline: wgpu::RenderPipeline,
     planet_uniform_buf: wgpu::Buffer,
     planet_uniform_bind: wgpu::BindGroup,
@@ -482,8 +483,64 @@ impl GalaxyRenderer {
             cache: None,
         });
 
-        // the landing handover's cross-fade: the planet pipeline, alpha-blended over the finished voxel
-        // frame (draw_handover_overlay); its own cleared depth keeps only the impostor's front surface
+        // the landing handover's cross-fade (draw_handover_overlay): the planet pipeline, alpha-blended
+        // over the finished voxel frame. Blending with a plain depth test would also let through what is
+        // drawn before the surface in front of it (the far side, back faces, the LOD skirts at node
+        // seams): a depth-only pass first, then the blended pass keeps only the nearest surface
+        // (GreaterEqual, reversed-Z)
+        let overlay_depth_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Galaxy Handover Overlay Depth Pipeline"),
+                layout: Some(&planet_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_planet"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<crate::common::Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 24,
+                                shader_location: 2,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_planet_overlay"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // no culling, like the voxel engine's own geometry pass: the near impostor is the engine's LOD
+                    // meshes, whose triangle winding isn't consistent (back-face culling punched holes at
+                    // cube-face corners and seams); the depth test hides the far side of the closed sphere
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth_stencil.clone()),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Galaxy Handover Overlay Pipeline"),
             layout: Some(&planet_layout),
@@ -531,7 +588,11 @@ impl GalaxyRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(depth_stencil.clone()),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                ..depth_stencil.clone()
+            }),
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
@@ -626,6 +687,7 @@ impl GalaxyRenderer {
             i_buf,
             num_indices: indices.len() as u32,
             planet_pipeline,
+            overlay_depth_pipeline,
             overlay_pipeline,
             atmosphere_pipeline,
             planet_uniform_buf,
@@ -911,12 +973,15 @@ impl GalaxyRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.overlay_pipeline);
         pass.set_bind_group(0, &self.camera_bind, &[]);
         pass.set_bind_group(1, &self.planet_uniform_bind, &[slot as u32]);
         pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
         pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+        // depth first, then only the nearest surface blends (overlay_pipeline)
+        for pipeline in [&self.overlay_depth_pipeline, &self.overlay_pipeline] {
+            pass.set_pipeline(pipeline);
+            pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+        }
     }
 
     // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
