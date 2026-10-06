@@ -70,24 +70,33 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     let verts = (0..positions.len())
         .map(|i| {
             let (height, lake) = samples[i];
-            let color = if lake.is_some() {
-                // only liquid planets have lakes
-                def.liquid
-                    .map_or(def.palette.beach.color(), |l| l.shallow_color)
-            } else if height < 0.0 {
+            // the near impostor's colour rules (MeshGen::generate_lod_mesh: lod_water_color,
+            // lod_land_color), so the swap from this one to it doesn't change the planet's colours;
+            // the floor under water is taken as the beach block, the slope as flat
+            let water_depth = lake.unwrap_or(0.0) - height;
+            let color = if water_depth > 0.0 {
                 match def.liquid {
-                    Some(l) => l.shallow_color,
+                    Some(l) if matches!(l.behavior, crate::biome::LiquidBehavior::Glowing) => {
+                        l.shallow_color
+                    }
+                    Some(l) => crate::gen::lod_water_color(
+                        def.palette.beach,
+                        &l,
+                        water_depth,
+                        def.atmosphere.sky_zenith,
+                    ),
                     None => def.palette.beach.color(),
                 }
             } else {
                 let frac = (height / relief).clamp(0.0, 1.0);
-                if frac > SNOW_LINE {
-                    def.palette.peak.color()
+                let top = if frac > SNOW_LINE {
+                    def.palette.peak
                 } else if frac > ROCK_LINE {
-                    def.palette.rock.color()
+                    def.palette.rock
                 } else {
-                    def.palette.ground.color()
-                }
+                    def.palette.ground
+                };
+                crate::gen::lod_land_color(top, top, 1.0)
             };
             Vertex {
                 pos: positions[i].to_array(),
@@ -101,25 +110,36 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     (verts, indices)
 }
 
-// the near impostor: once a planet is baked, the voxel engine's own distant-terrain meshes for the
-// six whole cube faces (MeshGen::generate_lod_mesh on the quadtree's root nodes) — exactly the shape
-// and colours the engine shows from orbit, so the handover to the voxel engine doesn't pop. Built on
-// the bake thread; the LOD skirts hang below the surface but are hidden inside the closed planet.
+// the near impostor: once a planet is baked, the voxel engine's own distant-terrain meshes
+// (MeshGen::generate_lod_mesh), in NEAR_IMPOSTOR_NODES x NEAR_IMPOSTOR_NODES nodes per cube face so it
+// samples every 2nd column on generated planets (a single root node per face took every 8th, too
+// coarse to cross-fade into the voxel world at the landing handover). Built on the bake thread; the
+// LOD skirts hang below the surface but are hidden inside the closed planet.
+const NEAR_IMPOSTOR_NODES: u32 = 4;
+
+// the near impostor's LOD node size for a planet of this resolution (its grid samples every
+// size / 64th column)
+fn near_impostor_node_size(resolution: u32) -> u32 {
+    let logical = resolution.next_power_of_two();
+    (logical / NEAR_IMPOSTOR_NODES)
+        .max(crate::common::CHUNK_SIZE * 4)
+        .min(logical)
+}
+
 pub fn near_impostor_mesh(data: &crate::common::PlanetData) -> (Vec<Vertex>, Vec<u32>) {
-    let size = data.resolution.next_power_of_two();
+    let size = near_impostor_node_size(data.resolution);
     let mut verts = Vec::new();
     let mut indices = Vec::new();
     for face in 0..6u8 {
-        let key = crate::common::LodKey {
-            face,
-            x: 0,
-            y: 0,
-            size,
-        };
-        let (v, i) = crate::gen::MeshGen::generate_lod_mesh(key, data);
-        let base = verts.len() as u32;
-        verts.extend(v);
-        indices.extend(i.into_iter().map(|k| k + base));
+        for x in (0..data.resolution).step_by(size as usize) {
+            for y in (0..data.resolution).step_by(size as usize) {
+                let key = crate::common::LodKey { face, x, y, size };
+                let (v, i) = crate::gen::MeshGen::generate_lod_mesh(key, data);
+                let base = verts.len() as u32;
+                verts.extend(v);
+                indices.extend(i.into_iter().map(|k| k + base));
+            }
+        }
     }
     (verts, indices)
 }
@@ -137,15 +157,25 @@ mod tests {
     use crate::biome::PlanetType;
     use crate::gen::CoordSystem;
 
-    // the near impostor is exactly the engine's own whole-face distant-terrain meshes, so the later
-    // handover to the voxel engine can't change the planet's shape or colours
+    // every generated planet (radius 40..=250) gets a near impostor sampling every 2nd column
+    #[test]
+    fn near_impostor_samples_every_second_column_on_generated_planets() {
+        for res in [80, 337, 500] {
+            assert_eq!(near_impostor_node_size(res) / 64, 2, "resolution {res}");
+        }
+        assert_eq!(near_impostor_node_size(1000), 256); // /galaxy add's biggest: every 4th
+    }
+
+    // the near impostor is exactly the engine's own distant-terrain meshes, so the later handover to
+    // the voxel engine can't change the planet's shape or colours
     #[test]
     fn near_impostor_is_the_engines_whole_face_lod_meshes() {
         let mut p = test_planet(3, PlanetType::EarthLike);
         p.radius = 40.0; // smallest size: keeps the bake quick in a debug test build
         let data = p.bake();
         let (verts, indices) = near_impostor_mesh(&data);
-        let size = data.resolution.next_power_of_two();
+        let size = near_impostor_node_size(data.resolution);
+        assert_eq!(size, data.resolution.next_power_of_two()); // a small planet: one node per face
         let mut expected = Vec::new();
         for face in 0..6u8 {
             let key = crate::common::LodKey {
@@ -225,19 +255,28 @@ mod tests {
     }
 
     #[test]
-    fn colors_are_from_the_active_palette_or_liquid() {
+    fn colors_are_from_the_active_palette_or_water() {
+        // dry land: the palette's ground, rock and peak blocks (the near impostor's land rule, flat);
+        // anything else is water, which the mesh flattens to sea level or a lake's level
         let planet = test_planet(1, PlanetType::EarthLike);
         let def = planet.planet_type.def();
-        let allowed = [
-            def.liquid.unwrap().shallow_color,
-            def.palette.beach.color(),
-            def.palette.ground.color(),
-            def.palette.rock.color(),
-            def.palette.peak.color(),
-        ];
+        let land = [def.palette.ground, def.palette.rock, def.palette.peak]
+            .map(|b| crate::gen::lod_land_color(b, b, 1.0));
+        let res = planet.voxel_resolution();
+        let g = NoiseGenerator::new(planet.noise_seed);
+        let shape = TerrainShape::new(res, &g, true);
+        let water_r: Vec<f32> = std::iter::once((res / 2) as f32)
+            .chain(shape.lakes().iter().map(|l| l.level as f32))
+            .map(|level| CoordSystem::get_layer_radius_f(level, res))
+            .collect();
         let (verts, _) = generate_planet_mesh(&planet, 2);
         for v in &verts {
-            assert!(allowed.contains(&v.color), "unexpected color {:?}", v.color);
+            let r = Vec3::from_array(v.pos).length();
+            assert!(
+                land.contains(&v.color) || water_r.iter().any(|w| (r - w).abs() < 1e-2),
+                "unexpected color {:?} at radius {r}",
+                v.color
+            );
         }
     }
 
@@ -295,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn impostor_lakes_are_flat_liquid_at_their_level() {
+    fn impostor_lakes_are_flat_water_at_their_level() {
         let planet = lake_test_planet(PlanetType::EarthLike);
         let res = planet.voxel_resolution();
         let g = NoiseGenerator::new(planet.noise_seed);
@@ -312,10 +351,15 @@ mod tests {
                     lake_verts += 1;
                     let expected = CoordSystem::get_layer_radius_f(level, res);
                     assert!((Vec3::from_array(v.pos).length() - expected).abs() < 1e-2);
-                    assert_eq!(
-                        v.color,
-                        PlanetType::EarthLike.def().liquid.unwrap().shallow_color
+                    let def = PlanetType::EarthLike.def();
+                    let depth = level - sea - s.height;
+                    let water = crate::gen::lod_water_color(
+                        def.palette.beach,
+                        &def.liquid.unwrap(),
+                        depth,
+                        def.atmosphere.sky_zenith,
                     );
+                    assert_eq!(v.color, water);
                 }
             }
         }

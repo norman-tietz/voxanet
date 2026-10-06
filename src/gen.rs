@@ -348,6 +348,76 @@ impl CoordSystem {
     }
 }
 
+// fs_water's opacity and colour rates per unit of water depth (shader.wgsl), for LOD water seen from above
+const WATER_OPACITY_RATE: f32 = 0.35;
+const WATER_DEEPENING_RATE: f32 = 0.15;
+
+// how much darker voxel terrain renders on average than a smooth surface of the same colours, from
+// its ambient occlusion and terrain shadows (linear; calibrated against the voxel world at the landing
+// handover)
+const LOD_OCCLUSION: f32 = 0.8;
+
+// the share of terrace step faces in a LOD vertex's colour per unit of slope (1 - n.up), up to
+// LOD_MAX_STEP_FACES, and their brightness (they face sideways, with ambient occlusion)
+const LOD_STEP_FACE_SHARE: f32 = 1.5;
+const LOD_MAX_STEP_FACES: f32 = 0.3;
+const LOD_STEP_FACE_SHADE: f32 = 0.75;
+
+// a dry LOD vertex: `top` is its column's top block, `below` the one under it, `slope` the normal's
+// up component. Slopes are voxel terraces from close up, whose step faces show the block below the
+// top (dirt under grass, rock under snow), in about the share the slope tilts. (A vertex past the face
+// edge can have a degenerate normal, NaN: no step faces there.) Darkened by LOD_OCCLUSION.
+pub(crate) fn lod_land_color(top: BlockType, below: BlockType, slope: f32) -> [f32; 3] {
+    let steps = ((1.0 - slope) * LOD_STEP_FACE_SHARE).clamp(0.0, LOD_MAX_STEP_FACES);
+    let steps = if steps.is_nan() { 0.0 } else { steps };
+    let color = mix_linear(
+        top.color(),
+        below.color().map(|c| c * LOD_STEP_FACE_SHADE),
+        steps,
+    );
+    color.map(|c| c * LOD_OCCLUSION.powf(1.0 / 2.2))
+}
+
+// a LOD vertex under `depth` layers of a reflective liquid: the voxel engine's water seen from above
+// (shader.wgsl fs_water), the floor through a body that darkens from the shallow to the deep colour.
+// fs_water lights the body with the sun plus twice the sky zenith (`sky_zenith`, the planet type's),
+// the terrain shading of LOD meshes and impostors with the sun plus the sky once, so the body is
+// brightened per channel by (sun + 2 sky) / (sun + sky) for a typical daylight sun (TYPICAL_SUN);
+// LOD_WATER_GAIN and LOD_WATER_REFLECTION (fs_water's fresnel sky reflection) bring it to what
+// fs_water shows, calibrated against the voxel world at the landing handover (Earth-like planet,
+// Yellow star)
+pub(crate) fn lod_water_color(
+    floor: BlockType,
+    liquid: &crate::biome::LiquidDef,
+    depth: f32,
+    sky_zenith: [f32; 3],
+) -> [f32; 3] {
+    let alpha = (1.0 - (-depth * WATER_OPACITY_RATE).exp()).clamp(0.25, 0.95);
+    let deep = 1.0 - (-depth * WATER_DEEPENING_RATE).exp();
+    let lin = |c: f32| c.max(0.0).powf(2.2);
+    [0, 1, 2].map(|i| {
+        let body = lin(liquid.shallow_color[i]) * (1.0 - deep) + lin(liquid.deep_color[i]) * deep;
+        let sky_boost = (TYPICAL_SUN[i] + 2.0 * sky_zenith[i]) / (TYPICAL_SUN[i] + sky_zenith[i]);
+        let surface = (body * sky_boost * LOD_WATER_GAIN + LOD_WATER_REFLECTION).powf(1.0 / 2.2);
+        // fs_water blends over the floor after tone mapping (display space): mix the encoded colours
+        surface * alpha + floor.color()[i] * (1.0 - alpha)
+    })
+}
+
+const LOD_WATER_GAIN: f32 = 9.0;
+const LOD_WATER_REFLECTION: f32 = 0.01;
+
+// a Yellow star's sunlight (galaxy.rs) at a typical daytime incidence, for lod_water_color
+const TYPICAL_SUN: [f32; 3] = [1.6 * 0.7, 1.5 * 0.7, 1.3 * 0.7];
+
+// mixes two sRGB-ish vertex colours in linear space (the shaders decode them with pow 2.2)
+fn mix_linear(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| {
+        let lin = |c: f32| c.max(0.0).powf(2.2);
+        (lin(a[i]) * (1.0 - t) + lin(b[i]) * t).powf(1.0 / 2.2)
+    })
+}
+
 pub struct MeshGen;
 
 impl MeshGen {
@@ -763,7 +833,6 @@ impl MeshGen {
                 v: sv,
             })
             .unwrap_or(def.palette.beach);
-        let shade = if slope < 0.85 { 0.75 } else { 1.0 }; // steep parts read like voxel sides
         let sea = data.terrain.sea_level();
         // a liquid-less planet's filled-in basin: its surface is the sea-level fill over natural
         // terrain below sea level, coloured flat like the rest of the basin (no rim shading)
@@ -773,16 +842,35 @@ impl MeshGen {
         let water = data.terrain.water_level(key.face, su, sv);
         let color = if h < water || filled_basin {
             match def.liquid {
-                // distant water: the planet type's own shallow liquid color, not a
-                // hardcoded Earth-specific one
-                Some(liquid) => liquid.shallow_color,
+                // a glowing liquid (lava) is opaque; its glow isn't modelled here
+                Some(liquid)
+                    if matches!(liquid.behavior, crate::biome::LiquidBehavior::Glowing) =>
+                {
+                    liquid.shallow_color
+                }
+                // the voxel engine's water seen from above (shader.wgsl fs_water): the floor through
+                // a body that darkens from the shallow to the deep colour with the depth
+                Some(liquid) => lod_water_color(
+                    surface,
+                    &liquid,
+                    (water - h) as f32,
+                    def.atmosphere.sky_zenith,
+                ),
                 // liquid-less planet (e.g. Ice): the filled-in beach material
                 // (PlanetData::exists's liquid-less solidity rule), not water — a filled
                 // basin, or edits that dug below sea level
                 None => def.palette.beach.color(),
             }
         } else {
-            surface.color().map(|c| c * shade)
+            let below = data
+                .block_type(BlockId {
+                    face: key.face,
+                    layer: h.saturating_sub(1),
+                    u: su,
+                    v: sv,
+                })
+                .unwrap_or(surface);
+            lod_land_color(surface, below, slope)
         };
         (pos, normal, color)
     }
@@ -1459,7 +1547,8 @@ mod biome_tests {
     }
 
     // on a liquid-less planet the filled-in basins keep their unshaded beach colour from afar, as
-    // before the LOD meshes sampled the edited surface (every vertex, rims of basins included)
+    // before the LOD meshes sampled the edited surface, and dry land the natural top and step blocks
+    // (every vertex, rims of basins included)
     #[test]
     fn unedited_ice_lod_colours_are_unchanged() {
         // the start planet's resolution: enough relief for steep shores around the basins
@@ -1492,19 +1581,19 @@ mod biome_tests {
                 } else {
                     let pos = glam::Vec3::from(vert.pos).normalize();
                     let slope = glam::Vec3::from(vert.normal).dot(pos).abs();
-                    let shade = if slope < 0.85 { 0.75 } else { 1.0 };
                     let floor = planet.mining_floor();
-                    crate::material::natural_type(
-                        &planet.terrain,
-                        &def.palette,
-                        floor,
-                        face,
-                        su,
-                        sv,
-                        h,
-                    )
-                    .color()
-                    .map(|c| c * shade)
+                    let natural = |layer| {
+                        crate::material::natural_type(
+                            &planet.terrain,
+                            &def.palette,
+                            floor,
+                            face,
+                            su,
+                            sv,
+                            layer,
+                        )
+                    };
+                    lod_land_color(natural(h), natural(h - 1), slope)
                 };
                 assert_eq!(
                     vert.color, expected,
@@ -1536,8 +1625,35 @@ mod biome_tests {
         let expected = CoordSystem::get_vertex_pos(1, 0, 0, h.max(sea), planet.resolution);
         assert!((glam::Vec3::from(verts[0].pos) - expected).length() < 1e-4);
         if h < sea {
-            assert_eq!(verts[0].color, def.liquid.unwrap().shallow_color);
+            let floor = planet
+                .block_type(BlockId {
+                    face: 1,
+                    layer: h,
+                    u: 0,
+                    v: 0,
+                })
+                .unwrap();
+            let liquid = def.liquid.unwrap();
+            let zenith = def.atmosphere.sky_zenith;
+            assert_eq!(
+                verts[0].color,
+                lod_water_color(floor, &liquid, (sea - h) as f32, zenith)
+            );
         }
+    }
+
+    // LOD water looks like the engine's from above: the floor shows through shallow water, deep
+    // water takes the deep colour
+    #[test]
+    fn lod_water_darkens_with_depth() {
+        let liquid = PlanetType::EarthLike.def().liquid.unwrap();
+        let zenith = PlanetType::EarthLike.def().atmosphere.sky_zenith;
+        let shallow = lod_water_color(BlockType::Sand, &liquid, 1.0, zenith);
+        let deep = lod_water_color(BlockType::Sand, &liquid, 40.0, zenith);
+        let brightness = |c: [f32; 3]| c[0] + c[1] + c[2];
+        assert!(brightness(shallow) > brightness(deep));
+        let dist = |c: [f32; 3]| Vec3::from(c).distance(Vec3::from(liquid.deep_color));
+        assert!(dist(deep) < dist(shallow)); // fs_water keeps 5 % of the floor (opacity <= 0.95)
     }
 
     #[test]
@@ -1566,7 +1682,7 @@ mod biome_tests {
             "no water quad at the lake's level"
         );
     }
-    // from afar a lake is flat water at its own level, in the liquid colour
+    // from afar a lake is flat water at its own level, coloured by its depth there
     #[test]
     fn lod_meshes_flatten_lakes_to_their_level() {
         let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::EarthLike);
@@ -1582,10 +1698,19 @@ mod biome_tests {
         let level = planet.terrain.water_level(face, u, v);
         let expected = CoordSystem::get_vertex_pos(face, u, v, level, planet.resolution).length();
         assert!((Vec3::from_array(vx.pos).length() - expected).abs() < 1e-3);
-        assert_eq!(
-            vx.color,
-            PlanetType::EarthLike.def().liquid.unwrap().shallow_color
-        );
+        let h = planet.surface(face, u, v);
+        let floor = planet
+            .block_type(BlockId {
+                face,
+                layer: h,
+                u,
+                v,
+            })
+            .unwrap();
+        let liquid = PlanetType::EarthLike.def().liquid.unwrap();
+        let zenith = PlanetType::EarthLike.def().atmosphere.sky_zenith;
+        let expected = lod_water_color(floor, &liquid, (level - h) as f32, zenith);
+        assert_eq!(vx.color, expected);
     }
     // faces under a lake carry its surface radius; a dry rim's wall facing the lake does too
     #[test]
