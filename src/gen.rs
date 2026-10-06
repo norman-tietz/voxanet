@@ -596,6 +596,7 @@ impl MeshGen {
                                 pos: (center + (p - center) * shrink).to_array(),
                                 color,
                                 normal,
+                                water: 0.0,
                             };
 
                             let corners = [
@@ -680,6 +681,7 @@ impl MeshGen {
                         pos: c.to_array(),
                         color,
                         normal: c.normalize().to_array(),
+                        water: data.water_surface_radius(key.face, u, v),
                     });
                 }
                 inds.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
@@ -788,6 +790,7 @@ impl MeshGen {
                     pos: pos.to_array(),
                     color,
                     normal: normal.to_array(),
+                    water: 0.0,
                 });
             }
         }
@@ -829,6 +832,7 @@ impl MeshGen {
                     pos: (p + down).to_array(),
                     color: src_v.color,
                     normal: src_v.normal,
+                    water: 0.0,
                 });
             }
             let len = coord_pairs.len() as u32;
@@ -935,6 +939,13 @@ impl MeshGen {
         let o_tr = p(1, 1, 1);
 
         let block_center = (i_bl + o_tr) * 0.5;
+        // caustics: the water surface over the cell each face looks into (the neighbour column for side
+        // faces, clamped to this face's grid), 0 when that column holds no water
+        let water = |du: i32, dv: i32| {
+            let nu = (id.u as i32 + du).clamp(0, res as i32 - 1) as u32;
+            let nv = (id.v as i32 + dv).clamp(0, res as i32 - 1) as u32;
+            data.water_surface_radius(id.face, nu, nv)
+        };
         let apply =
             |ao: f32| -> [f32; 3] { [base_color[0] * ao, base_color[1] * ao, base_color[2] * ao] };
         let side = |du: i32, dv: i32| {
@@ -960,6 +971,7 @@ impl MeshGen {
                     [apply(ao_br), apply(ao_tr), apply(ao_tl), apply(ao_bl)],
                     true,
                     block_center,
+                    water(0, 0),
                 );
             } else {
                 Self::quad(
@@ -970,6 +982,7 @@ impl MeshGen {
                     [apply(ao_bl), apply(ao_br), apply(ao_tr), apply(ao_tl)],
                     true,
                     block_center,
+                    water(0, 0),
                 );
             }
         }
@@ -984,6 +997,7 @@ impl MeshGen {
                 [c, c, c, c],
                 true,
                 block_center,
+                water(0, 0),
             );
         }
 
@@ -996,6 +1010,7 @@ impl MeshGen {
                 side(0, -1),
                 false,
                 block_center,
+                water(0, -1),
             );
         }
         if !has_back {
@@ -1007,6 +1022,7 @@ impl MeshGen {
                 side(0, 1),
                 false,
                 block_center,
+                water(0, 1),
             );
         }
         if !has_left {
@@ -1018,6 +1034,7 @@ impl MeshGen {
                 side(-1, 0),
                 false,
                 block_center,
+                water(-1, 0),
             );
         }
         if !has_right {
@@ -1029,6 +1046,7 @@ impl MeshGen {
                 side(1, 0),
                 false,
                 block_center,
+                water(1, 0),
             );
         }
     }
@@ -1047,12 +1065,14 @@ impl MeshGen {
                 pos: [x, 0.0, z],
                 color,
                 normal,
+                water: 0.0,
             });
 
             verts.push(Vertex {
                 pos: [x, height, z],
                 color,
                 normal,
+                water: 0.0,
             });
         }
 
@@ -1075,6 +1095,7 @@ impl MeshGen {
             pos: [0.0, height, 0.0],
             color,
             normal: [0.0, 1.0, 0.0],
+            water: 0.0,
         });
         for i in 0..=segments {
             let theta = (i as f32 / segments as f32) * std::f32::consts::TAU;
@@ -1084,6 +1105,7 @@ impl MeshGen {
                 pos: [x, height, z],
                 color,
                 normal: [0.0, 1.0, 0.0],
+                water: 0.0,
             });
         }
         for i in 0..segments {
@@ -1105,21 +1127,25 @@ impl MeshGen {
                 pos: [-s, 0.0, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [s, 0.0, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [0.0, -s, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [0.0, s, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
         ];
         let inds = vec![0, 1, 2, 3];
@@ -1136,6 +1162,7 @@ impl MeshGen {
         colors: [[f32; 3]; 4],
         force_radial: bool,
         block_center: Vec3,
+        water: f32, // Vertex::water for all four corners
     ) {
         let normal = if force_radial {
             let center = (pos[0] + pos[1] + pos[2] + pos[3]) * 0.25;
@@ -1158,6 +1185,7 @@ impl MeshGen {
                 pos: pos[i].to_array(),
                 color: colors[i],
                 normal,
+                water,
             });
         }
 
@@ -1463,5 +1491,24 @@ mod biome_tests {
             vx.color,
             PlanetType::EarthLike.def().liquid.unwrap().shallow_color
         );
+    }
+    // faces under a lake carry its surface radius; a dry rim's wall facing the lake does too
+    #[test]
+    fn voxel_faces_carry_the_water_radius_of_the_cell_they_face() {
+        let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::EarthLike);
+        let lake_r = planet.water_surface_radius(face, u, v);
+        let key = ChunkKey {
+            face,
+            u_idx: u / CHUNK_SIZE,
+            v_idx: v / CHUNK_SIZE,
+        };
+        let (verts, _) = MeshGen::build_chunk(key, &planet);
+        assert!(
+            verts.iter().any(|vx| (vx.water - lake_r).abs() < 1e-3),
+            "no vertex under the lake"
+        );
+        assert!(verts
+            .iter()
+            .all(|vx| vx.water == 0.0 || vx.water >= Vec3::from_array(vx.pos).length() - 1.5));
     }
 }

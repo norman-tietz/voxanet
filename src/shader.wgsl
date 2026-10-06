@@ -64,6 +64,7 @@ const CAUSTIC_FOCUS   = 0.4;                         // how strongly the ripples
 const CAUSTIC_STEEP   = 0.08;                        // slope of the caustic ripples
 const CAUSTIC_BASE    = 0.7;                         // plain sunlight under water, between the caustic lines
 const CAUSTIC_MAX     = 3.0;                         // brightest caustic, times the plain sunlight
+const WATER_DEPTH_RANGE: f32 = 16.0;                   // layers of water depth the G-buffer's albedo alpha spans
 const FOAM_DEPTH      = 2.0;                         // vertical water depth below which foam forms
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
 const MOTION_BLUR_SAMPLES    = 6;    // extra G-buffer taps per pixel when global.motion.x > 0
@@ -84,6 +85,7 @@ struct VertexIn {
     @location(0) pos: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
+    @location(3) water: f32, // water surface radius over the cell the face looks into, 0 = dry
 };
 
 struct VertexOut {
@@ -92,6 +94,7 @@ struct VertexOut {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_pos: vec3<f32>,
     @location(3) view_pos: vec3<f32>,
+    @location(4) water: f32,
 };
 
 @vertex
@@ -116,6 +119,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     // Color (Vertex Color + Baked AO)
     out.color = in.color;
     out.view_pos = global.camera_pos.xyz;
+    out.water = in.water;
 
     return out;
 }
@@ -469,7 +473,7 @@ fn sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<
 
 // lighting, fog, tone mapping and output colour space of one surface point (vertex colour `color`,
 // unit normal N); used per pixel by fs_light (deferred) and by the forward-drawn overlays (fs_main)
-fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32>) -> vec3<f32> {
+fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32>, water_depth: f32) -> vec3<f32> {
     let L = normalize(global.sun_dir.xyz);
     let V = normalize(global.camera_pos.xyz - world_pos);
 
@@ -489,13 +493,14 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
-    // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below the sea surface
+    // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below a water surface:
+    // `water_depth` is how deep the point lies below its own water (a lake's or the sea's, through the
+    // G-buffer), 0 when dry — so lake floors get caustics and tunnels sealed off from water don't
     var direct_light = biome.sun.rgb * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
-    let sea_depth = global.screen.z - length(world_pos);
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
     // which doesn't focus light the same way (matches fs_water's reflective-vs-glowing branch)
-    if (global.screen.z > 0.0 && biome.liquid_shallow.w < 0.5 && sea_depth > 0.0 && shadow_raw > 0.0) {
-        direct_light *= mix(1.0, caustics(world_pos, L, sea_depth), shadow_raw);
+    if (water_depth > 0.0 && biome.liquid_shallow.w < 0.5 && shadow_raw > 0.0) {
+        direct_light *= mix(1.0, caustics(world_pos, L, water_depth), shadow_raw);
     }
 
     // B. Hemispheric Ambient
@@ -556,7 +561,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (local.params.x < 1.0 && dither_opacity(in.clip_pos, local.params.x)) {
         discard;
     }
-    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy)), 1.0);
+    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), 1.0);
 }
 
 // --- DEFERRED SHADING (deferred.rs) ---
@@ -575,7 +580,9 @@ fn fs_geom(in: VertexOut) -> GeomOut {
         discard;
     }
     var out: GeomOut;
-    out.albedo = vec4<f32>(in.color, 1.0);
+    // alpha: depth below the face's own water surface (caustics in fs_light), 0 = dry
+    let water_depth = select(0.0, clamp((in.water - length(in.world_pos)) / WATER_DEPTH_RANGE, 0.0, 1.0), in.water > 0.0);
+    out.albedo = vec4<f32>(in.color, water_depth);
     out.normal = vec4<f32>(normalize(in.world_normal) * 0.5 + 0.5, 0.0);
     out.dist = distance(global.camera_pos.xyz, in.world_pos);
     return out;
@@ -618,7 +625,8 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
     } else {
         let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
         let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
-        color = shade(textureLoad(d_albedo, px, 0).rgb, N, world_pos, vec2<f32>(px) + 0.5);
+        let albedo = textureLoad(d_albedo, px, 0);
+        color = shade(albedo.rgb, N, world_pos, vec2<f32>(px) + 0.5, albedo.a * WATER_DEPTH_RANGE);
     }
 
     // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky

@@ -630,25 +630,9 @@ impl Renderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as _,
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 24,
-                            shader_location: 2,
-                        },
-                    ],
+                    attributes: &Vertex::ATTRIBUTES,
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -998,25 +982,9 @@ impl Renderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as _,
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 24,
-                            shader_location: 2,
-                        },
-                    ],
+                    attributes: &Vertex::ATTRIBUTES,
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -1111,6 +1079,13 @@ impl Renderer {
     // the lens flare's uniform for a sun at `ndc` (None: behind the camera), with `angular_radius`;
     // `boost` scales it (heat, night, underwater); returns whether there's anything to draw
     #[allow(clippy::too_many_arguments)]
+    // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
+    // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
+    pub(crate) fn camera_water_radius(planet: &PlanetData, cam_pos: Vec3) -> f32 {
+        CoordSystem::pos_to_id(cam_pos, planet.resolution)
+            .map_or(0.0, |id| planet.water_surface_radius(id.face, id.u, id.v))
+    }
+
     fn update_flare(
         &self,
         ndc: Option<glam::Vec2>,
@@ -1181,21 +1156,25 @@ impl Renderer {
                 pos: [-1.0, 1.0, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [1.0, 1.0, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [-1.0, bottom_y, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
             Vertex {
                 pos: [1.0, bottom_y, 0.0],
                 color,
                 normal,
+                water: 0.0,
             },
         ];
 
@@ -1884,11 +1863,13 @@ impl Renderer {
                         pos: (a + off).to_array(),
                         color,
                         normal: [0.0; 3],
+                        water: 0.0,
                     });
                     verts.push(Vertex {
                         pos: (b + off).to_array(),
                         color,
                         normal: [0.0; 3],
+                        water: 0.0,
                     });
                 }
 
@@ -2107,13 +2088,9 @@ impl Renderer {
             screen: [
                 self.config.width as f32,
                 self.config.height as f32,
-                // 0.0 signals "no liquid here" (same convention PlanetData::water_depth uses):
-                // on a liquid-less planet (e.g. Ice) there's no sea surface to tint for or swim in
-                if planet.planet_type.def().liquid.is_none() {
-                    0.0
-                } else {
-                    CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
-                },
+                // the water surface over the camera's own column (a lake's or the sea's), 0 when
+                // that column holds no water: the underwater tint and fs_water's below-the-surface checks
+                Self::camera_water_radius(planet, cam_pos),
                 time,
             ], // wrapped: keeps f32 wave phases precise
             sun_dir: [
@@ -2151,16 +2128,12 @@ impl Renderer {
             let sun_far = mvp * (cam_pos + sun_dir.normalize() * 1000.0).extend(1.0);
             let ndc = (sun_far.w > 0.0)
                 .then(|| glam::Vec2::new(sun_far.x / sun_far.w, sun_far.y / sun_far.w));
-            let sea_radius = if planet.planet_type.def().liquid.is_none() {
-                0.0
-            } else {
-                CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution)
-            };
+            let water_radius = Self::camera_water_radius(planet, cam_pos);
             let horizon_radius =
                 CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution);
             let daylight =
                 crate::flare::horizon_visibility(sun_dir, cam_pos, horizon_radius, angular_radius);
-            let above_water = if cam_pos.length() < sea_radius {
+            let above_water = if cam_pos.length() < water_radius {
                 0.0
             } else {
                 1.0
@@ -3123,5 +3096,29 @@ pub(crate) mod tests {
         assert!(mid > 0.0 && mid < 1.0, "{mid}");
         assert_eq!(status_alpha(STATUS_SECONDS), 0.0);
         assert_eq!(status_alpha(STATUS_SECONDS + 5.0), 0.0);
+    }
+    #[test]
+    fn camera_water_radius_is_zero_in_dry_columns() {
+        let (planet, (face, u, v)) =
+            crate::common::tests::lake_planet(crate::biome::PlanetType::EarthLike);
+        let level = planet.terrain.water_level(face, u, v);
+        let in_lake =
+            crate::gen::CoordSystem::get_block_center(face, u, v, level, planet.resolution);
+        assert!(
+            (Renderer::camera_water_radius(&planet, in_lake)
+                - planet.water_surface_radius(face, u, v))
+            .abs()
+                < 1e-3
+        );
+        // a dry column: the first one standing more than 3 layers above the sea
+        let peak_dir = (0..planet.resolution)
+            .find_map(|uu| {
+                let h = planet.terrain.get_height(0, uu, 3);
+                (h > planet.terrain.sea_level() + 3).then(|| {
+                    crate::gen::CoordSystem::get_block_center(0, uu, 3, h + 2, planet.resolution)
+                })
+            })
+            .unwrap();
+        assert_eq!(Renderer::camera_water_radius(&planet, peak_dir), 0.0);
     }
 }

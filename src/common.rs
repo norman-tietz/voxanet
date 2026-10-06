@@ -48,6 +48,13 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub color: [f32; 3],
     pub normal: [f32; 3],
+    pub water: f32, // water surface radius over the cell this face looks into, 0 = dry (caustics)
+}
+
+impl Vertex {
+    // shader.wgsl VertexIn
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32];
 }
 
 pub struct ChunkMesh {
@@ -1106,5 +1113,13 @@ pub(crate) mod tests {
         }));
         // dug below the lake's level but above the sea: dry (no flow from the lake)
         assert!(!planet.holds_water(face, du, v));
+    }
+    // Vertex mirrors shader.wgsl's VertexIn: pos, color, normal (vec3 each), water (f32) at offset 36
+    #[test]
+    fn vertex_layout_carries_the_water_radius() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 40);
+        assert_eq!(std::mem::offset_of!(Vertex, water), 36);
+        assert_eq!(Vertex::ATTRIBUTES[3].offset, 36);
+        assert_eq!(Vertex::ATTRIBUTES[3].shader_location, 3);
     }
 }
