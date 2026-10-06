@@ -26,24 +26,33 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     // the same resolution GalaxyPlanet::bake uses, so impostor and voxel world agree to the unit
     let res = planet.voxel_resolution();
     let sea_level = (res / 2) as f32;
-    let generator = NoiseGenerator::new(planet.noise_seed);
-    let shape = TerrainShape::new(res, &generator, false);
-
-    // TerrainShape::height returns an offset in layers from sea level, like the real engine's
-    let heights: Vec<f32> = unit_verts
-        .iter()
-        .map(|&dir| shape.height(&generator, dir))
-        .collect();
     let def = planet.planet_type.def();
+    let generator = NoiseGenerator::new(planet.noise_seed);
+    // lakes like the baked planet (GalaxyPlanet::bake: liquid planet types)
+    let shape = TerrainShape::new(res, &generator, def.liquid.is_some());
+
+    // TerrainShape returns offsets in layers from sea level, like the real engine's; per vertex the
+    // carved height and, inside a lake below its level, that level
+    let samples: Vec<(f32, Option<f32>)> = unit_verts
+        .iter()
+        .map(|&dir| {
+            let s = shape.sample(&generator, dir);
+            let lake = s
+                .lake
+                .map(|k| shape.lakes()[k].level as f32 - sea_level)
+                .filter(|&l| s.height < l);
+            (s.height, lake)
+        })
+        .collect();
     let positions: Vec<Vec3> = unit_verts
         .iter()
-        .zip(heights.iter())
-        .map(|(&dir, &h)| {
-            // like the engine's distant LOD meshes (MeshGen::generate_lod_mesh): oceans and
-            // liquid-less basins flattened to sea level, layers spaced exponentially
+        .zip(samples.iter())
+        .map(|(&dir, &(h, lake))| {
+            // like the engine's distant LOD meshes (MeshGen::generate_lod_mesh): lakes flat at their
+            // level, oceans and liquid-less basins at sea level, layers spaced exponentially
             // (get_layer_radius). The colour below still uses the raw height, so underwater
             // columns get the liquid (or, liquid-less, the beach) colour.
-            dir * CoordSystem::get_layer_radius_f(sea_level + h.max(0.0), res)
+            dir * CoordSystem::get_layer_radius_f(sea_level + lake.unwrap_or(h.max(0.0)), res)
         })
         .collect();
 
@@ -60,8 +69,12 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
 
     let verts = (0..positions.len())
         .map(|i| {
-            let height = heights[i];
-            let color = if height < 0.0 {
+            let (height, lake) = samples[i];
+            let color = if lake.is_some() {
+                // only liquid planets have lakes
+                def.liquid
+                    .map_or(def.palette.beach.color(), |l| l.shallow_color)
+            } else if height < 0.0 {
                 match def.liquid {
                     Some(l) => l.shallow_color,
                     None => def.palette.beach.color(),
@@ -163,12 +176,18 @@ mod tests {
             let planet = test_planet(1, planet_type);
             let res = planet.voxel_resolution();
             let generator = NoiseGenerator::new(planet.noise_seed);
-            let shape = TerrainShape::new(res, &generator, false);
+            let shape = TerrainShape::new(res, &generator, planet_type.def().liquid.is_some());
             let (unit_verts, _) = crate::icosphere::generate(2);
             let (verts, _) = generate_planet_mesh(&planet, 2);
             let sea = (res / 2) as f32;
             for (dir, v) in unit_verts.iter().zip(&verts) {
-                let h = shape.height(&generator, *dir).max(0.0);
+                // lakes flat at their level, oceans at sea level
+                let s = shape.sample(&generator, *dir);
+                let lake_level = s.lake.map(|k| shape.lakes()[k].level as f32 - sea);
+                let h = match lake_level {
+                    Some(l) if s.height < l => l,
+                    _ => s.height.max(0.0),
+                };
                 let expected = CoordSystem::get_layer_radius_f(sea + h, res);
                 let actual = Vec3::from_array(v.pos).length();
                 assert!(
@@ -261,5 +280,44 @@ mod tests {
             (ra - rb).abs() > 1e-3
         });
         assert!(differs, "two different noise seeds produced identical terrain — the per-planet seeding isn't taking effect");
+    }
+    fn lake_test_planet(planet_type: PlanetType) -> GalaxyPlanet {
+        (1..80)
+            .map(|seed| test_planet(seed, planet_type))
+            .find(|p| {
+                let g = NoiseGenerator::new(p.noise_seed);
+                !TerrainShape::new(p.voxel_resolution(), &g, true)
+                    .lakes()
+                    .is_empty()
+            })
+            .expect("no seed with a lake")
+    }
+
+    #[test]
+    fn impostor_lakes_are_flat_liquid_at_their_level() {
+        let planet = lake_test_planet(PlanetType::EarthLike);
+        let res = planet.voxel_resolution();
+        let g = NoiseGenerator::new(planet.noise_seed);
+        let shape = TerrainShape::new(res, &g, true);
+        let sea = (res / 2) as f32;
+        let (unit_verts, _) = crate::icosphere::generate(5);
+        let (verts, _) = generate_planet_mesh(&planet, 5);
+        let mut lake_verts = 0;
+        for (dir, v) in unit_verts.iter().zip(&verts) {
+            let s = shape.sample(&g, *dir);
+            if let Some(k) = s.lake {
+                let level = shape.lakes()[k].level as f32;
+                if sea + s.height < level {
+                    lake_verts += 1;
+                    let expected = CoordSystem::get_layer_radius_f(level, res);
+                    assert!((Vec3::from_array(v.pos).length() - expected).abs() < 1e-2);
+                    assert_eq!(
+                        v.color,
+                        PlanetType::EarthLike.def().liquid.unwrap().shallow_color
+                    );
+                }
+            }
+        }
+        assert!(lake_verts > 0, "no impostor vertex fell into a lake");
     }
 }

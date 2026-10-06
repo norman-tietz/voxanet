@@ -95,6 +95,7 @@ impl TerrainShape {
         &self.lakes
     }
 
+    #[cfg(test)]
     pub(crate) fn height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
         self.sample(g, dir).height
     }

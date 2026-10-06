@@ -711,10 +711,10 @@ impl MeshGen {
             let abs_v = (key.y as i64 + step_v).clamp(0, data.resolution as i64) as u32;
 
             // the edited surface (natural height where unedited, LOD surfaces sit at layer h like the
-            // land); oceans and liquid-less basins are flat at sea level from afar, like the water table
+            // land); oceans, lakes and liquid-less basins are flat at their water level from afar
             let h = data
                 .surface(key.face, abs_u, abs_v)
-                .max(data.terrain.sea_level());
+                .max(data.terrain.water_level(key.face, abs_u, abs_v));
             CoordSystem::get_vertex_pos(key.face, abs_u, abs_v, h, data.resolution)
         };
 
@@ -768,7 +768,9 @@ impl MeshGen {
                 let filled_basin = def.liquid.is_none()
                     && h == sea
                     && data.terrain.get_height(key.face, su, sv) < sea;
-                let color = if h < sea || filled_basin {
+                // below the column's water level: a lake's or the sea's (Ice: always sea level)
+                let water = data.terrain.water_level(key.face, su, sv);
+                let color = if h < water || filled_basin {
                     match def.liquid {
                         // distant water: the planet type's own shallow liquid color, not a
                         // hardcoded Earth-specific one
@@ -1439,6 +1441,27 @@ mod biome_tests {
                 .iter()
                 .any(|vx| (Vec3::from_array(vx.pos).length() - lake_r).abs() < 1e-3),
             "no water quad at the lake's level"
+        );
+    }
+    // from afar a lake is flat water at its own level, in the liquid colour
+    #[test]
+    fn lod_meshes_flatten_lakes_to_their_level() {
+        let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::EarthLike);
+        // size 64 with the 64-cell LOD grid: one vertex per column
+        let key = crate::common::LodKey {
+            face,
+            x: u - u % 64,
+            y: v - v % 64,
+            size: 64,
+        };
+        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let vx = verts[((v - key.y) * 65 + (u - key.x)) as usize];
+        let level = planet.terrain.water_level(face, u, v);
+        let expected = CoordSystem::get_vertex_pos(face, u, v, level, planet.resolution).length();
+        assert!((Vec3::from_array(vx.pos).length() - expected).abs() < 1e-3);
+        assert_eq!(
+            vx.color,
+            PlanetType::EarthLike.def().liquid.unwrap().shallow_color
         );
     }
 }
