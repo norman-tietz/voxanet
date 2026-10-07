@@ -61,7 +61,7 @@ pub struct GlobalUniform {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct LocalUniform {
     pub model: [f32; 16],
-    pub params: [f32; 4], // x = opacity, y = 1 while fading out (complementary dither)
+    pub params: [f32; 4], // x = opacity, y = 1 while fading out (complementary dither), z = geomorph factor, w = 1 for low-poly terrain (faceted, fs_geom)
 }
 
 #[repr(C)]
@@ -2308,11 +2308,16 @@ impl Renderer {
                 mesh.params = params;
             }
         };
+        let facets = if crate::lowpoly::style() == crate::lowpoly::TerrainStyle::LowPoly {
+            1.0
+        } else {
+            0.0
+        };
         let dying_status = self.animator.update_dying(now);
         for (key, alpha) in dying_status {
             if let Some(state) = self.animator.dying_chunks.get_mut(&key) {
                 let morph = state.mesh.morph_factor;
-                write_params(&mut state.mesh, [alpha, 1.0, morph, 0.0]);
+                write_params(&mut state.mesh, [alpha, 1.0, morph, facets]);
             }
         }
         let animator = &mut self.animator;
@@ -2326,10 +2331,10 @@ impl Renderer {
         for (key, mesh) in self.lod_chunks.iter_mut() {
             let alpha = opacity(AnyKey::Lod(*key));
             let morph = mesh.morph_factor;
-            write_params(mesh, [alpha, 0.0, morph, 0.0]);
+            write_params(mesh, [alpha, 0.0, morph, facets]);
         }
         for (key, mesh) in self.chunks.iter_mut() {
-            write_params(mesh, [opacity(AnyKey::Voxel(*key)), 0.0, 0.0, 0.0]);
+            write_params(mesh, [opacity(AnyKey::Voxel(*key)), 0.0, 0.0, facets]);
         }
 
         let mut enc = self

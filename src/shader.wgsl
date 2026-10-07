@@ -95,6 +95,7 @@ struct VertexOut {
     @location(2) world_pos: vec3<f32>,
     @location(3) view_pos: vec3<f32>,
     @location(4) water: f32,
+    @location(5) @interpolate(flat) flat_color: vec3<f32>, // low-poly: one colour per facet (first vertex)
 };
 
 @vertex
@@ -141,6 +142,7 @@ fn transform(in: VertexIn) -> VertexOut {
     
     // Color (Vertex Color + Baked AO)
     out.color = in.color;
+    out.flat_color = in.color;
     out.view_pos = global.camera_pos.xyz;
     out.water = in.water;
 
@@ -611,14 +613,27 @@ struct GeomOut {
 
 @fragment
 fn fs_geom(in: VertexOut) -> GeomOut {
+    // derivatives first, while every fragment of the quad still runs (the dither discard below)
+    let facet = cross(dpdx(in.world_pos), dpdy(in.world_pos));
     if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
     var out: GeomOut;
     // alpha: depth below the face's own water surface (caustics in fs_light), 0 = dry
     let water_depth = select(0.0, clamp((in.water - length(in.world_pos)) / WATER_DEPTH_RANGE, 0.0, 1.0), in.water > 0.0);
-    out.albedo = vec4<f32>(in.color, water_depth);
-    out.normal = vec4<f32>(normalize(in.world_normal) * 0.5 + 0.5, 0.0);
+    var normal = normalize(in.world_normal);
+    var color = in.color;
+    // low-poly terrain (LocalUniform.params.w, lowpoly.rs): the facet's flat colour and its own normal
+    // from screen-space derivatives, oriented like the vertex normal
+    if (local.params.w > 0.5) {
+        color = in.flat_color;
+        if (dot(facet, facet) > 0.0) {
+            let flat_n = normalize(facet);
+            normal = select(-flat_n, flat_n, dot(flat_n, normal) >= 0.0);
+        }
+    }
+    out.albedo = vec4<f32>(color, water_depth);
+    out.normal = vec4<f32>(normal * 0.5 + 0.5, 0.0);
     out.dist = distance(global.camera_pos.xyz, in.world_pos);
     return out;
 }
