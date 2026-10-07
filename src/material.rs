@@ -157,6 +157,37 @@ pub fn natural_type(
     }
 }
 
+const STEEP_FACET: f32 = 0.6; // a low-poly facet whose normal · up is below this (steeper than ~53°) is bare rock
+
+// the material of a low-poly surface facet (lowpoly.rs) over column (face, u, v) at fractional `height`
+// (layers, like a column height) with normal · up `up_dot`: surface_type's bands, borders and jitter,
+// the facet's own slope standing in for the column steps
+pub fn lowpoly_material(
+    terrain: &PlanetTerrain,
+    palette: &Palette,
+    face: u8,
+    u: u32,
+    v: u32,
+    height: f32,
+    up_dot: f32,
+) -> BlockType {
+    let sea = terrain.sea_level() as f32;
+    let peak = (terrain.height_range().1 as f32 - sea).max(1.0);
+    let j = jitter(face, u, v);
+    let rel = (height - sea) / peak + j * 0.04;
+    let above_water = height - terrain.water_level(face, u, v) as f32;
+    let beach = (BEACH * peak).min(MAX_BEACH);
+    if rel >= SNOW_LINE {
+        palette.peak
+    } else if up_dot < STEEP_FACET || rel >= ROCK_LINE {
+        palette.rock
+    } else if above_water <= beach * (1.0 + 0.5 * j) {
+        palette.beach
+    } else {
+        palette.ground
+    }
+}
+
 // selectable with the number keys 1.. on the active planet type
 pub fn placeable(palette: &Palette) -> [BlockType; 5] {
     [
@@ -308,5 +339,52 @@ mod tests {
             }
         }
         panic!("no lake shore found");
+    }
+
+    // on level ground a facet gets its column's surface type (where the column isn't a steep step)
+    #[test]
+    fn level_facets_take_the_columns_surface_type() {
+        let terrain = PlanetTerrain::with_lakes(64, crate::noise::HOME_SEED);
+        let palette = earth_palette();
+        let mut checked = 0;
+        for v in 1..63 {
+            for u in 1..63 {
+                let h = terrain.get_height(0, u, v);
+                let steep = [(u - 1, v), (u + 1, v), (u, v - 1), (u, v + 1)]
+                    .iter()
+                    .any(|&(a, b)| h >= terrain.get_height(0, a, b) + STEEP);
+                if steep {
+                    continue;
+                }
+                assert_eq!(
+                    lowpoly_material(&terrain, &palette, 0, u, v, h as f32, 1.0),
+                    surface_type(&terrain, &palette, 0, u, v),
+                    "column (0, {u}, {v})"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000);
+    }
+
+    // steep facets are bare rock (or snow above the snow line)
+    #[test]
+    fn steep_facets_are_rock() {
+        let terrain = PlanetTerrain::new(64, crate::noise::HOME_SEED);
+        let palette = earth_palette();
+        let sea = terrain.sea_level() as f32;
+        let m = lowpoly_material(&terrain, &palette, 0, 10, 10, sea + 2.0, 0.3);
+        assert_eq!(m, palette.rock);
+    }
+
+    // a lake's shore takes the lake's beach band, not the sea's
+    #[test]
+    fn lake_shores_are_beach() {
+        let (planet, (face, u, v)) =
+            crate::common::tests::lake_planet(crate::biome::PlanetType::EarthLike);
+        let palette = planet.planet_type.def().palette;
+        let level = planet.terrain.water_level(face, u, v) as f32;
+        let m = lowpoly_material(&planet.terrain, &palette, face, u, v, level + 0.2, 1.0);
+        assert_eq!(m, palette.beach);
     }
 }
