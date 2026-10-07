@@ -10,6 +10,10 @@ use std::sync::Arc;
 // --- CONSTANTS ---
 pub const CHUNK_SIZE: u32 = 32;
 
+// the smooth height map (low-poly terrain, lowpoly.rs) averages each column over this many columns
+// around it in every direction: 1 → 3×3
+pub const SMOOTH_RADIUS: i32 = 1;
+
 // edit limits (PlanetData::build_ceiling, mining_floor, add_block/remove_block)
 const BUILD_MARGIN: u32 = 24; // layers above the highest natural peak that can be built on
 const BEDROCK_DEPTH: u32 = 32; // layers below the lowest natural column that can be mined
@@ -165,6 +169,9 @@ pub struct PlanetData {
     edit_generation: u64, // bumped by every successful edit (an outdated near impostor), not by restoring
     pub resolution: u32,
     pub terrain: crate::noise::PlanetTerrain,
+    // per column the mean effective height of its (2·SMOOTH_RADIUS + 1)² neighbourhood, in layers: the
+    // surface the low-poly terrain is drawn on (blocks stay the truth; lowpoly.rs)
+    pub smooth: Arc<Vec<f32>>,
     pub planet_type: PlanetType,
     // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
     // edits record it so they're only restored onto the same terrain
@@ -202,11 +209,13 @@ impl PlanetData {
         terrain: PlanetTerrain,
         planet_type: PlanetType,
     ) -> Self {
+        let smooth = Self::bake_smooth(&terrain, resolution, planet_type);
         Self {
             edits: PlanetEdits::for_terrain(resolution, seed),
             edit_generation: 0,
             resolution,
             terrain,
+            smooth,
             planet_type,
             seed,
         }
@@ -218,6 +227,7 @@ impl PlanetData {
     pub fn switch_planet_type(&mut self, to: PlanetType) {
         self.planet_type = to;
         self.edits = PlanetEdits::for_terrain(self.resolution, self.seed);
+        self.smooth = Self::bake_smooth(&self.terrain, self.resolution, to);
     }
 
     // the highest layer blocks can be placed in: BUILD_MARGIN above the highest natural peak, but not
@@ -368,16 +378,7 @@ impl PlanetData {
     // views (LOD meshes, the near impostor) sample it, so large builds and pits show from afar
     pub fn surface(&self, face: u8, u: u32, v: u32) -> u32 {
         let (u, v) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
-        let edited = self
-            .edits
-            .chunks
-            .get(&Self::get_chunk_key(BlockId {
-                face,
-                layer: 0,
-                u,
-                v,
-            }))
-            .is_some_and(|m| !m.placed.is_empty() || !m.mined.is_empty());
+        let edited = self.column_edited(face, u, v);
         if !edited {
             return self.effective_height(face, u, v);
         }
@@ -435,26 +436,88 @@ impl PlanetData {
         du: i32,
         dv: i32,
     ) -> Option<(u8, u32, u32)> {
-        let res = self.resolution;
-        let (nu, nv) = (u as i32 + du, v as i32 + dv);
-        if nu >= 0 && nv >= 0 && nu < res as i32 && nv < res as i32 {
-            return Some((face, nu as u32, nv as u32));
-        }
-        let mid = res / 2;
-        let here = crate::gen::CoordSystem::get_block_center(face, u, v, mid, res);
-        let inner = crate::gen::CoordSystem::get_block_center(
-            face,
-            (u as i32 - du) as u32,
-            (v as i32 - dv) as u32,
-            mid,
-            res,
-        );
-        crate::gen::CoordSystem::pos_to_id(here * 2.0 - inner, res).map(|id| (id.face, id.u, id.v))
+        crate::gen::CoordSystem::neighbor_column(face, u, v, du, dv, self.resolution)
     }
 
     pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
         self.neighbor_column(face, u, v, du, dv)
             .map_or(0, |(f, nu, nv)| self.effective_height(f, nu, nv))
+    }
+
+    fn bake_smooth(
+        terrain: &PlanetTerrain,
+        resolution: u32,
+        planet_type: PlanetType,
+    ) -> Arc<Vec<f32>> {
+        use rayon::prelude::*;
+        let res = resolution;
+        let (fill, sea) = (planet_type.def().liquid.is_none(), terrain.sea_level());
+        // effective_height's rule: liquid-less planets are solid up to sea level
+        let eff = |f: u8, u: u32, v: u32| {
+            let h = terrain.get_height(f, u, v);
+            (if fill { h.max(sea) } else { h }) as f32
+        };
+        let mut out = vec![0.0f32; (6 * res * res) as usize];
+        out.par_chunks_mut(res as usize)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let face = (row as u32 / res) as u8;
+                let v = row as u32 % res;
+                for u in 0..res {
+                    let (mut sum, mut n) = (0.0, 0.0);
+                    for dv in -SMOOTH_RADIUS..=SMOOTH_RADIUS {
+                        for du in -SMOOTH_RADIUS..=SMOOTH_RADIUS {
+                            if let Some((f, cu, cv)) =
+                                crate::gen::CoordSystem::neighbor_column(face, u, v, du, dv, res)
+                            {
+                                sum += eff(f, cu, cv);
+                                n += 1.0;
+                            }
+                        }
+                    }
+                    out[u as usize] = sum / n;
+                }
+            });
+        Arc::new(out)
+    }
+
+    // the column's smooth height in layers (u, v clamped to the face like the height map)
+    pub fn smooth_height(&self, face: u8, u: u32, v: u32) -> f32 {
+        let res = self.resolution;
+        let (u, v) = (u.min(res - 1), v.min(res - 1));
+        self.smooth[(face as u32 * res * res + v * res + u) as usize]
+    }
+
+    // the smooth height at grid corner (u, v) (0..=res): the mean of the up to four columns of this face
+    // touching it
+    pub fn smooth_corner(&self, face: u8, u: u32, v: u32) -> f32 {
+        let res = self.resolution;
+        let (mut sum, mut n) = (0.0, 0.0);
+        for (cu, cv) in [
+            (u.wrapping_sub(1), v.wrapping_sub(1)),
+            (u, v.wrapping_sub(1)),
+            (u.wrapping_sub(1), v),
+            (u, v),
+        ] {
+            if cu < res && cv < res {
+                sum += self.smooth_height(face, cu, cv);
+                n += 1.0;
+            }
+        }
+        sum / n
+    }
+
+    // whether the column's chunk has any edits (placed or mined blocks)
+    pub fn column_edited(&self, face: u8, u: u32, v: u32) -> bool {
+        self.edits
+            .chunks
+            .get(&Self::get_chunk_key(BlockId {
+                face,
+                layer: 0,
+                u,
+                v,
+            }))
+            .is_some_and(|m| !m.placed.is_empty() || !m.mined.is_empty())
     }
 
     pub fn chunk_key(id: BlockId) -> ChunkKey {
@@ -1151,5 +1214,88 @@ pub(crate) mod tests {
         assert_eq!(std::mem::offset_of!(Vertex, water), 36);
         assert_eq!(Vertex::ATTRIBUTES[3].offset, 36);
         assert_eq!(Vertex::ATTRIBUTES[3].shader_location, 3);
+    }
+
+    // the smooth map is the mean effective height of the 3×3 columns around each column
+    #[test]
+    fn smooth_height_is_the_mean_of_the_3x3_neighbourhood() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0u8, 10u32, 12u32);
+        let mut sum = 0.0;
+        for dv in -1..=1 {
+            for du in -1..=1 {
+                let (f, cu, cv) = planet.neighbor_column(face, u, v, du, dv).unwrap();
+                sum += planet.effective_height(f, cu, cv) as f32;
+            }
+        }
+        assert!((planet.smooth_height(face, u, v) - sum / 9.0).abs() < 1e-5);
+    }
+
+    // at a cube-face edge the neighbourhood continues on the next face
+    #[test]
+    fn smooth_height_crosses_face_edges() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0u8, 0u32, 12u32);
+        let mut sum = 0.0;
+        let mut other_face = false;
+        for dv in -1..=1 {
+            for du in -1..=1 {
+                let (f, cu, cv) = planet.neighbor_column(face, u, v, du, dv).unwrap();
+                other_face |= f != face;
+                sum += planet.effective_height(f, cu, cv) as f32;
+            }
+        }
+        assert!(
+            other_face,
+            "the edge column has no neighbour on another face"
+        );
+        assert!((planet.smooth_height(face, u, v) - sum / 9.0).abs() < 1e-5);
+    }
+
+    // liquid-less planets smooth their sea-level fill: nothing dips below sea level
+    #[test]
+    fn liquid_less_smooth_heights_follow_the_basin_fill() {
+        let planet = PlanetData::new_for_type(32, crate::noise::HOME_SEED, PlanetType::Ice);
+        let sea = planet.terrain.sea_level() as f32;
+        for face in 0..6u8 {
+            for v in 0..32 {
+                for u in 0..32 {
+                    assert!(planet.smooth_height(face, u, v) >= sea - 1e-5);
+                }
+            }
+        }
+    }
+
+    // baking is deterministic
+    #[test]
+    fn smooth_map_is_deterministic() {
+        let a = PlanetData::new(32);
+        let b = PlanetData::new(32);
+        assert_eq!(a.smooth, b.smooth);
+    }
+
+    // a grid corner's smooth height is the mean of the up to four columns touching it
+    #[test]
+    fn smooth_corner_is_the_mean_of_its_columns() {
+        let planet = PlanetData::new(32);
+        let (face, u, v) = (0u8, 10u32, 12u32);
+        let mean = (planet.smooth_height(face, 9, 11)
+            + planet.smooth_height(face, 10, 11)
+            + planet.smooth_height(face, 9, 12)
+            + planet.smooth_height(face, 10, 12))
+            / 4.0;
+        assert!((planet.smooth_corner(face, u, v) - mean).abs() < 1e-5);
+        // at the face's far edge only the columns on this face count
+        let edge = (planet.smooth_height(face, 31, 11) + planet.smooth_height(face, 31, 12)) / 2.0;
+        assert!((planet.smooth_corner(face, 32, 12) - edge).abs() < 1e-5);
+    }
+
+    // layer_of_radius inverts get_layer_radius_f
+    #[test]
+    fn layer_of_radius_inverts_the_layer_radius() {
+        for layer in [3.0f32, 16.0, 17.25, 40.5] {
+            let r = crate::gen::CoordSystem::get_layer_radius_f(layer, 32);
+            assert!((crate::gen::CoordSystem::layer_of_radius(r, 32) - layer).abs() < 1e-3);
+        }
     }
 }

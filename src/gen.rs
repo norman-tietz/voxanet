@@ -223,6 +223,38 @@ impl CoordSystem {
         (s * (Self::K * ((layer as f64 / s) - 1.0)).exp()) as f32
     }
 
+    // the fractional layer at radius `r`: get_layer_radius_f's inverse
+    pub fn layer_of_radius(r: f32, res: u32) -> f32 {
+        let s = res as f64 / 2.0;
+        (s * ((r as f64 / s).ln() / Self::K + 1.0)) as f32
+    }
+
+    // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
+    // is a column of the neighbouring face, found by continuing the line from the inner neighbour outward
+    pub fn neighbor_column(
+        face: u8,
+        u: u32,
+        v: u32,
+        du: i32,
+        dv: i32,
+        res: u32,
+    ) -> Option<(u8, u32, u32)> {
+        let (nu, nv) = (u as i32 + du, v as i32 + dv);
+        if nu >= 0 && nv >= 0 && nu < res as i32 && nv < res as i32 {
+            return Some((face, nu as u32, nv as u32));
+        }
+        let mid = res / 2;
+        let here = Self::get_block_center(face, u, v, mid, res);
+        let inner = Self::get_block_center(
+            face,
+            (u as i32 - du) as u32,
+            (v as i32 - dv) as u32,
+            mid,
+            res,
+        );
+        Self::pos_to_id(here * 2.0 - inner, res).map(|id| (id.face, id.u, id.v))
+    }
+
     pub fn get_direction(face: u8, u: u32, v: u32, res: u32) -> Vec3 {
         let rf = res as f64;
 
