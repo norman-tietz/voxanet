@@ -918,4 +918,37 @@ mod tests {
         assert!(worst < 0.5, "worst {worst}");
         assert!(sum / n < 0.15, "mean {}", sum / n);
     }
+
+    // meshing cost of every chunk of a radius-128 planet in both styles (cargo test --release
+    // lowpoly_bench -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn lowpoly_bench() {
+        let planet = PlanetData::new(256);
+        let n = 256 / CHUNK_SIZE;
+        let keys: Vec<ChunkKey> = (0..6u8)
+            .flat_map(|face| {
+                (0..n)
+                    .flat_map(move |u_idx| (0..n).map(move |v_idx| ChunkKey { face, u_idx, v_idx }))
+            })
+            .collect();
+        for style in [TerrainStyle::Cubes, TerrainStyle::LowPoly] {
+            let start = std::time::Instant::now();
+            let (mut tris, mut verts) = (0, 0);
+            for &key in &keys {
+                let (v, i) = match style {
+                    TerrainStyle::Cubes => crate::gen::MeshGen::build_chunk_cubes(key, &planet),
+                    TerrainStyle::LowPoly => build_chunk_lowpoly(key, &planet),
+                };
+                tris += i.len() / 3;
+                verts += v.len();
+            }
+            let t = start.elapsed();
+            println!(
+                "{style:?}: {:.2} ms/chunk, {tris} triangles, {:.1} MB vertices",
+                t.as_secs_f64() * 1000.0 / keys.len() as f64,
+                (verts * std::mem::size_of::<Vertex>()) as f64 / 1e6
+            );
+        }
+    }
 }
