@@ -45,7 +45,7 @@ pub fn natural_density(smooth_height: f32, layer: u32) -> f32 {
 }
 
 // where the surface crosses a column of smooth height `smooth_height`: the solid cell's layer and the
-// fraction (0..1) of the way to the centre of the empty cell above it
+// fraction (0..=1) of the way to the centre of the empty cell above it
 pub fn crossing(smooth_height: f32) -> (u32, f32) {
     let h = smooth_height.max(0.0);
     // the highest solid layer (density > ISO, i.e. layer < h + 1 - ISO); the densities of it and the
@@ -151,7 +151,7 @@ pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Ve
     (verts, inds)
 }
 
-// the drawn terrain: densities from the smooth heights, mined cells empty
+// the drawn terrain: densities from the smooth heights, carved cells (see carved) empty
 struct Field<'a> {
     data: &'a PlanetData,
 }
@@ -169,18 +169,37 @@ impl<'a> Field<'a> {
         self.mods(id).is_some_and(|m| m.placed.contains_key(&id))
     }
 
-    fn mined(&self, id: BlockId) -> bool {
-        self.mods(id).is_some_and(|m| m.mined.contains(&id))
+    // a cell carved out of the drawn terrain: mined, or natural air above a mined column top. Over a dip
+    // the smooth surface lies above the column's top block (smooth_height > h + 0.5 draws the air cell
+    // h + 1 solid), and air can't be mined, so without the second rule mining the top block would leave
+    // a lid the player can never remove
+    fn carved(&self, id: BlockId) -> bool {
+        let Some(m) = self.mods(id) else {
+            return false;
+        };
+        if m.mined.contains(&id) {
+            return true;
+        }
+        let top = self.data.effective_height(id.face, id.u, id.v);
+        id.layer > top && m.mined.contains(&BlockId { layer: top, ..id })
     }
 
-    // mined cells are empty (MINED_DENSITY); cell() puts the vertices on their edges half-way, at the
-    // block boundary, since the unclamped natural density says nothing about where a wall should be
-    fn density(&self, id: BlockId) -> f32 {
-        if self.mined(id) {
-            MINED_DENSITY
+    // the cell's density and whether it is carved: carved cells are empty (MINED_DENSITY) and cell()
+    // puts the vertices on their edges half-way, at the block boundary, since the unclamped natural
+    // density says nothing about where a wall should be
+    fn sample(&self, id: BlockId) -> (f32, bool) {
+        if self.carved(id) {
+            (MINED_DENSITY, true)
         } else {
-            natural_density(self.data.smooth_height(id.face, id.u, id.v), id.layer)
+            (
+                natural_density(self.data.smooth_height(id.face, id.u, id.v), id.layer),
+                false,
+            )
         }
+    }
+
+    fn density(&self, id: BlockId) -> f32 {
+        self.sample(id).0
     }
 
     // solid as drawn: the smooth terrain or a placed block
@@ -206,7 +225,7 @@ fn cell(
         v: 0,
     }; 8];
     let mut d = [0.0f32; 8];
-    let mut mined = [false; 8];
+    let mut mined = [false; 8]; // carved: mined, or air above a mined column top
     let mut case = 0usize;
     for (i, &(dx, dy, dz)) in CUBE_CORNER_OFFSETS.iter().enumerate() {
         let (face, u, v) = match (dx, dy) {
@@ -221,12 +240,7 @@ fn cell(
             v,
             layer: layer + dz,
         };
-        mined[i] = field.mined(ids[i]);
-        d[i] = if mined[i] {
-            MINED_DENSITY
-        } else {
-            natural_density(data.smooth_height(face, u, v), layer + dz)
-        };
+        (d[i], mined[i]) = field.sample(ids[i]);
         if d[i] > ISO {
             case |= 1 << i;
         }
@@ -695,6 +709,43 @@ mod tests {
                 });
             }
         }
+        assert_manifold(&planet);
+    }
+
+    // mining the top block of a column in a dip opens it: the smooth surface there lies above the
+    // block (smooth_height > h + 0.5 draws the air cell h + 1 solid, and air can't be mined), so the
+    // cells above a mined column top are carved too; the pit stays a closed manifold
+    #[test]
+    fn mining_a_dip_opens_it() {
+        let mut planet = PlanetData::new(64);
+        let res = planet.resolution;
+        let (u, v, h) = (2..res - 2)
+            .flat_map(|v| (2..res - 2).map(move |u| (u, v)))
+            .map(|(u, v)| (u, v, planet.effective_height(0, u, v)))
+            .find(|&(u, v, h)| planet.smooth_height(0, u, v) > h as f32 + 0.6)
+            .expect("no dip");
+        let dir = CoordSystem::get_block_center(0, u, v, h, res).normalize();
+        let before = MeshIndex::new(&mesh_planet(&planet), res)
+            .hit(dir, res as f32 * 2.0)
+            .unwrap();
+        assert!(before > CoordSystem::get_layer_radius(h + 1, res) + 0.05);
+        planet
+            .remove_block(BlockId {
+                face: 0,
+                layer: h,
+                u,
+                v,
+            })
+            .unwrap();
+        let r = MeshIndex::new(&mesh_planet(&planet), res)
+            .hit(dir, res as f32 * 2.0)
+            .unwrap();
+        // the pit's floor is the top of block h - 1
+        assert!(
+            r < CoordSystem::get_layer_radius(h, res) + 0.05,
+            "({u}, {v}) still covered: hit {r}, block top {}",
+            CoordSystem::get_layer_radius(h + 1, res)
+        );
         assert_manifold(&planet);
     }
 
