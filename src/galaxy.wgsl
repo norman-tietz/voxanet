@@ -148,6 +148,7 @@ struct PlanetVertexOut {
     @location(0) local_pos: vec3<f32>,    // planet frame (the mesh is built there)
     @location(1) local_normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) @interpolate(flat) flat_color: vec3<f32>,
 }
 
 @vertex
@@ -162,32 +163,44 @@ fn vs_planet(
     out.local_pos = pos;
     out.local_normal = normal;
     out.color = color;
+    out.flat_color = color;
     return out;
+}
+
+// low-poly impostors: the facet's own normal from screen-space derivatives, oriented like the vertex
+// normal (called first thing in the fragment entry points, in uniform control flow)
+fn facet_normal(in: PlanetVertexOut) -> vec3<f32> {
+    let n = normalize(in.local_normal);
+    let f = cross(dpdx(in.local_pos), dpdy(in.local_pos));
+    if (dot(f, f) <= 0.0) {
+        return n;
+    }
+    let fl = normalize(f);
+    return select(-fl, fl, dot(fl, n) >= 0.0);
 }
 
 // the voxel engine's shade() (shader.wgsl) without what an impostor can't have: ray-traced shadows,
 // caustics and the per-voxel grain — sun, sky ambient, rim, cloud shadow and air fog are the same
 @fragment
 fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(planet_color(in), 1.0);
+    return vec4<f32>(planet_color(in, facet_normal(in)), 1.0);
 }
 
 // the landing handover's cross-fade (GalaxyRenderer::draw_handover_overlay): the near impostor blended
 // over the finished voxel frame at camera.screen.w opacity, fading out
 @fragment
 fn fs_planet_overlay(in: PlanetVertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(planet_color(in), camera.screen.w);
+    return vec4<f32>(planet_color(in, facet_normal(in)), camera.screen.w);
 }
 
-fn planet_color(in: PlanetVertexOut) -> vec3<f32> {
+fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let a = planet_atmosphere();
     let cam = planet_frame_camera();
     let L = planet_frame_light();
     let t = camera.screen.z;
-    let N = normalize(in.local_normal);
     let V = normalize(cam - in.local_pos);
 
-    let albedo = pow(in.color, vec3<f32>(2.2));
+    let albedo = pow(in.flat_color, vec3<f32>(2.2));
     let NdotL = max(dot(N, L), 0.0);
     let direct = a.sun_color * NdotL * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
@@ -197,7 +210,7 @@ fn planet_color(in: PlanetVertexOut) -> vec3<f32> {
     var lit = albedo * (direct + ambient + rim);
     // a glowing liquid (lava) is emissive like the engine's (fs_water); impostor vertices carry the
     // liquid colour itself, so match on it, fading over shore blends
-    let glowing = planet.glow.w * (1.0 - smoothstep(0.0, 0.3, distance(in.color, planet.glow.rgb)));
+    let glowing = planet.glow.w * (1.0 - smoothstep(0.0, 0.3, distance(in.flat_color, planet.glow.rgb)));
     lit = mix(lit, planet.glow_emission.rgb, glowing);
     var color = atmo_air_fog(lit, in.local_pos, cam, L, a);
 
