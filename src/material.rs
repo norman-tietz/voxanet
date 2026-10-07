@@ -97,32 +97,24 @@ fn jitter(face: u8, u: u32, v: u32) -> f32 {
     top * (1.0 - ty) + bottom * ty
 }
 
-// the type of the top block of a column
-pub fn surface_type(
+// shared material band logic for cube and low-poly terrain
+// `steep`: true if terrain has a step (from neighboring heights) or facet is steep (up_dot < STEEP_FACET)
+fn material_band(
     terrain: &PlanetTerrain,
     palette: &Palette,
     face: u8,
     u: u32,
     v: u32,
+    height: f32,
+    steep: bool,
 ) -> BlockType {
-    let h = terrain.get_height(face, u, v);
     let sea = terrain.sea_level() as f32;
     let peak = (terrain.height_range().1 as f32 - sea).max(1.0);
     let j = jitter(face, u, v);
-    let above_sea = h as f32 - sea;
-    let rel = above_sea / peak + j * 0.04; // borders wander by about 4% of the relief
-                                           // beaches and underwater floors follow the column's own water: a lake's shore, else the sea's
-    let above_water = h as f32 - terrain.water_level(face, u, v) as f32;
+    let rel = (height - sea) / peak + j * 0.04; // borders wander by about 4% of the relief
+                                                // beaches and underwater floors follow the column's own water: a lake's shore, else the sea's
+    let above_water = height - terrain.water_level(face, u, v) as f32;
     let beach = (BEACH * peak).min(MAX_BEACH);
-
-    let neighbours = [
-        terrain.get_height(face, u.saturating_sub(1), v),
-        terrain.get_height(face, u + 1, v),
-        terrain.get_height(face, u, v.saturating_sub(1)),
-        terrain.get_height(face, u, v + 1),
-    ];
-    let steep = neighbours.iter().any(|&n| h >= n + STEEP);
-
     if rel >= SNOW_LINE {
         palette.peak
     } else if steep || rel >= ROCK_LINE {
@@ -132,6 +124,25 @@ pub fn surface_type(
     } else {
         palette.ground
     }
+}
+
+// the type of the top block of a column
+pub fn surface_type(
+    terrain: &PlanetTerrain,
+    palette: &Palette,
+    face: u8,
+    u: u32,
+    v: u32,
+) -> BlockType {
+    let h = terrain.get_height(face, u, v);
+    let neighbours = [
+        terrain.get_height(face, u.saturating_sub(1), v),
+        terrain.get_height(face, u + 1, v),
+        terrain.get_height(face, u, v.saturating_sub(1)),
+        terrain.get_height(face, u, v + 1),
+    ];
+    let steep = neighbours.iter().any(|&n| h >= n + STEEP);
+    material_band(terrain, palette, face, u, v, h as f32, steep)
 }
 
 // the natural type of a terrain block (layer <= column height)
@@ -171,21 +182,8 @@ pub fn lowpoly_material(
     height: f32,
     up_dot: f32,
 ) -> BlockType {
-    let sea = terrain.sea_level() as f32;
-    let peak = (terrain.height_range().1 as f32 - sea).max(1.0);
-    let j = jitter(face, u, v);
-    let rel = (height - sea) / peak + j * 0.04;
-    let above_water = height - terrain.water_level(face, u, v) as f32;
-    let beach = (BEACH * peak).min(MAX_BEACH);
-    if rel >= SNOW_LINE {
-        palette.peak
-    } else if up_dot < STEEP_FACET || rel >= ROCK_LINE {
-        palette.rock
-    } else if above_water <= beach * (1.0 + 0.5 * j) {
-        palette.beach
-    } else {
-        palette.ground
-    }
+    let steep = up_dot < STEEP_FACET;
+    material_band(terrain, palette, face, u, v, height, steep)
 }
 
 // selectable with the number keys 1.. on the active planet type
