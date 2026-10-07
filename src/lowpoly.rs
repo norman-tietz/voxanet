@@ -919,6 +919,17 @@ mod tests {
         assert!(sum / n < 0.15, "mean {}", sum / n);
     }
 
+    // the game's start planet (galaxy seed 1, planet #1, Earth-like, res 337): larger and steeper than
+    // the small test planets above. Slow in a debug build (~25 s), hence ignored; run with
+    // cargo test --release start_planet_is_a_closed_manifold -- --ignored
+    #[test]
+    #[ignore]
+    fn start_planet_is_a_closed_manifold() {
+        let planet = crate::galaxy::Galaxy::generate(1).planets[0].bake();
+        assert_eq!(planet.resolution, 337);
+        assert_manifold(&planet);
+    }
+
     // meshing cost of every chunk of a radius-128 planet in both styles (cargo test --release
     // lowpoly_bench -- --ignored --nocapture)
     #[test]
