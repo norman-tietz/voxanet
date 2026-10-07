@@ -1720,21 +1720,7 @@ impl Renderer {
 
     pub fn refresh_neighbors(&mut self, id: BlockId, planet: &PlanetData) {
         self.rt_dirty = true;
-        // the block's own chunk and the chunks of its four neighbours, which may lie on another cube face
-        let mut keys = vec![PlanetData::chunk_key(id)];
-        for (du, dv) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            if let Some((face, u, v)) = planet.neighbor_column(id.face, id.u, id.v, du, dv) {
-                let key = PlanetData::chunk_key(BlockId {
-                    face,
-                    u,
-                    v,
-                    layer: 0,
-                });
-                if !keys.contains(&key) {
-                    keys.push(key);
-                }
-            }
-        }
+        let keys = chunks_to_refresh(id, planet);
         for key in keys {
             if self.chunks.contains_key(&key) {
                 let (v, i) = MeshGen::build_chunk(key, planet);
@@ -3196,6 +3182,40 @@ impl Renderer {
     }
 }
 
+// the chunks whose meshes an edit of block `id` changes: its own and those of its eight neighbouring
+// columns, which may lie on another cube face. The diagonals matter for the low-poly mesher: the cell
+// between four columns belongs to the chunk of its smallest column, so editing block (32k, 32k) changes
+// a cell of the chunk diagonally below. Across a cube-face edge the diagonal is stepped on from the
+// neighbour that stays on the face, like the mesher does (CoordSystem::neighbor_column's diagonals are
+// unreliable where only one axis crosses an edge); at a three-face corner there is none
+pub(crate) fn chunks_to_refresh(id: BlockId, planet: &PlanetData) -> HashSet<ChunkKey> {
+    let key = |(face, u, v): (u8, u32, u32)| {
+        PlanetData::chunk_key(BlockId {
+            face,
+            u,
+            v,
+            layer: 0,
+        })
+    };
+    let mut keys = HashSet::from([PlanetData::chunk_key(id)]);
+    let column = |du: i32, dv: i32| planet.neighbor_column(id.face, id.u, id.v, du, dv);
+    for (su, sv) in [(1i32, 1i32), (-1, 1), (1, -1), (-1, -1)] {
+        let (c1, c3) = (column(su, 0), column(0, sv));
+        keys.extend(c1.into_iter().chain(c3).map(key));
+        let (Some(c1), Some(c3)) = (c1, c3) else {
+            continue;
+        };
+        let diagonal = match (c1.0 == id.face, c3.0 == id.face) {
+            (true, true) => column(su, sv),
+            (false, true) => planet.neighbor_column(c3.0, c3.1, c3.2, su, 0),
+            (true, false) => planet.neighbor_column(c1.0, c1.1, c1.2, 0, sv),
+            (false, false) => None,
+        };
+        keys.extend(diagonal.map(key));
+    }
+    keys
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -3208,6 +3228,53 @@ pub(crate) mod tests {
         assert!(all_voxel(2 * 40));
         assert!(!all_voxel(2 * 300));
         assert!(!all_voxel(2 * 500));
+    }
+
+    // an edit refreshes the chunks of all eight neighbouring columns: at a chunk corner the four chunks
+    // around it (the low-poly cell between them belongs to the diagonal one), on a cube-face edge the
+    // other face's chunks too
+    #[test]
+    fn edits_refresh_the_diagonal_chunks() {
+        let planet = PlanetData::new(128);
+        let k = |face: u8, u_idx: u32, v_idx: u32| ChunkKey { face, u_idx, v_idx };
+        let at = |face: u8, u: u32, v: u32| BlockId {
+            face,
+            layer: 60,
+            u,
+            v,
+        };
+        let corner = chunks_to_refresh(at(0, 32, 32), &planet);
+        assert_eq!(
+            corner,
+            HashSet::from([k(0, 0, 0), k(0, 1, 0), k(0, 0, 1), k(0, 1, 1)])
+        );
+        // inside a chunk: only its own
+        assert_eq!(
+            chunks_to_refresh(at(0, 40, 40), &planet),
+            HashSet::from([k(0, 1, 1)])
+        );
+        // on a face edge at a chunk corner: both chunks of this face and the other face's chunks across
+        // the edge, diagonals included (stepped from the in-face neighbour)
+        let edge = chunks_to_refresh(at(0, 0, 32), &planet);
+        assert!(edge.contains(&k(0, 0, 0)) && edge.contains(&k(0, 0, 1)));
+        let across: HashSet<ChunkKey> = [(0u32, 31u32), (0, 32), (0, 33)]
+            .into_iter()
+            .filter_map(|(u, v)| planet.neighbor_column(0, u, v, -1, 0))
+            .map(|(f, u, v)| PlanetData::chunk_key(at(f, u, v)))
+            .collect();
+        assert!(across.iter().all(|c| c.face != 0));
+        assert!(across.is_subset(&edge), "{across:?} not in {edge:?}");
+        assert_eq!(edge.len(), 2 + across.len());
+        // a three-face cube corner: no diagonal, but both other faces
+        let cube_corner = chunks_to_refresh(at(0, 0, 0), &planet);
+        assert_eq!(
+            cube_corner
+                .iter()
+                .map(|c| c.face)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
     }
 
     // geomorphing: a LOD node starts with its parent's shape where it appears (its parent splits) and
