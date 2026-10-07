@@ -811,6 +811,7 @@ impl MeshGen {
         data: &PlanetData,
         gx: i32,
         gy: i32,
+        style: crate::lowpoly::TerrainStyle,
     ) -> (glam::Vec3, glam::Vec3, [f32; 3]) {
         let def = data.planet_type.def();
         let grid_res = Self::LOD_GRID;
@@ -824,6 +825,29 @@ impl MeshGen {
             // calculate absolute U/V
             let abs_u = (key.x as i64 + step_u).clamp(0, data.resolution as i64) as u32;
             let abs_v = (key.y as i64 + step_v).clamp(0, data.resolution as i64) as u32;
+
+            if style == crate::lowpoly::TerrainStyle::LowPoly
+                && !data.column_edited(
+                    key.face,
+                    abs_u.min(data.resolution - 1),
+                    abs_v.min(data.resolution - 1),
+                )
+            {
+                // the low-poly surface at this column corner, or the water surface above it
+                let land = crate::lowpoly::surface_radius(
+                    data.smooth_corner(key.face, abs_u, abs_v),
+                    data.resolution,
+                );
+                let water = match def.liquid {
+                    Some(_) => CoordSystem::get_layer_radius(
+                        data.terrain.water_level(key.face, abs_u, abs_v) + 1,
+                        data.resolution,
+                    ),
+                    None => 0.0,
+                };
+                return CoordSystem::get_direction(key.face, abs_u, abs_v, data.resolution)
+                    * land.max(water);
+            }
 
             // the edited surface (natural height where unedited, LOD surfaces sit at layer h like the
             // land); oceans, lakes and liquid-less basins are flat at their water level from afar
@@ -901,6 +925,19 @@ impl MeshGen {
                 // basin, or edits that dug below sea level
                 None => def.palette.beach.color(),
             }
+        } else if style == crate::lowpoly::TerrainStyle::LowPoly
+            && !data.column_edited(key.face, su, sv)
+        {
+            crate::material::lowpoly_material(
+                &data.terrain,
+                &def.palette,
+                key.face,
+                su,
+                sv,
+                data.smooth_height(key.face, su, sv),
+                slope,
+            )
+            .color()
         } else {
             let below = data
                 .block_type(BlockId {
@@ -925,11 +962,20 @@ impl MeshGen {
         data: &PlanetData,
         logical_size: u32,
     ) -> Vec<LodMorph> {
+        Self::generate_lod_morph_styled(key, data, logical_size, crate::lowpoly::style())
+    }
+
+    pub fn generate_lod_morph_styled(
+        key: crate::common::LodKey,
+        data: &PlanetData,
+        logical_size: u32,
+        style: crate::lowpoly::TerrainStyle,
+    ) -> Vec<LodMorph> {
         let grid = Self::LOD_GRID;
         let row_len = grid + 1;
         let own: Vec<_> = (0..=grid)
             .flat_map(|y| (0..=grid).map(move |x| (x, y)))
-            .map(|(x, y)| Self::lod_sample(key, data, x as i32, y as i32))
+            .map(|(x, y)| Self::lod_sample(key, data, x as i32, y as i32, style))
             .collect();
         let mut targets: Vec<LodMorph> = if key.size >= logical_size {
             own.iter()
@@ -953,7 +999,13 @@ impl MeshGen {
             let psamples: Vec<_> = (0..half)
                 .flat_map(|y| (0..half).map(move |x| (x, y)))
                 .map(|(x, y)| {
-                    Self::lod_sample(parent, data, (ox / 2 + x) as i32, (oy / 2 + y) as i32)
+                    Self::lod_sample(
+                        parent,
+                        data,
+                        (ox / 2 + x) as i32,
+                        (oy / 2 + y) as i32,
+                        style,
+                    )
                 })
                 .collect();
             let p = |hx: u32, hy: u32| psamples[((hy - oy) / 2 * half + (hx - ox) / 2) as usize];
@@ -999,6 +1051,14 @@ impl MeshGen {
         key: crate::common::LodKey,
         data: &PlanetData,
     ) -> (Vec<Vertex>, Vec<u32>) {
+        Self::generate_lod_mesh_styled(key, data, crate::lowpoly::style())
+    }
+
+    pub fn generate_lod_mesh_styled(
+        key: crate::common::LodKey,
+        data: &PlanetData,
+        style: crate::lowpoly::TerrainStyle,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
 
@@ -1008,7 +1068,7 @@ impl MeshGen {
         // 1. Generate Vertices
         for vy in 0..=grid_res {
             for ux in 0..=grid_res {
-                let (pos, normal, color) = Self::lod_sample(key, data, ux as i32, vy as i32);
+                let (pos, normal, color) = Self::lod_sample(key, data, ux as i32, vy as i32, style);
                 verts.push(Vertex {
                     pos: pos.to_array(),
                     color,
@@ -1575,7 +1635,8 @@ mod biome_tests {
         let mut planet = PlanetData::new(64);
         let (face, u, v) = crate::common::tests::first_land_column(&planet, 1);
         let key = lod_key_for(face, u, v);
-        let (before, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let (before, _) =
+            MeshGen::generate_lod_mesh_styled(key, &planet, crate::lowpoly::TerrainStyle::Cubes);
         let h = planet.terrain.get_height(face, u, v);
         let top = (h + 4).min(planet.build_ceiling());
         assert!(
@@ -1590,7 +1651,8 @@ mod biome_tests {
                 )
                 .unwrap();
         }
-        let (after, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let (after, _) =
+            MeshGen::generate_lod_mesh_styled(key, &planet, crate::lowpoly::TerrainStyle::Cubes);
         let raised = before.iter().zip(&after).any(|(a, b)| {
             glam::Vec3::from(b.pos).length() > glam::Vec3::from(a.pos).length() + 1.0
         });
@@ -1620,7 +1682,11 @@ mod biome_tests {
                 y: 0,
                 size,
             };
-            let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+            let (verts, _) = MeshGen::generate_lod_mesh_styled(
+                key,
+                &planet,
+                crate::lowpoly::TerrainStyle::Cubes,
+            );
             // the 65 x 65 grid (skirt vertices follow it)
             for (k, vert) in verts.iter().take((row * row) as usize).enumerate() {
                 let (ux, vy) = (k as u32 % row, k as u32 / row);
@@ -1668,7 +1734,8 @@ mod biome_tests {
             y: 0,
             size: 64,
         };
-        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let (verts, _) =
+            MeshGen::generate_lod_mesh_styled(key, &planet, crate::lowpoly::TerrainStyle::Cubes);
         let sea = planet.terrain.sea_level();
         let def = planet.planet_type.def();
         // vertex 0 samples column (0, 0)
@@ -1744,7 +1811,8 @@ mod biome_tests {
             y: v - v % 64,
             size: 64,
         };
-        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
+        let (verts, _) =
+            MeshGen::generate_lod_mesh_styled(key, &planet, crate::lowpoly::TerrainStyle::Cubes);
         let vx = verts[((v - key.y) * 65 + (u - key.x)) as usize];
         let level = planet.terrain.water_level(face, u, v);
         let expected = CoordSystem::get_vertex_pos(face, u, v, level, planet.resolution).length();
@@ -1785,8 +1853,7 @@ mod biome_tests {
 
     // at morph factor 1 a LOD node shows its parent's surface: even vertices sit on the parent's own
     // vertices, odd ones (moved along their own up) on the parent's triangles
-    #[test]
-    fn lod_morph_targets_lie_on_the_parent_mesh() {
+    fn check_lod_morph_targets(style: crate::lowpoly::TerrainStyle) {
         let planet = PlanetData::new(256);
         let parent = crate::common::LodKey {
             face: 2,
@@ -1800,9 +1867,9 @@ mod biome_tests {
             y: 64,
             size: 64,
         };
-        let (pv, _) = MeshGen::generate_lod_mesh(parent, &planet);
-        let (verts, _) = MeshGen::generate_lod_mesh(key, &planet);
-        let morph = MeshGen::generate_lod_morph(key, &planet, 256);
+        let (pv, _) = MeshGen::generate_lod_mesh_styled(parent, &planet, style);
+        let (verts, _) = MeshGen::generate_lod_mesh_styled(key, &planet, style);
+        let morph = MeshGen::generate_lod_morph_styled(key, &planet, 256, style);
         assert_eq!(morph.len(), verts.len());
         let grid = MeshGen::LOD_GRID;
         let pos =
@@ -1832,6 +1899,17 @@ mod biome_tests {
         }
     }
 
+    #[test]
+    fn lod_morph_targets_lie_on_the_parent_mesh() {
+        check_lod_morph_targets(crate::lowpoly::TerrainStyle::Cubes);
+    }
+
+    // geomorphing keeps working on the smooth low-poly heights
+    #[test]
+    fn lod_morph_targets_lie_on_the_parent_mesh_lowpoly() {
+        check_lod_morph_targets(crate::lowpoly::TerrainStyle::LowPoly);
+    }
+
     // a root node has no parent: it morphs to itself
     #[test]
     fn root_lod_nodes_morph_to_themselves() {
@@ -1842,8 +1920,13 @@ mod biome_tests {
             y: 0,
             size: 64,
         };
-        assert!(MeshGen::generate_lod_morph(key, &planet, 64)
-            .iter()
-            .all(|m| m.height == 0.0));
+        assert!(MeshGen::generate_lod_morph_styled(
+            key,
+            &planet,
+            64,
+            crate::lowpoly::TerrainStyle::Cubes
+        )
+        .iter()
+        .all(|m| m.height == 0.0));
     }
 }

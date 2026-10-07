@@ -883,4 +883,39 @@ mod tests {
         }
         assert!(found > 0, "no facets over the lake column");
     }
+
+    // LOD vertices lie on the voxel low-poly surface (column corners: the mean smooth height of the four
+    // columns there), so the LOD hand-over keeps the shape
+    #[test]
+    fn lod_vertices_lie_on_the_voxel_surface() {
+        let planet = PlanetData::new(64);
+        let index = MeshIndex::new(&mesh_planet(&planet), 64);
+        let key = crate::common::LodKey {
+            face: 0,
+            x: 0,
+            y: 0,
+            size: 64,
+        };
+        let (lod, _) =
+            crate::gen::MeshGen::generate_lod_mesh_styled(key, &planet, TerrainStyle::LowPoly);
+        let (mut worst, mut sum, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        // grid vertices only (the skirt vertices follow them); interior, dry land
+        for vy in 2..63u32 {
+            for vx in 2..63u32 {
+                let p = Vec3::from_array(lod[(vy * 65 + vx) as usize].pos);
+                if planet.terrain.water_level(0, vx, vy) >= planet.terrain.get_height(0, vx, vy) {
+                    continue;
+                }
+                let r = index.hit(p.normalize(), 128.0).unwrap();
+                let err = (p.length() - r).abs();
+                worst = worst.max(err);
+                sum += err;
+                n += 1.0;
+            }
+        }
+        println!("lod vs voxel: n {n} worst {worst} mean {}", sum / n);
+        assert!(n > 500.0);
+        assert!(worst < 0.5, "worst {worst}");
+        assert!(sum / n < 0.15, "mean {}", sum / n);
+    }
 }
