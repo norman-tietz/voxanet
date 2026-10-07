@@ -35,25 +35,23 @@ pub fn set_style(s: TerrainStyle) {
 pub const ISO: f32 = 0.5;
 
 // the density of a natural (unmined) cell at `layer` in a column of smooth height `smooth_height`:
-// 1 up to the smooth height's layer, 0 two layers above, linear between — so flat ground (an integer
-// smooth height) crosses ISO exactly at the block tops
+// linear, falling by one per layer and unclamped, crossing ISO at layer coordinate smooth_height + 1
+// over the column centre — so flat ground (an integer smooth height) lies exactly on the block tops, and
+// between two columns the surface interpolates their heights however steep the slope (a 0..1 clamp
+// saturated where neighbours differ by a layer or more and pinned those crossings to the midpoint:
+// stair steps with near-vertical risers)
 pub fn natural_density(smooth_height: f32, layer: u32) -> f32 {
-    (smooth_height - layer as f32 + 1.0).clamp(0.0, 1.0)
+    smooth_height - layer as f32 + 1.0
 }
 
 // where the surface crosses a column of smooth height `smooth_height`: the solid cell's layer and the
 // fraction (0..1) of the way to the centre of the empty cell above it
 pub fn crossing(smooth_height: f32) -> (u32, f32) {
     let h = smooth_height.max(0.0);
-    let base = h.floor();
-    let frac = h - base;
-    if frac <= ISO {
-        // between `base` (density 1) and base + 1 (density frac, not solid: solid is > ISO)
-        (base as u32, (1.0 - ISO) / (1.0 - frac))
-    } else {
-        // between base + 1 (density frac) and base + 2 (density 0)
-        (base as u32 + 1, (frac - ISO) / frac)
-    }
+    // the highest solid layer (density > ISO, i.e. layer < h + 1 - ISO); the densities of it and the
+    // layer above differ by exactly 1
+    let layer = ((h + 1.0 - ISO).ceil() - 1.0).max(0.0);
+    (layer as u32, h - layer + 1.0 - ISO)
 }
 
 // the radius of the low-poly surface over a column of smooth height `smooth_height`: the marching-cubes
@@ -65,6 +63,9 @@ pub fn surface_radius(smooth_height: f32, res: u32) -> f32 {
     let above = CoordSystem::get_layer_radius_f(layer as f32 + 1.5, res);
     below + (above - below) * t
 }
+
+// the density of a mined cell: anything below ISO (only its sign is used, see Field::density)
+const MINED_DENSITY: f32 = 0.0;
 
 // a facet whose open side has solid cells within this many layers above is darkened (caves, tunnels,
 // overhangs, under builds) by COVER_DARKEN, like the cubes' sky term
@@ -172,9 +173,11 @@ impl<'a> Field<'a> {
         self.mods(id).is_some_and(|m| m.mined.contains(&id))
     }
 
+    // mined cells are empty (MINED_DENSITY); cell() puts the vertices on their edges half-way, at the
+    // block boundary, since the unclamped natural density says nothing about where a wall should be
     fn density(&self, id: BlockId) -> f32 {
         if self.mined(id) {
-            0.0
+            MINED_DENSITY
         } else {
             natural_density(self.data.smooth_height(id.face, id.u, id.v), id.layer)
         }
@@ -203,6 +206,7 @@ fn cell(
         v: 0,
     }; 8];
     let mut d = [0.0f32; 8];
+    let mut mined = [false; 8];
     let mut case = 0usize;
     for (i, &(dx, dy, dz)) in CUBE_CORNER_OFFSETS.iter().enumerate() {
         let (face, u, v) = match (dx, dy) {
@@ -217,7 +221,12 @@ fn cell(
             v,
             layer: layer + dz,
         };
-        d[i] = field.density(ids[i]);
+        mined[i] = field.mined(ids[i]);
+        d[i] = if mined[i] {
+            MINED_DENSITY
+        } else {
+            natural_density(data.smooth_height(face, u, v), layer + dz)
+        };
         if d[i] > ISO {
             case |= 1 << i;
         }
@@ -238,13 +247,18 @@ fn cell(
             let (a, b) = EDGE_VERTEX_PAIRS[e as usize];
             let (s, o) = if case >> a & 1 == 1 { (a, b) } else { (b, a) };
             let (ps, po) = (centre(ids[s]), centre(ids[o]));
-            let t = ((d[s] - ISO) / (d[s] - d[o]).max(1e-6)).clamp(0.0, 1.0);
+            // into a mined cell: half-way, the block boundary (pit and tunnel walls)
+            let t = if mined[o] {
+                0.5
+            } else {
+                ((d[s] - ISO) / (d[s] - d[o]).max(1e-6)).clamp(0.0, 1.0)
+            };
             p[k] = ps + (po - ps) * t;
             outward += po - ps;
             if top_solid.is_none_or(|ts| ids[s].layer > ts.layer) {
                 top_solid = Some(ids[s]);
             }
-            wall |= field.mined(ids[o]);
+            wall |= mined[o];
             open = ids[o];
         }
         // a cell at a cube corner repeats a column, so some of its triangles collapse or double up
@@ -561,9 +575,18 @@ mod tests {
         );
     }
 
-    // the surface rises steadily with the smooth height, also across the half-layer switch
+    // the surface rises steadily with the smooth height, also across the switch to the next layer; over
+    // a column centre it sits at layer coordinate smooth height + 1 (between the centres it interpolates
+    // the radius linearly)
     #[test]
     fn surface_radius_is_continuous_and_rising() {
+        for h in [10.0f32, 10.25, 10.5, 10.75] {
+            let (l, t) = crossing(h);
+            assert!(
+                (l as f32 + 0.5 + t - (h + 1.0)).abs() < 1e-5,
+                "{h}: ({l}, {t})"
+            );
+        }
         let mut last = surface_radius(10.0, 32);
         for i in 1..=200 {
             let r = surface_radius(10.0 + i as f32 * 0.01, 32);
@@ -573,13 +596,16 @@ mod tests {
         }
     }
 
-    // density: solid at and below the smooth height's layer, empty two layers above
+    // density: linear, one less per layer up, unclamped; solid at and below the smooth height's layer,
+    // empty above it (17.3: the surface over the column centre is at layer coordinate 18.3, below the
+    // centre of layer 18)
     #[test]
     fn natural_density_brackets_the_smooth_height() {
-        assert_eq!(natural_density(17.3, 17), 1.0);
-        assert!((natural_density(17.3, 18) - 0.3).abs() < 1e-6);
-        assert_eq!(natural_density(17.3, 19), 0.0);
-        assert_eq!(natural_density(17.3, 3), 1.0);
+        assert!((natural_density(17.3, 17) - 1.3).abs() < 1e-5);
+        assert!((natural_density(17.3, 18) - 0.3).abs() < 1e-5);
+        assert!((natural_density(17.3, 19) + 0.7).abs() < 1e-5);
+        assert!((natural_density(17.3, 3) - 15.3).abs() < 1e-5);
+        assert!(natural_density(17.3, 17) > ISO && natural_density(17.3, 18) <= ISO);
     }
 
     // the crossing agrees with the density: interpolating the two cells' densities gives ISO
@@ -928,6 +954,162 @@ mod tests {
         let planet = crate::galaxy::Galaxy::generate(1).planets[0].bake();
         assert_eq!(planet.resolution, 337);
         assert_manifold(&planet);
+    }
+
+    // a planar ramp rising `slope` layers per column along u over face 0 (the rest of face 0 flattened
+    // onto its ends): its low-poly facets, as (normal · up, centroid) for those over columns 11..21
+    fn ramp_facets(slope: f32) -> Vec<(f32, Vec3)> {
+        let mut planet = PlanetData::new(64);
+        let res = planet.resolution;
+        let mut smooth = (*planet.smooth).clone();
+        for v in 0..res {
+            for u in 0..res {
+                smooth[(v * res + u) as usize] = 16.0 + slope * (u.clamp(8, 24) as f32 - 16.0);
+            }
+        }
+        planet.smooth = std::sync::Arc::new(smooth);
+        let (verts, inds) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            &planet,
+        );
+        let mut out = Vec::new();
+        for t in inds.chunks_exact(3) {
+            let c = t
+                .iter()
+                .map(|&i| Vec3::from_array(verts[i as usize].pos))
+                .sum::<Vec3>()
+                / 3.0;
+            let col = CoordSystem::pos_to_id(c, res).unwrap();
+            if col.face == 0 && (11..=21).contains(&col.u) && (11..=21).contains(&col.v) {
+                let up = Vec3::from_array(verts[t[0] as usize].normal).dot(c.normalize());
+                out.push((up, c));
+            }
+        }
+        assert!(!out.is_empty());
+        out
+    }
+
+    // a steep but even slope is one sloped plane of facets, not stair steps: with columns 1.5 and 2.5
+    // layers apart (56° and 68° in layer units) every facet tilts alike (normal · up within 0.1; the
+    // spread is the planet's curvature and the layers' changing thickness). The old 0..1-clamped density
+    // pinned crossings between such columns to the midpoint: treads and risers, normal · up spread over
+    // 0.37..0.67 at 1.5 and 0 (vertical risers)..0.67 at 2.5
+    #[test]
+    fn steep_even_slopes_are_one_sloped_plane() {
+        for slope in [1.5f32, 2.5] {
+            let f = ramp_facets(slope);
+            let lo = f.iter().map(|x| x.0).fold(f32::MAX, f32::min);
+            let hi = f.iter().map(|x| x.0).fold(f32::MIN, f32::max);
+            assert!(
+                hi - lo < 0.1,
+                "slope {slope}: normal·up spread over {lo}..{hi}"
+            );
+        }
+    }
+
+    // over the steepest-sloped chunk of the game's start planet, near-vertical facets (normal · up < 0.3)
+    // cover little area: 7.0 % with the linear density, 13.7 % with the old clamped one (and over the
+    // whole planet 0.19 % vs 1.0 %)
+    #[test]
+    fn start_planet_slopes_have_few_near_vertical_facets() {
+        let planet = crate::galaxy::Galaxy::generate(1).planets[0].bake();
+        let res = planet.resolution;
+        let n = res.div_ceil(CHUNK_SIZE);
+        // the chunk with the most face-0 neighbour pairs one to two smooth layers apart (45–63°)
+        let steep = |key: &ChunkKey| {
+            let mut count = 0;
+            for u in key.u_idx * CHUNK_SIZE..((key.u_idx + 1) * CHUNK_SIZE).min(res - 1) {
+                for v in key.v_idx * CHUNK_SIZE..((key.v_idx + 1) * CHUNK_SIZE).min(res - 1) {
+                    let h = planet.smooth_height(key.face, u, v);
+                    for (du, dv) in [(1, 0), (0, 1)] {
+                        let d = (h - planet.smooth_height(key.face, u + du, v + dv)).abs();
+                        count += (1.0..2.0).contains(&d) as u32;
+                    }
+                }
+            }
+            count
+        };
+        let key = (0..n)
+            .flat_map(|u_idx| {
+                (0..n).map(move |v_idx| ChunkKey {
+                    face: 0,
+                    u_idx,
+                    v_idx,
+                })
+            })
+            .max_by_key(steep)
+            .unwrap();
+        let (verts, inds) = build_chunk_lowpoly(key, &planet);
+        let (mut area, mut vertical) = (0.0f32, 0.0f32);
+        for t in inds.chunks_exact(3) {
+            let p = [0, 1, 2].map(|k| Vec3::from_array(verts[t[k] as usize].pos));
+            let a = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
+            let up = Vec3::from_array(verts[t[0] as usize].normal)
+                .dot(((p[0] + p[1] + p[2]) / 3.0).normalize());
+            area += a;
+            if up < 0.3 {
+                vertical += a;
+            }
+        }
+        assert!(
+            vertical / area < 0.09,
+            "{key:?}: {:.1} % of the area near-vertical",
+            vertical / area * 100.0
+        );
+    }
+
+    // a mined pit's walls sit at the block boundary between the solid and the mined cell: the wall
+    // vertex on a horizontal edge from a solid into a mined block centre is half-way
+    #[test]
+    fn pit_walls_sit_at_the_block_boundary() {
+        let mut planet = PlanetData::new(64);
+        let (u, v) = (10u32, 12u32);
+        let top = planet.surface(0, u, v);
+        for layer in top - 2..=top {
+            planet
+                .remove_block(BlockId {
+                    face: 0,
+                    layer,
+                    u,
+                    v,
+                })
+                .unwrap();
+        }
+        let res = planet.resolution;
+        let (verts, _) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            &planet,
+        );
+        let mut checked = 0;
+        for layer in top - 2..top {
+            // walls toward the four neighbours, at a mined layer well below the smooth surface
+            let pit = CoordSystem::get_block_center(0, u, v, layer, res);
+            for (nu, nv) in [(u + 1, v), (u - 1, v), (u, v + 1), (u, v - 1)] {
+                if planet.smooth_height(0, nu, nv) < layer as f32 + 1.0 {
+                    continue; // the neighbour isn't solid at this layer
+                }
+                let side = CoordSystem::get_block_center(0, nu, nv, layer, res);
+                let boundary = (pit + side) / 2.0;
+                let near = verts
+                    .iter()
+                    .map(|vx| (Vec3::from_array(vx.pos) - boundary).length());
+                let d = near.fold(f32::MAX, f32::min);
+                assert!(
+                    d < 0.25,
+                    "layer {layer} toward ({nu}, {nv}): nearest vertex {d} from the boundary"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
     }
 
     // meshing cost of every chunk of a radius-128 planet in both styles (cargo test --release
