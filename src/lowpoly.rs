@@ -111,11 +111,18 @@ pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Ve
                 let (Some(c1), Some(c3)) = (column(su, 0), column(0, sv)) else {
                     continue;
                 };
-                // at a three-face cube corner there is no fourth column: the cell closes on c1 twice
-                let c2 = column(su, sv)
-                    .filter(|c| *c != c1 && *c != c3)
-                    .unwrap_or(c1);
+                // the fourth column: across a cube-face edge neighbor_column's diagonal is unreliable at
+                // face-corner columns, so step on from the column that stays on the face. At a three-face
+                // cube corner there is no fourth column: the cell closes on c1 twice
                 let own = (key.face, u, v);
+                let c2 = match (c1.0 == own.0, c3.0 == own.0) {
+                    (true, true) => column(su, sv),
+                    (false, true) => data.neighbor_column(c3.0, c3.1, c3.2, su, 0),
+                    (true, false) => data.neighbor_column(c1.0, c1.1, c1.2, 0, sv),
+                    (false, false) => None,
+                }
+                .filter(|c| *c != c1 && *c != c3)
+                .unwrap_or(c1);
                 if [c1, c2, c3].iter().any(|c| *c < own) {
                     continue;
                 }
@@ -219,6 +226,7 @@ fn cell(
         return;
     }
     let def = data.planet_type.def();
+    let mut emitted: Vec<[[u32; 3]; 3]> = Vec::new();
     let centre = |id: BlockId| CoordSystem::get_block_center(id.face, id.u, id.v, id.layer, res);
     for tri in TRI_TABLE[case].chunks(3).take_while(|t| t[0] >= 0) {
         let mut p = [Vec3::ZERO; 3];
@@ -239,6 +247,16 @@ fn cell(
             wall |= field.mined(ids[o]);
             open = ids[o];
         }
+        // a cell at a cube corner repeats a column, so some of its triangles collapse or double up
+        if p[0] == p[1] || p[1] == p[2] || p[0] == p[2] {
+            continue;
+        }
+        let mut key = p.map(|q| q.to_array().map(f32::to_bits));
+        key.sort();
+        if emitted.contains(&key) {
+            continue;
+        }
+        emitted.push(key);
         let mut n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
         if n.dot(outward) < 0.0 {
             n = -n;
@@ -573,5 +591,296 @@ mod tests {
             assert!(a > ISO && b <= ISO, "{h}: {a} {b}");
             assert!((a + (b - a) * t - ISO).abs() < 1e-5, "{h}");
         }
+    }
+
+    // vertex positions quantised for matching shared corners
+    fn quant(p: [f32; 3]) -> [i64; 3] {
+        p.map(|c| (c as f64 * 1e4).round() as i64)
+    }
+
+    // terrain triangles (no placed blocks) as quantised vertex triples
+    fn terrain_triangles(planet: &PlanetData) -> Vec<[[i64; 3]; 3]> {
+        let mut out = Vec::new();
+        for (verts, inds) in mesh_planet(planet) {
+            for t in inds.chunks_exact(3) {
+                out.push([0, 1, 2].map(|k| quant(verts[t[k] as usize].pos)));
+            }
+        }
+        out
+    }
+
+    // each cell is built exactly once and the surface is closed: no two triangles share their vertices,
+    // and every undirected edge is used by exactly two triangles
+    fn assert_manifold(planet: &PlanetData) {
+        let tris = terrain_triangles(planet);
+        let mut seen = std::collections::HashSet::new();
+        let mut edges: std::collections::HashMap<([i64; 3], [i64; 3]), u32> = Default::default();
+        for t in &tris {
+            let mut sorted = *t;
+            sorted.sort();
+            assert!(seen.insert(sorted), "duplicate triangle {t:?}");
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                *edges
+                    .entry(if a < b { (a, b) } else { (b, a) })
+                    .or_default() += 1;
+            }
+        }
+        let bad: Vec<_> = edges.iter().filter(|(_, c)| **c != 2).collect();
+        let at = |p: [i64; 3]| {
+            let v = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32) / 1e4;
+            CoordSystem::pos_to_id(v, planet.resolution)
+        };
+        assert!(
+            bad.is_empty(),
+            "{} of {} edges not shared by two triangles, e.g. {:?}",
+            bad.len(),
+            edges.len(),
+            bad.iter()
+                .take(5)
+                .map(|(k, c)| (at(k.0), **c))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn low_poly_terrain_is_a_closed_manifold() {
+        assert_manifold(&PlanetData::new(32));
+        assert_manifold(&PlanetData::new(16));
+        assert_manifold(&PlanetData::new_for_type(
+            48,
+            crate::noise::HOME_SEED,
+            crate::biome::PlanetType::Ice,
+        ));
+    }
+
+    #[test]
+    fn mined_pits_keep_the_surface_a_closed_manifold() {
+        let mut planet = PlanetData::new(32);
+        let (u, v) = (10u32, 12u32);
+        let top = planet.surface(0, u, v);
+        for layer in top - 2..=top {
+            for (du, dv) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let _ = planet.remove_block(BlockId {
+                    face: 0,
+                    layer,
+                    u: u + du,
+                    v: v + dv,
+                });
+            }
+        }
+        assert_manifold(&planet);
+    }
+
+    // a flat-ish, dry grass column at least 3 layers above the sea, with a 7×7 neighbourhood inside one chunk of face 0
+    // within one layer of its height: (u, v, top layer)
+    fn tunnel_site(planet: &PlanetData) -> (u32, u32, u32) {
+        let def = planet.planet_type.def();
+        for v in 2..planet.resolution - 4 {
+            for u in 2..planet.resolution - 4 {
+                // the 7×7 neighbourhood stays inside one chunk
+                if u / CHUNK_SIZE != (u + 4) / CHUNK_SIZE
+                    || v / CHUNK_SIZE != (v + 4) / CHUNK_SIZE
+                    || u % CHUNK_SIZE < 2
+                    || v % CHUNK_SIZE < 2
+                {
+                    continue;
+                }
+                let h = planet.terrain.get_height(0, u, v);
+                let flat = (u - 2..=u + 4).all(|uu| {
+                    (v - 2..=v + 4).all(|vv| planet.terrain.get_height(0, uu, vv).abs_diff(h) <= 1)
+                });
+                if flat
+                    && h >= planet.terrain.sea_level() + 3
+                    && crate::material::surface_type(&planet.terrain, &def.palette, 0, u, v)
+                        == def.palette.ground
+                {
+                    return (u, v, planet.surface(0, u, v));
+                }
+            }
+        }
+        panic!("no flat grass site");
+    }
+
+    // 3×3 columns, three layers (top-4..top-2), closed above by two solid layers: a tunnel room
+    fn tunnel_planet() -> (PlanetData, (u32, u32, u32)) {
+        let mut planet = PlanetData::new(128);
+        let (u, v, top) = tunnel_site(&planet);
+        for layer in top - 4..=top - 2 {
+            for du in 0..3 {
+                for dv in 0..3 {
+                    planet
+                        .remove_block(BlockId {
+                            face: 0,
+                            layer,
+                            u: u + du,
+                            v: v + dv,
+                        })
+                        .unwrap();
+                }
+            }
+        }
+        (planet, (u, v, top))
+    }
+
+    // the room's facets: centroids between its floor and ceiling, over its columns
+    fn room_facets(
+        planet: &PlanetData,
+        (u, v, top): (u32, u32, u32),
+    ) -> (Vec<Vertex>, Vec<[usize; 3]>) {
+        let res = planet.resolution;
+        let (verts, inds) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: u / CHUNK_SIZE,
+                v_idx: v / CHUNK_SIZE,
+            },
+            planet,
+        );
+        let mut out = Vec::new();
+        for t in inds.chunks_exact(3) {
+            let c = t
+                .iter()
+                .map(|&i| Vec3::from_array(verts[i as usize].pos))
+                .sum::<Vec3>()
+                / 3.0;
+            let layer = CoordSystem::layer_of_radius(c.length(), res);
+            let Some(col) = CoordSystem::pos_to_id(c, res) else {
+                continue;
+            };
+            if col.face == 0
+                && (u..u + 3).contains(&col.u)
+                && (v..v + 3).contains(&col.v)
+                && layer > top as f32 - 4.5
+                && layer < top as f32 - 1.0
+            {
+                out.push([t[0] as usize, t[1] as usize, t[2] as usize]);
+            }
+        }
+        assert!(!out.is_empty(), "no facets in the room");
+        (verts, out)
+    }
+
+    // the room's walls take the colour of the solid block they are cut from (dirt/stone), not the
+    // surface material, and are darkened by COVER_DARKEN (solid cells above)
+    #[test]
+    fn tunnel_walls_use_the_block_type_and_are_covered() {
+        let (planet, site @ (u, v, top)) = tunnel_planet();
+        let def = planet.planet_type.def();
+        let (verts, facets) = room_facets(&planet, site);
+        // the block types the room is cut from
+        let mut solid: Vec<[f32; 3]> = Vec::new();
+        for layer in top - 5..=top - 1 {
+            for uu in u - 1..u + 4 {
+                for vv in v - 1..v + 4 {
+                    if let Some(t) = planet.block_type(BlockId {
+                        face: 0,
+                        layer,
+                        u: uu,
+                        v: vv,
+                    }) {
+                        solid.push(t.color().map(|c| c * COVER_DARKEN));
+                    }
+                }
+            }
+        }
+        let grass = def.palette.ground.color().map(|c| c * COVER_DARKEN);
+        for tri in &facets {
+            let c = verts[tri[0]].color;
+            assert_ne!(c, grass, "a wall took the surface material");
+            assert!(
+                solid.contains(&c),
+                "facet colour {c:?} is not a darkened block type of the room"
+            );
+        }
+    }
+
+    // a facet with open air above is not darkened (the surface)
+    #[test]
+    fn open_surface_facets_are_not_darkened() {
+        let planet = PlanetData::new(128);
+        let (u, v, _) = tunnel_site(&planet);
+        let (verts, inds) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: u / CHUNK_SIZE,
+                v_idx: v / CHUNK_SIZE,
+            },
+            &planet,
+        );
+        let def = planet.planet_type.def();
+        let ground = def.palette.ground.color();
+        assert!(
+            inds.iter().any(|&i| verts[i as usize].color == ground),
+            "no full-brightness ground facet"
+        );
+    }
+
+    // the room is mined below the smooth surface: deepest_mined extends the meshed layer range down to
+    // its floor
+    #[test]
+    fn deep_tunnels_are_meshed_down_to_their_floor() {
+        let (planet, (u, v, top)) = tunnel_planet();
+        let res = planet.resolution;
+        let (verts, _) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: u / CHUNK_SIZE,
+                v_idx: v / CHUNK_SIZE,
+            },
+            &planet,
+        );
+        let lowest = (u..u + 3)
+            .flat_map(|uu| (v..v + 3).map(move |vv| (uu, vv)))
+            .map(|(uu, vv)| planet.smooth_height(0, uu, vv).floor())
+            .fold(f32::MAX, f32::min);
+        let natural_floor = CoordSystem::get_layer_radius_f(lowest - 2.0, res);
+        assert!(top as f32 - 4.0 < lowest - 2.0);
+        assert!(
+            verts.iter().any(|vx| {
+                let p = Vec3::from_array(vx.pos);
+                CoordSystem::pos_to_id(p, res).is_some_and(|c| {
+                    c.face == 0 && (u..u + 3).contains(&c.u) && (v..v + 3).contains(&c.v)
+                }) && p.length() < natural_floor
+            }),
+            "no floor vertices below the natural range"
+        );
+    }
+
+    // lake-floor facets carry the water surface radius of their lake, so the shader can tint them
+    #[test]
+    fn lake_floor_facets_carry_the_water_radius() {
+        let (planet, (face, u, v)) =
+            crate::common::tests::lake_planet(crate::biome::PlanetType::EarthLike);
+        let res = planet.resolution;
+        let key = ChunkKey {
+            face,
+            u_idx: u / CHUNK_SIZE,
+            v_idx: v / CHUNK_SIZE,
+        };
+        let (verts, inds) = build_chunk_lowpoly(key, &planet);
+        let expected = planet.water_surface_radius(face, u, v);
+        assert!(expected > 0.0);
+        let mut found = 0;
+        for t in inds.chunks_exact(3) {
+            let c = t
+                .iter()
+                .map(|&i| Vec3::from_array(verts[i as usize].pos))
+                .sum::<Vec3>()
+                / 3.0;
+            if CoordSystem::pos_to_id(c, res)
+                .is_some_and(|id| (id.face, id.u, id.v) == (face, u, v))
+            {
+                found += 1;
+                for &i in t {
+                    assert!(
+                        (verts[i as usize].water - expected).abs() < 1e-3,
+                        "{} vs {expected}",
+                        verts[i as usize].water
+                    );
+                }
+            }
+        }
+        assert!(found > 0, "no facets over the lake column");
     }
 }
