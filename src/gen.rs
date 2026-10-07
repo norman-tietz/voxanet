@@ -483,7 +483,15 @@ impl MeshGen {
         }
     }
 
+    // a voxel chunk's terrain mesh in the current terrain style (lowpoly.rs)
     pub fn build_chunk(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        match crate::lowpoly::style() {
+            crate::lowpoly::TerrainStyle::LowPoly => crate::lowpoly::build_chunk_lowpoly(key, data),
+            crate::lowpoly::TerrainStyle::Cubes => Self::build_chunk_cubes(key, data),
+        }
+    }
+
+    pub fn build_chunk_cubes(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
         let mut idx = 0u32;
@@ -1098,6 +1106,17 @@ impl MeshGen {
         inds: &mut Vec<u32>,
         idx: &mut u32,
     ) {
+        Self::add_voxel_with(id, data, verts, inds, idx, &|b| data.exists(b));
+    }
+
+    pub(crate) fn add_voxel_with(
+        id: BlockId,
+        data: &PlanetData,
+        verts: &mut Vec<Vertex>,
+        inds: &mut Vec<u32>,
+        idx: &mut u32,
+        solid: &dyn Fn(BlockId) -> bool,
+    ) {
         let res = data.resolution;
 
         // neighbor existence check
@@ -1106,7 +1125,7 @@ impl MeshGen {
             let u = id.u as i32 + d_u;
             let v = id.v as i32 + d_v;
             if l >= 0 && u >= 0 && u < res as i32 && v >= 0 && v < res as i32 {
-                return data.exists(BlockId {
+                return solid(BlockId {
                     face: d_face,
                     layer: l as u32,
                     u: u as u32,

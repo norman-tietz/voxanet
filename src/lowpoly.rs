@@ -2,7 +2,10 @@
 // Low-poly terrain: marching cubes over a smoothed height field (PlanetData::smooth), flat colour per
 // facet, normals from screen-space derivatives. Blocks stay the game's data; this only draws them.
 
+use crate::common::{BlockId, ChunkKey, PlanetData, Vertex, CHUNK_SIZE};
 use crate::gen::CoordSystem;
+use crate::mc_tables::{CUBE_CORNER_OFFSETS, EDGE_VERTEX_PAIRS, TRI_TABLE};
+use glam::Vec3;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // how terrain is drawn: low-poly (the game's look) or the original cubes (development comparison only,
@@ -63,9 +66,466 @@ pub fn surface_radius(smooth_height: f32, res: u32) -> f32 {
     below + (above - below) * t
 }
 
+// a facet whose open side has solid cells within this many layers above is darkened (caves, tunnels,
+// overhangs, under builds) by COVER_DARKEN, like the cubes' sky term
+const COVER_LAYERS: u32 = 8;
+const COVER_DARKEN: f32 = 0.2;
+
+// a voxel chunk's low-poly terrain: marching cubes over the dual grid of block centres (cells of 2×2×2
+// centres) on the density natural_density(smooth height) with mined cells empty, one flat-coloured facet
+// per triangle (three unshared vertices each), plus the chunk's placed blocks as cubes. A chunk owns the
+// cells whose smallest corner column (face, u, v) is one of its own; the other corners come from the
+// neighbouring chunks' or faces' columns (neighbor_column)
+pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+    let res = data.resolution;
+    let u_start = key.u_idx * CHUNK_SIZE;
+    let v_start = key.v_idx * CHUNK_SIZE;
+    let u_end = (u_start + CHUNK_SIZE).min(res);
+    let v_end = (v_start + CHUNK_SIZE).min(res);
+    let field = Field::new(data);
+
+    // tunnels below the natural surface need cells down there: the deepest mined cell of this chunk,
+    // its same-face neighbours and, for chunks on a face edge, the other faces
+    let n = res.div_ceil(CHUNK_SIZE);
+    let on_face_edge = key.u_idx == 0 || key.v_idx == 0 || key.u_idx + 1 == n || key.v_idx + 1 == n;
+    let near = |k: &ChunkKey| {
+        (k.face == key.face && k.u_idx.abs_diff(key.u_idx) <= 1 && k.v_idx.abs_diff(key.v_idx) <= 1)
+            || (on_face_edge && k.face != key.face)
+    };
+    let deepest_mined = data
+        .edits
+        .chunks
+        .iter()
+        .filter(|(k, _)| near(k))
+        .flat_map(|(_, m)| m.mined.iter().map(|id| id.layer))
+        .min()
+        .unwrap_or(u32::MAX);
+
+    let mut verts = Vec::new();
+    for u in u_start..u_end {
+        for v in v_start..v_end {
+            // each of the four cells around the column, emitted by its smallest column, so a cell
+            // across a cube-face edge is built once whichever side of the edge its owner lies on
+            for (su, sv) in [(1i32, 1i32), (-1, 1), (1, -1), (-1, -1)] {
+                let column = |du: i32, dv: i32| data.neighbor_column(key.face, u, v, du, dv);
+                let (Some(c1), Some(c3)) = (column(su, 0), column(0, sv)) else {
+                    continue;
+                };
+                // at a three-face cube corner there is no fourth column: the cell closes on c1 twice
+                let c2 = column(su, sv)
+                    .filter(|c| *c != c1 && *c != c3)
+                    .unwrap_or(c1);
+                let own = (key.face, u, v);
+                if [c1, c2, c3].iter().any(|c| *c < own) {
+                    continue;
+                }
+                let cols = [own, c1, c2, c3];
+                let heights = cols.map(|(f, cu, cv)| data.smooth_height(f, cu, cv));
+                let lo = heights.iter().copied().fold(f32::MAX, f32::min).floor() as u32;
+                let hi = heights.iter().copied().fold(f32::MIN, f32::max).ceil() as u32 + 2;
+                for layer in lo.min(deepest_mined).saturating_sub(1)..hi {
+                    cell(data, &field, &cols, layer, &mut verts);
+                }
+            }
+        }
+    }
+    let mut inds: Vec<u32> = (0..verts.len() as u32).collect();
+
+    // placed blocks: cubes, faces culled only against other placed blocks
+    if let Some(mods) = data.edits.chunks.get(&key) {
+        let mut idx = verts.len() as u32;
+        for &id in mods.placed.keys() {
+            crate::gen::MeshGen::add_voxel_with(id, data, &mut verts, &mut inds, &mut idx, &|b| {
+                field.placed(b)
+            });
+        }
+    }
+    (verts, inds)
+}
+
+// the drawn terrain: densities from the smooth heights, mined cells empty
+struct Field<'a> {
+    data: &'a PlanetData,
+}
+
+impl<'a> Field<'a> {
+    fn new(data: &'a PlanetData) -> Self {
+        Self { data }
+    }
+
+    fn mods(&self, id: BlockId) -> Option<&crate::common::ChunkMods> {
+        self.data.edits.chunks.get(&PlanetData::chunk_key(id))
+    }
+
+    fn placed(&self, id: BlockId) -> bool {
+        self.mods(id).is_some_and(|m| m.placed.contains_key(&id))
+    }
+
+    fn mined(&self, id: BlockId) -> bool {
+        self.mods(id).is_some_and(|m| m.mined.contains(&id))
+    }
+
+    fn density(&self, id: BlockId) -> f32 {
+        if self.mined(id) {
+            0.0
+        } else {
+            natural_density(self.data.smooth_height(id.face, id.u, id.v), id.layer)
+        }
+    }
+
+    // solid as drawn: the smooth terrain or a placed block
+    fn drawn_solid(&self, id: BlockId) -> bool {
+        self.placed(id) || self.density(id) > ISO
+    }
+}
+
+// one marching-cubes cell: corners are the block centres of `cols` (CUBE_CORNER_OFFSETS' (x, y) order:
+// (0,0), (1,0), (1,1), (0,1)) at layers `layer` and `layer + 1`
+fn cell(
+    data: &PlanetData,
+    field: &Field,
+    cols: &[(u8, u32, u32); 4],
+    layer: u32,
+    verts: &mut Vec<Vertex>,
+) {
+    let res = data.resolution;
+    let mut ids = [BlockId {
+        face: 0,
+        layer: 0,
+        u: 0,
+        v: 0,
+    }; 8];
+    let mut d = [0.0f32; 8];
+    let mut case = 0usize;
+    for (i, &(dx, dy, dz)) in CUBE_CORNER_OFFSETS.iter().enumerate() {
+        let (face, u, v) = match (dx, dy) {
+            (0, 0) => cols[0],
+            (1, 0) => cols[1],
+            (1, 1) => cols[2],
+            _ => cols[3],
+        };
+        ids[i] = BlockId {
+            face,
+            u,
+            v,
+            layer: layer + dz,
+        };
+        d[i] = field.density(ids[i]);
+        if d[i] > ISO {
+            case |= 1 << i;
+        }
+    }
+    if case == 0 || case == 255 {
+        return;
+    }
+    let def = data.planet_type.def();
+    let centre = |id: BlockId| CoordSystem::get_block_center(id.face, id.u, id.v, id.layer, res);
+    for tri in TRI_TABLE[case].chunks(3).take_while(|t| t[0] >= 0) {
+        let mut p = [Vec3::ZERO; 3];
+        let mut outward = Vec3::ZERO;
+        let mut top_solid: Option<BlockId> = None;
+        let mut open = ids[0];
+        let mut wall = false; // touches a mined cell: a pit or tunnel wall
+        for (k, &e) in tri.iter().enumerate() {
+            let (a, b) = EDGE_VERTEX_PAIRS[e as usize];
+            let (s, o) = if case >> a & 1 == 1 { (a, b) } else { (b, a) };
+            let (ps, po) = (centre(ids[s]), centre(ids[o]));
+            let t = ((d[s] - ISO) / (d[s] - d[o]).max(1e-6)).clamp(0.0, 1.0);
+            p[k] = ps + (po - ps) * t;
+            outward += po - ps;
+            if top_solid.is_none_or(|ts| ids[s].layer > ts.layer) {
+                top_solid = Some(ids[s]);
+            }
+            wall |= field.mined(ids[o]);
+            open = ids[o];
+        }
+        let mut n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+        if n.dot(outward) < 0.0 {
+            n = -n;
+            p.swap(1, 2);
+        }
+        let centroid = (p[0] + p[1] + p[2]) / 3.0;
+        let solid = top_solid.unwrap_or(ids[0]);
+        let ty = if wall { data.block_type(solid) } else { None }.unwrap_or_else(|| {
+            let col = CoordSystem::pos_to_id(centroid, res).unwrap_or(solid);
+            let height = CoordSystem::layer_of_radius(centroid.length(), res) - 1.0;
+            crate::material::lowpoly_material(
+                &data.terrain,
+                &def.palette,
+                col.face,
+                col.u,
+                col.v,
+                height,
+                n.dot(centroid.normalize()),
+            )
+        });
+        let covered = (1..=COVER_LAYERS).any(|i| {
+            field.drawn_solid(BlockId {
+                layer: open.layer + i,
+                ..open
+            })
+        });
+        let shade = if covered { COVER_DARKEN } else { 1.0 };
+        let color = ty.color().map(|c| c * shade);
+        let water = data.water_surface_radius(open.face, open.u, open.v);
+        for q in p {
+            verts.push(Vertex {
+                pos: q.to_array(),
+                color,
+                normal: n.to_array(),
+                water,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::common::Vertex;
+    use crate::material::BlockType;
+
+    // every chunk of the planet, meshed low-poly
+    fn mesh_planet(planet: &PlanetData) -> Vec<(Vec<Vertex>, Vec<u32>)> {
+        let n = planet.resolution.div_ceil(CHUNK_SIZE);
+        let mut out = Vec::new();
+        for face in 0..6u8 {
+            for u_idx in 0..n {
+                for v_idx in 0..n {
+                    out.push(build_chunk_lowpoly(ChunkKey { face, u_idx, v_idx }, planet));
+                }
+            }
+        }
+        out
+    }
+
+    // triangles bucketed by the columns their vertices lie over, so a ray only tests its own and the
+    // neighbouring columns' triangles
+    pub(crate) struct MeshIndex {
+        res: u32,
+        buckets: std::collections::HashMap<(u8, u32, u32), Vec<[Vec3; 3]>>,
+    }
+
+    impl MeshIndex {
+        pub(crate) fn new(meshes: &[(Vec<Vertex>, Vec<u32>)], res: u32) -> Self {
+            let mut buckets: std::collections::HashMap<(u8, u32, u32), Vec<[Vec3; 3]>> =
+                Default::default();
+            for (verts, inds) in meshes {
+                for t in inds.chunks_exact(3) {
+                    let tri = [0, 1, 2].map(|k| Vec3::from_array(verts[t[k] as usize].pos));
+                    let mut cols: Vec<(u8, u32, u32)> = tri
+                        .iter()
+                        .filter_map(|p| {
+                            CoordSystem::pos_to_id(p.normalize() * (res as f32 / 2.0), res)
+                        })
+                        .map(|id| (id.face, id.u, id.v))
+                        .collect();
+                    cols.dedup();
+                    for c in cols {
+                        buckets.entry(c).or_default().push(tri);
+                    }
+                }
+            }
+            Self { res, buckets }
+        }
+
+        // the radius of the outermost surface along `dir`, casting inward from radius `from`
+        // (Möller–Trumbore in f64 over the triangles of the ray's column and its eight neighbours: probes
+        // between column centres run exactly along triangle edges, which f32 rounding at radius `from`
+        // would miss at random)
+        pub(crate) fn hit(&self, dir: Vec3, from: f32) -> Option<f32> {
+            let id = CoordSystem::pos_to_id(dir * (self.res as f32 / 2.0), self.res)?;
+            let dir = dir.as_dvec3();
+            let (origin, ray) = (dir * from as f64, -dir);
+            let mut best: Option<f32> = None;
+            let mut seen = std::collections::HashSet::new();
+            for dv in -1..=1 {
+                for du in -1..=1 {
+                    let Some(c) =
+                        CoordSystem::neighbor_column(id.face, id.u, id.v, du, dv, self.res)
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(c) {
+                        continue;
+                    }
+                    for [a, b, c] in self.buckets.get(&c).into_iter().flatten() {
+                        let (a, b, c) = (a.as_dvec3(), b.as_dvec3(), c.as_dvec3());
+                        let (e1, e2) = (b - a, c - a);
+                        let p = ray.cross(e2);
+                        let det = e1.dot(p);
+                        if det.abs() < 1e-9 {
+                            continue;
+                        }
+                        let s = origin - a;
+                        let bu = s.dot(p) / det;
+                        let q = s.cross(e1);
+                        let bv = ray.dot(q) / det;
+                        if bu < -1e-5 || bv < -1e-5 || bu + bv > 1.0 + 1e-5 {
+                            continue;
+                        }
+                        let t = e2.dot(q) / det;
+                        if t > 0.0 {
+                            let r = from - t as f32;
+                            best = Some(best.map_or(r, |x: f32| x.max(r)));
+                        }
+                    }
+                }
+            }
+            best
+        }
+    }
+
+    // probe directions: points between neighbouring column centres (also across chunk borders and
+    // cube-face edges) and column centres nudged off the vertical edges
+    fn probes(planet: &PlanetData) -> Vec<Vec3> {
+        let res = planet.resolution;
+        let mut out = Vec::new();
+        for face in 0..6u8 {
+            for v in 0..res {
+                for u in 0..res {
+                    let c = CoordSystem::get_block_center(face, u, v, res / 2, res).normalize();
+                    for (du, dv) in [(1, 0), (0, 1), (1, 1)] {
+                        if let Some((f, nu, nv)) = planet.neighbor_column(face, u, v, du, dv) {
+                            let n =
+                                CoordSystem::get_block_center(f, nu, nv, res / 2, res).normalize();
+                            out.push((c + n).normalize());
+                            out.push((c * 0.7 + n * 0.3).normalize());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // no holes: every probe ray from outside hits the terrain, at chunk borders, cube-face edges and the
+    // three-face corners alike
+    #[test]
+    fn low_poly_terrain_is_watertight() {
+        for planet in [
+            PlanetData::new(64), // 2×2 chunks per face: chunk borders and face edges
+            PlanetData::new_for_type(32, crate::noise::HOME_SEED, crate::biome::PlanetType::Ice),
+        ] {
+            let index = MeshIndex::new(&mesh_planet(&planet), planet.resolution);
+            let from = planet.resolution as f32 * 2.0;
+            for dir in probes(&planet) {
+                assert!(
+                    index.hit(dir, from).is_some(),
+                    "hole at {dir:?} (res {})",
+                    planet.resolution
+                );
+            }
+        }
+    }
+
+    // over a column centre the surface is exactly at surface_radius of the column's smooth height
+    #[test]
+    fn surface_sits_at_the_smooth_height() {
+        let planet = PlanetData::new(32);
+        let index = MeshIndex::new(&mesh_planet(&planet), 32);
+        for (u, v) in [(5u32, 5u32), (10, 20), (16, 16), (25, 7)] {
+            let dir = CoordSystem::get_block_center(0, u, v, 16, 32).normalize();
+            let r = index.hit(dir, 64.0).unwrap();
+            let expected = surface_radius(planet.smooth_height(0, u, v), 32);
+            assert!((r - expected).abs() < 1e-3, "({u}, {v}): {r} vs {expected}");
+        }
+    }
+
+    // a mined pit is carved into the smooth terrain and stays closed, also across a cube-face edge
+    #[test]
+    fn mined_pits_are_carved_and_closed() {
+        for (u, v) in [(10u32, 12u32), (0, 12)] {
+            let mut planet = PlanetData::new(64);
+            let top = planet.surface(0, u, v);
+            for layer in top - 2..=top {
+                for (du, dv) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let _ = planet.remove_block(BlockId {
+                        face: 0,
+                        layer,
+                        u: u + du,
+                        v: v + dv,
+                    });
+                }
+            }
+            let index = MeshIndex::new(&mesh_planet(&planet), 64);
+            let dir = CoordSystem::get_block_center(0, u, v, 32, 64).normalize();
+            let r = index.hit(dir, 128.0).expect("hole through the pit");
+            let before = surface_radius(PlanetData::new(64).smooth_height(0, u, v), 64);
+            assert!(r < before - 0.5, "({u}, {v}) not carved: {r} vs {before}");
+            for dir in probes(&planet) {
+                assert!(
+                    index.hit(dir, 128.0).is_some(),
+                    "hole near the pit at {dir:?}"
+                );
+            }
+        }
+    }
+
+    // a placed block is a full cube, even half-buried in the smooth surface (faces are culled only
+    // against other placed blocks)
+    #[test]
+    fn placed_blocks_are_full_cubes() {
+        let mut planet = PlanetData::new(32);
+        let (u, v) = (12u32, 14u32);
+        let id = BlockId {
+            face: 0,
+            layer: planet.surface(0, u, v) + 1,
+            u,
+            v,
+        };
+        planet.add_block(id, BlockType::Stone).unwrap();
+        let (verts, _) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: u / CHUNK_SIZE,
+                v_idx: v / CHUNK_SIZE,
+            },
+            &planet,
+        );
+        let has = |p: Vec3| {
+            verts
+                .iter()
+                .any(|vx| (Vec3::from_array(vx.pos) - p).length() < 1e-4)
+        };
+        // all eight cube corners: top corners alone would mean the side and bottom faces were culled
+        for (du, dv, dl) in (0..8).map(|i| (i & 1, i >> 1 & 1, i >> 2 & 1)) {
+            let corner = CoordSystem::get_vertex_pos(0, u + du, v + dv, id.layer + dl, 32);
+            assert!(
+                has(corner),
+                "corner ({du}, {dv}, {dl}) missing: faces culled against the terrain"
+            );
+        }
+    }
+
+    // facets are one flat colour each
+    #[test]
+    fn facets_are_flat_coloured() {
+        let planet = PlanetData::new(32);
+        let (verts, inds) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            &planet,
+        );
+        assert!(!inds.is_empty());
+        for tri in inds.chunks_exact(3) {
+            let c = verts[tri[0] as usize].color;
+            assert_eq!(verts[tri[1] as usize].color, c);
+            assert_eq!(verts[tri[2] as usize].color, c);
+        }
+    }
+
+    // small planets: cells near the core don't underflow and mesh normally
+    #[test]
+    fn tiny_planets_mesh_without_panicking() {
+        let planet = PlanetData::new(16);
+        let meshes = mesh_planet(&planet);
+        assert!(meshes.iter().all(|(v, _)| !v.is_empty()));
+    }
 
     // flat smooth ground lands exactly on the block tops: half-way between the centres of the top block
     // and the cell above
