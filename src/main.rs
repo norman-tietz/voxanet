@@ -299,6 +299,20 @@ impl Game {
         ));
         player.spin_rate = galaxy.planets[start_planet].spin_rate() as f32;
 
+        // fixed comparison poses (screenshots of terrain styles, docs/showcase-like captures): lift the
+        // spawn into fly mode VOXANET_POSE_ALT units up, pitched VOXANET_POSE_PITCH radians
+        if let Some(alt) = std::env::var("VOXANET_POSE_ALT")
+            .ok()
+            .and_then(|a| a.parse::<f32>().ok())
+        {
+            player.position += player.position.normalize() * alt;
+            controller.fly_mode = true;
+            player.cam_pitch = std::env::var("VOXANET_POSE_PITCH")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(-0.4);
+        }
+
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
         console.log(
@@ -713,6 +727,11 @@ impl Game {
                     [0.0, 1.0, 0.0],
                 );
             }
+        }
+        if let Some(style) = console.terrain_style_request.take() {
+            crate::lowpoly::set_style(style);
+            renderer.force_reload_all(planet, player.position);
+            console.log(&format!("Terrain style: {style:?}"), [0.0, 1.0, 0.0]);
         }
 
         // the console takes the keyboard (see window_event) and needs a free mouse cursor

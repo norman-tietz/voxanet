@@ -57,6 +57,7 @@ pub struct Console {
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
+    pub terrain_style_request: Option<crate::lowpoly::TerrainStyle>, // set by /terrain_style, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -74,6 +75,7 @@ impl Console {
             screenshot_request: None,
             view_request: None,
             galaxy_request: None,
+            terrain_style_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -220,6 +222,16 @@ impl Console {
                 _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
             },
 
+            "/terrain_style" => match parts.get(1) {
+                Some(&"cubes") => {
+                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::Cubes)
+                }
+                Some(&"lowpoly") => {
+                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::LowPoly)
+                }
+                _ => self.log("Usage: /terrain_style cubes|lowpoly", [1.0, 0.5, 0.0]),
+            },
+
             "/galaxy" => match parse_galaxy_command(&parts[1..]) {
                 Ok(request) => self.galaxy_request = Some(request),
                 Err(message) => self.log(message, [1.0, 0.5, 0.0]),
@@ -247,6 +259,10 @@ impl Console {
                     [0.8, 0.8, 0.8],
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
+                self.log(
+                    "  /terrain_style cubes|lowpoly  (terrain look, for comparison)",
+                    [0.8, 0.8, 0.8],
+                );
                 self.log(
                     "  /galaxy home|goto <n> <radii>|add <type> <radius>",
                     [0.8, 0.8, 0.8],
@@ -423,5 +439,19 @@ mod tests {
     fn rejects_unknown_subcommands() {
         assert!(parse_galaxy_command(&["fly"]).is_err());
         assert!(parse_galaxy_command(&[]).is_err());
+    }
+
+    // /terrain_style switches between the low-poly look and the cubes (development comparison)
+    #[test]
+    fn terrain_style_command_requests_a_style() {
+        use crate::lowpoly::TerrainStyle;
+        let mut c = Console::new();
+        let mut player = crate::entity::Player::new();
+        c.exec("/terrain_style cubes", &mut player);
+        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::Cubes));
+        c.exec("/terrain_style lowpoly", &mut player);
+        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::LowPoly));
+        c.exec("/terrain_style round", &mut player);
+        assert_eq!(c.terrain_style_request, None);
     }
 }
