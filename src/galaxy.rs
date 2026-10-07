@@ -334,8 +334,13 @@ impl GalaxyPlanet {
     // day_length_secs, so the *solar* day (sun back at the same sky direction) is exactly the planet
     // type's day length — without it the orbit would stretch or shrink every planet's day.
     pub fn spin_angle(&self, t: f64) -> f64 {
+        t * self.spin_rate()
+    }
+
+    // how fast the planet's frame turns about +Y, rad/s (spin_angle)
+    pub fn spin_rate(&self) -> f64 {
         let day = self.planet_type.def().day_length_secs as f64;
-        t * (std::f64::consts::TAU / day + self.orbit_speed)
+        std::f64::consts::TAU / day + self.orbit_speed
     }
 
     fn spin(&self, t: f64) -> DQuat {
@@ -483,9 +488,9 @@ impl GalaxyFlight {
         }
     }
 
-    // `up`: the local radial up while captured by a planet (turning left/right and climbing with
-    // Space / descending with Shift follow it, like the planet camera), None in free flight, where
-    // space has no up and both follow the camera's own up instead
+    // `up`: the local radial up while captured by a planet (climbing with Space / descending with
+    // Shift follow it, like the planet camera), None in free flight, where space has no up and they
+    // follow the camera's own up instead; turning is always about the ship's own axes
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -511,8 +516,9 @@ impl GalaxyFlight {
         }
         let yaw_delta = -mouse_delta.0 * self.mouse_sens + self.turn_rate * dt;
         if yaw_delta.abs() > 1e-6 {
-            self.rotation =
-                Quat::from_axis_angle(yaw_axis(self.rotation, up), yaw_delta) * self.rotation;
+            // ship axes: about the ship's own up, like the pitch about its own right, so turns follow
+            // the screen at any attitude (in orbit too: the local up only steers Space/Shift)
+            self.rotation *= Quat::from_axis_angle(Vec3::Y, yaw_delta);
         }
         let up = up.unwrap_or(self.rotation * Vec3::Y);
         let pitch_delta = -mouse_delta.1 * self.mouse_sens;
@@ -552,22 +558,32 @@ impl GalaxyFlight {
     }
 }
 
-// the axis sideways mouse turns the view about. It must agree with the camera's own up, or the turn
-// comes out as a pitch (camera on its side) or mirrored (upside down). Free flight: the camera's up.
-// Captured: the planet's local up, like the planet camera, once roll is about level; while it's
-// rolled (Q/E, or captured with any roll) it blends toward the camera's
-// up, and on the side of the local up the camera's up is on, so a turn is never inverted.
-fn yaw_axis(rotation: Quat, up: Option<Vec3>) -> Vec3 {
-    let camera_up = rotation * Vec3::Y;
-    let Some(up) = up else {
-        return camera_up;
-    };
-    let horizon_up = if camera_up.dot(up) >= 0.0 { up } else { -up };
-    // how far the camera's right axis tips out of the horizontal plane: 0 level, 1 on its side
-    let tilt = (rotation * Vec3::X).dot(up).abs();
-    let t = ((tilt - 0.3) / 0.5).clamp(0.0, 1.0);
-    let rolled = t * t * (3.0 - 2.0 * t); // smoothstep
-    horizon_up.lerp(camera_up, rolled).normalize()
+// Flight near a planet turns with it (the planet frame spins about +Y at spin_rate), like an
+// aircraft with its air: the ground holds still and the sky turns, 1.5–6°/s with these day lengths.
+// Out in space that read as the ship being pulled round with the stars sweeping past, so the
+// co-rotation fades out with distance: full below CO_ROTATION_INNER_RADII (the glide ceiling, about
+// where the sky turns from opaque to black), none from CO_ROTATION_OUTER_RADII, where position,
+// attitude and velocity keep still against the stars (and the planet turns below). Planet fly mode
+// and captured flight use the same function of distance, so the handovers don't change it.
+pub const CO_ROTATION_INNER_RADII: f32 = 1.64;
+pub const CO_ROTATION_OUTER_RADII: f32 = 3.0;
+
+// the share of the planet's spin a flight at `distance_radii` from its centre turns with
+pub fn co_rotation(distance_radii: f32) -> f32 {
+    let t = ((distance_radii - CO_ROTATION_INNER_RADII)
+        / (CO_ROTATION_OUTER_RADII - CO_ROTATION_INNER_RADII))
+        .clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
+// the rotation (planet frame, about +Y) to apply this step to a flight's position, velocity and
+// attitude so it turns only with co_rotation's share of the planet's spin (`spin_rate`, rad/s): the
+// rest is undone, the planet frame turning the other way under it
+pub fn counter_spin(spin_rate: f32, distance_radii: f32, dt: f32) -> Quat {
+    Quat::from_axis_angle(
+        Vec3::Y,
+        spin_rate * (1.0 - co_rotation(distance_radii)) * dt,
+    )
 }
 
 // Pure: composes the desired flight direction from forward-thrust (already rotated into world
@@ -900,6 +916,33 @@ mod tests {
             (flight.rotation * Vec3::Y).dot(Vec3::Y) > 1.0 - 1e-4,
             "turning rolled the view"
         );
+    }
+
+    // far from the planet (from CO_ROTATION_OUTER_RADII) captured flight keeps its attitude against
+    // the stars: undoing the planet frame's spin each step leaves the galaxy-space orientation
+    // unchanged; close to it (below CO_ROTATION_INNER_RADII) it turns with the planet as before
+    #[test]
+    fn far_out_captured_flight_keeps_still_against_the_stars() {
+        let galaxy = Galaxy::generate(1);
+        let p = &galaxy.planets[0];
+        let start = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.3);
+        for (distance, inertial) in [(5.0f32, true), (1.2, false)] {
+            let (mut local, mut t, dt) = (start, 0.0f64, 1.0 / 60.0);
+            for _ in 0..600 {
+                t += dt;
+                local =
+                    crate::galaxy::counter_spin(p.spin_rate() as f32, distance, dt as f32) * local;
+            }
+            let before = p.rotation_from_planet_frame(start, 0.0) * Vec3::NEG_Z;
+            let after = p.rotation_from_planet_frame(local, t) * Vec3::NEG_Z;
+            if inertial {
+                assert!(after.dot(before) > 1.0 - 1e-4, "turned with the planet");
+            } else {
+                assert_eq!(local, start, "didn't turn with the planet close to it");
+            }
+        }
+        assert_eq!(co_rotation(CO_ROTATION_INNER_RADII), 1.0);
+        assert_eq!(co_rotation(CO_ROTATION_OUTER_RADII), 0.0);
     }
 
     // free flight: Space/Shift climb and descend along the camera's own up

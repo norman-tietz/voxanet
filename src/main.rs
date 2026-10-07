@@ -295,6 +295,7 @@ impl Game {
         player.handover_altitude = Some(crate::landing::handover_altitude(
             galaxy.planets[start_planet].radius,
         ));
+        player.spin_rate = galaxy.planets[start_planet].spin_rate() as f32;
 
         let mut console = Console::new();
         console.log("Welcome to voxanet.", [0.0, 1.0, 0.0]);
@@ -413,6 +414,16 @@ impl Game {
                     FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
                 };
                 galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, keys, up);
+                // captured flight turns with the planet only close to it (galaxy::co_rotation)
+                if let FlightFrame::Captured(i) = *flight_frame {
+                    let p = &galaxy.planets[i];
+                    let distance = (galaxy_flight.position.length() / p.radius as f64) as f32;
+                    let q =
+                        crate::galaxy::counter_spin(p.spin_rate() as f32, distance, dt).as_dquat();
+                    galaxy_flight.position = q * galaxy_flight.position;
+                    galaxy_flight.velocity = q * galaxy_flight.velocity;
+                    galaxy_flight.rotation = (q.as_quat() * galaxy_flight.rotation).normalize();
+                }
                 // the star's heat zone pushes free flight back out and can't be passed (galaxy.rs);
                 // planets orbit outside it, so captured flight never meets it
                 if *flight_frame == FlightFrame::Free {
@@ -491,12 +502,14 @@ impl Game {
             player.rotation = rotation;
             player.cam_pitch = cam_pitch;
             player.cam_roll = cam_roll;
+            // both sides live in the planet frame: the flight carries on at its speed
+            player.velocity = galaxy_flight.velocity.as_vec3();
             player.roll_rate = galaxy_flight.roll_rate; // a roll in progress carries on
-            player.velocity = glam::Vec3::ZERO;
             player.landing = false;
             player.taking_off = None;
             player.handover_altitude =
                 Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
+            player.spin_rate = galaxy.planets[i].spin_rate() as f32;
             // dying here respawns on dry land below, not back in orbit
             let below = planet.safe_spawn_direction(position.normalize());
             player.spawn_point = below * spawn_radius(planet, below, 10.0);
@@ -614,6 +627,7 @@ impl Game {
                     player.spawn(noon_spawn(planet, galaxy, i, t));
                     player.handover_altitude =
                         Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
+                    player.spin_rate = galaxy.planets[i].spin_rate() as f32;
                     controller.fly_mode = false;
                     *flight_frame = FlightFrame::Free;
                     *mode = GameMode::Planet;

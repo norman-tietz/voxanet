@@ -25,6 +25,17 @@ const FLY_LOOKAHEAD_MIN: f32 = 5.0;
 const FLY_LOOKAHEAD_MAX: f32 = 60.0;
 const FLY_LOOKAHEAD_SAMPLES: u32 = 4; // points between the player and the lookahead distance
 const LANDING_ROLL_LEVEL_RATE: f32 = 1.5; // rad/s an F landing eases the roll level
+                                          // mouse movement (pixels per tick, screen-vertical) that counts as pitching: the player takes over
+                                          // from the glide assist
+const GLIDE_CANCEL_MOUSE: f32 = 0.5;
+
+// the glide assist's state (Player::glide): the line's radius, fixed when it engages, and the
+// pull-out's turn axis while one is under way (landing::GlidePull::axis)
+#[derive(Clone, Copy, Debug)]
+struct Glide {
+    radius: f32,
+    axis: Option<Vec3>,
+}
 const BANK_TURN_RATE: f32 = 0.8; // rad/s the heading turns at a 90° roll at cruise speed (planet fly mode)
 
 // an angle wrapped into -PI..PI
@@ -113,6 +124,13 @@ pub struct Player {
     pub cam_roll: f32, // fly mode only: roll about the view direction; level when walking/swimming
     pub roll_rate: f32, // fly mode: eased roll rate (A/D), rad/s, positive rolls left
     pub turn_rate: f32, // fly mode: eased turn rate (Q/E), rad/s, positive turns left
+    // fly mode: the glide assist bringing the flight onto a line under the clouds (landing.rs), and
+    // whether the next descent through the cloud layer engages it (re-armed above the clouds)
+    glide: Option<Glide>,
+    glide_armed: bool,
+    // first-person fly mode (set by the controller every tick): the mouse and Q/E turn the ship
+    // about its own axes (up and right, like a spacecraft) instead of the planet's up
+    pub ship_axes: bool,
     pub grounded: bool,
     pub debug_mode: bool,
     pub health: f32,
@@ -121,6 +139,7 @@ pub struct Player {
     pub landing: bool, // F pressed while flying: auto-descending until touchdown (landing.rs)
     pub taking_off: Option<f32>, // F pressed while walking/swimming: auto-climbing to this radius
     pub handover_altitude: Option<f32>, // on a galaxy planet: fly speed scales up to this altitude
+    pub spin_rate: f32, // the planet frame's spin about +Y, rad/s (galaxy::co_rotation; 0: none)
 
     // Configuration
     pub move_speed: f32,
@@ -137,6 +156,9 @@ impl Player {
             cam_pitch: 0.0,
             cam_roll: 0.0,
             roll_rate: 0.0,
+            glide: None,
+            glide_armed: false,
+            ship_axes: false,
             turn_rate: 0.0,
             grounded: false,
             debug_mode: false,
@@ -146,6 +168,7 @@ impl Player {
             landing: false,
             taking_off: None,
             handover_altitude: None,
+            spin_rate: 0.0,
             move_speed: 5.0,
             jump_force: 8.0,
             mouse_sens: 0.002,
@@ -163,6 +186,8 @@ impl Player {
         self.cam_roll = 0.0;
         self.roll_rate = 0.0;
         self.turn_rate = 0.0;
+        self.glide = None;
+        self.glide_armed = false;
         let up = Physics::get_up_vector(self.position);
         self.rotation = Quat::from_rotation_arc(Vec3::Y, up);
     }
@@ -183,26 +208,117 @@ impl Player {
         flying: bool,
         sprint: bool,
     ) -> bool {
+        // high up, fly mode turns with the planet's spin only partly, fading out toward the landing
+        // handover so captured flight continues it (galaxy::co_rotation)
+        if flying {
+            let distance = self.position.length() / (planet.resolution as f32 / 2.0);
+            let q = crate::galaxy::counter_spin(self.spin_rate, distance, dt);
+            if q.to_axis_angle().1.abs() > 1e-9 {
+                let camera = q
+                    * self.rotation
+                    * Quat::from_axis_angle(Vec3::X, self.cam_pitch)
+                    * Quat::from_axis_angle(Vec3::Z, self.cam_roll);
+                self.position = q * self.position;
+                self.velocity = q * self.velocity;
+                let (rotation, pitch, roll) = crate::landing::camera_angles(
+                    self.position.normalize(),
+                    camera,
+                    std::f32::consts::FRAC_PI_2,
+                );
+                self.rotation = rotation;
+                self.cam_pitch = pitch;
+                self.cam_roll = roll;
+            }
+        }
         let up = Physics::get_up_vector(self.position);
 
         // --- ROLL AND TURN RATES (flight keys) ---
         // walking and swimming are level; an F landing ignores the keys and eases the roll level, the
         // take-off climb ignores them; otherwise A/D roll and Q/E turn, both ramping up and coasting
-        // down (smoothing.rs)
-        let mut flight_yaw = 0.0;
+        // down (smoothing.rs); below the clouds, released A/D let the roll level itself with the
+        // horizon
+        let mut flight_yaw = 0.0; // about the local up: Q/E (unless ship axes) and the banked turn
+        let mut ship_yaw = 0.0; // ship axes: Q/E about the ship's own up
+        let mut max_speed = None; // the glide assist braking a pull-out
         if !flying {
             self.cam_roll = 0.0;
             self.roll_rate = 0.0;
             self.turn_rate = 0.0;
+            self.glide = None;
+            self.glide_armed = false;
         } else {
             use crate::smoothing::{
                 approach, FLIGHT_TURN_SPEED, ROLL_ACCEL, ROLL_SPEED, TURN_ACCEL,
             };
             let steering = !self.landing && self.taking_off.is_none();
-            let (roll_target, turn_target) = if steering {
-                (keys.roll * ROLL_SPEED, keys.turn * FLIGHT_TURN_SPEED)
+
+            // glide assist: coming down below the glide ceiling (twice the clouds' altitude), the
+            // flight is brought onto a line at the take-off height and follows the planet's curve
+            // there (velocity and view turned together). The player takes over by pitching with the
+            // mouse (up/down on screen), Space/Shift or F; it engages again on the next descent from
+            // above the ceiling
+            let radius = planet.resolution as f32 / 2.0;
+            let below_clouds = self.position.length() < crate::common::CLOUD_ALT * radius;
+            let below_ceiling = self.position.length() < crate::landing::glide_ceiling(radius);
+            let mouse_pitch = mouse_delta.1;
+            if !below_ceiling {
+                self.glide = None;
+                self.glide_armed = true;
+            } else if !steering || jump || down || mouse_pitch.abs() > GLIDE_CANCEL_MOUSE {
+                self.glide = None;
+                self.glide_armed = false;
+            } else if self.glide_armed && self.velocity.dot(up) < 0.0 {
+                let layer = crate::landing::takeoff_target_layer(planet, self.position);
+                self.glide = Some(Glide {
+                    radius: crate::gen::CoordSystem::get_layer_radius(layer, planet.resolution),
+                    axis: None,
+                });
+                self.glide_armed = false;
+            }
+            let mut over_the_top = false;
+            if let Some(glide) = &mut self.glide {
+                let camera = self.rotation
+                    * Quat::from_axis_angle(Vec3::X, self.cam_pitch)
+                    * Quat::from_axis_angle(Vec3::Z, self.cam_roll);
+                if let Some(pull) = crate::landing::glide_assist(
+                    self.velocity,
+                    self.position,
+                    glide.radius,
+                    camera * Vec3::Y,
+                    glide.axis,
+                    dt,
+                ) {
+                    glide.axis = pull.axis;
+                    over_the_top = pull.over_the_top;
+                    max_speed = pull.max_speed;
+                    self.velocity = pull.rotation * self.velocity;
+                    // unclamped, so pulling over the top can carry the view through a vertical dive
+                    // (the mouse clamps it back to ±1.5 on its next move)
+                    let (rotation, pitch, roll) = crate::landing::camera_angles(
+                        up,
+                        pull.rotation * camera,
+                        std::f32::consts::FRAC_PI_2,
+                    );
+                    self.rotation = rotation;
+                    self.cam_pitch = pitch;
+                    self.cam_roll = roll;
+                }
+            }
+
+            // roll: A/D roll; released below the clouds, the roll levels itself with the horizon
+            // (arcade style) — except while the glide still pulls over the top, which comes out
+            // upright by itself past the vertical; above the clouds (space) it stays where it is
+            let roll_target = if steering && keys.roll != 0.0 {
+                keys.roll * ROLL_SPEED
+            } else if below_clouds && !over_the_top {
+                crate::smoothing::roll_level_rate(self.cam_roll)
             } else {
-                (0.0, 0.0)
+                0.0
+            };
+            let turn_target = if steering {
+                keys.turn * FLIGHT_TURN_SPEED
+            } else {
+                0.0
             };
             self.turn_rate = approach(self.turn_rate, turn_target, TURN_ACCEL * dt);
             if self.landing {
@@ -213,51 +329,46 @@ impl Player {
                 self.roll_rate = approach(self.roll_rate, roll_target, ROLL_ACCEL * dt);
                 self.cam_roll = wrap_angle(self.cam_roll + self.roll_rate * dt);
             }
-            // banked turn: rolled while flying forward, the heading turns toward the lowered side,
-            // in proportion to the forward speed (none while hovering)
+            // banked turn: rolled while flying forward below the clouds, the heading turns toward the
+            // lowered side, in proportion to the forward speed (none while hovering, none in space)
             let altitude = self.position.length() - planet.resolution as f32 / 2.0;
             let cruise =
                 crate::landing::fly_speed(self.move_speed, false, altitude, self.handover_altitude);
             let heading = self.rotation * Vec3::NEG_Z;
             let forward_share = (self.velocity.dot(heading) / cruise.max(1e-3)).clamp(0.0, 1.0);
-            let bank = if self.landing {
+            let bank = if self.landing || !below_clouds {
                 0.0
             } else {
                 BANK_TURN_RATE * self.cam_roll.sin() * forward_share
             };
-            flight_yaw = (self.turn_rate + bank) * dt;
-
-            // dive assist: racing steeply at the surface bends the view (and with it the route) up
-            // toward the horizon; not during the deliberate F landing or the take-off climb
-            if steering {
-                let altitude =
-                    self.position.length() - crate::landing::surface_radius(planet, self.position);
-                let pitch = crate::landing::dive_assist(self.velocity, up, altitude, dt);
-                if pitch > 0.0 {
-                    self.cam_pitch = (self.cam_pitch + pitch).min(1.5);
-                    if let Some(axis) = self.velocity.cross(up).try_normalize() {
-                        self.velocity = Quat::from_axis_angle(axis, pitch) * self.velocity;
-                    }
-                }
+            if self.ship_axes {
+                ship_yaw = self.turn_rate * dt;
+                flight_yaw = bank * dt;
+            } else {
+                flight_yaw = (self.turn_rate + bank) * dt;
             }
         }
-        // the mouse moves in screen directions: turn the rolled screen's right/down back into yaw/pitch
-        let (sin, cos) = self.cam_roll.sin_cos();
-        let mouse_delta = (
-            mouse_delta.0 * cos + mouse_delta.1 * sin,
-            -mouse_delta.0 * sin + mouse_delta.1 * cos,
-        );
-
-        // --- ROTATION (YAW) ---
-        let yaw_delta = -mouse_delta.0 * self.mouse_sens + turn + flight_yaw;
-        if yaw_delta.abs() > 1e-6 {
-            let yaw_rot = Quat::from_axis_angle(up, yaw_delta);
-            self.rotation = yaw_rot * self.rotation;
-        }
-
-        // --- PITCH ---
-        if mouse_delta.1.abs() > 0.001 {
-            self.cam_pitch = (self.cam_pitch - mouse_delta.1 * self.mouse_sens).clamp(-1.5, 1.5);
+        if flying && self.ship_axes {
+            // ship axes: the mouse (and Q/E) turn the ship about its own up and pitch it about its
+            // own right, so it turns in screen directions at any attitude, through the vertical too;
+            // the banked turn stays about the local up
+            let yaw = -mouse_delta.0 * self.mouse_sens + ship_yaw;
+            let pitch = -mouse_delta.1 * self.mouse_sens;
+            if yaw.abs() > 1e-6 || pitch.abs() > 1e-6 || flight_yaw.abs() > 1e-6 {
+                let camera = Quat::from_axis_angle(up, flight_yaw)
+                    * self.rotation
+                    * Quat::from_axis_angle(Vec3::X, self.cam_pitch)
+                    * Quat::from_axis_angle(Vec3::Z, self.cam_roll)
+                    * Quat::from_axis_angle(Vec3::Y, yaw)
+                    * Quat::from_axis_angle(Vec3::X, pitch);
+                let (rotation, pitch, roll) =
+                    crate::landing::camera_angles(up, camera, std::f32::consts::FRAC_PI_2);
+                self.rotation = rotation;
+                self.cam_pitch = pitch;
+                self.cam_roll = roll;
+            }
+        } else {
+            self.turn_on_the_horizon(mouse_delta, turn + flight_yaw, up);
         }
 
         // --- SWIMMING ---
@@ -290,7 +401,14 @@ impl Player {
 
         let effective_speed = if flying {
             let altitude = self.position.length() - planet.resolution as f32 / 2.0;
-            crate::landing::fly_speed(self.move_speed, sprint, altitude, self.handover_altitude)
+            let speed = crate::landing::fly_speed(
+                self.move_speed,
+                sprint,
+                altitude,
+                self.handover_altitude,
+            );
+            // the glide assist brakes a pull-out so its curve stays soft (never below walking pace)
+            max_speed.map_or(speed, |max: f32| speed.min(max.max(self.move_speed)))
         } else if sprint {
             self.move_speed * 2.0
         } else {
@@ -500,6 +618,24 @@ impl Player {
         self.grounded = grounded;
     }
 
+    // the mouse (and keyboard yaw `yaw`, radians) on foot, swimming and in third person: yaw about the
+    // planet's up `up`, pitch clamped to ±1.5; the mouse moves in screen directions, so the rolled
+    // screen's right/down are turned back into yaw/pitch
+    fn turn_on_the_horizon(&mut self, mouse_delta: (f32, f32), yaw: f32, up: Vec3) {
+        let (sin, cos) = self.cam_roll.sin_cos();
+        let mouse_delta = (
+            mouse_delta.0 * cos + mouse_delta.1 * sin,
+            -mouse_delta.0 * sin + mouse_delta.1 * cos,
+        );
+        let yaw_delta = -mouse_delta.0 * self.mouse_sens + yaw;
+        if yaw_delta.abs() > 1e-6 {
+            self.rotation = Quat::from_axis_angle(up, yaw_delta) * self.rotation;
+        }
+        if mouse_delta.1.abs() > 0.001 {
+            self.cam_pitch = (self.cam_pitch - mouse_delta.1 * self.mouse_sens).clamp(-1.5, 1.5);
+        }
+    }
+
     pub fn get_model_matrix(&self) -> Mat4 {
         Mat4::from_translation(self.position) * Mat4::from_quat(self.rotation)
     }
@@ -676,6 +812,12 @@ mod tests {
             tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
         }
         assert_eq!(player.roll_rate, 0.0, "still rolling 0.35 s after release");
+        // above the clouds (space) the roll stays where it was left
+        let rolled = player.cam_roll;
+        for _ in 0..60 {
+            tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        }
+        assert_eq!(player.cam_roll, rolled, "levelled above the clouds");
     }
 
     // Q turns left, eased like the roll
@@ -699,6 +841,7 @@ mod tests {
     #[test]
     fn rolled_flight_turns_toward_the_lowered_side() {
         let (mut player, planet) = flying_player();
+        place(&mut player, 20); // below the clouds: no banked turns in space
         player.cam_pitch = 0.0;
         player.cam_roll = 0.6;
         let (_, _, forward) = camera_axes(&player);
@@ -741,20 +884,53 @@ mod tests {
         );
     }
 
-    // planet fly mode: diving fast at the ground pitches the view up (the route follows); an F landing
-    // is a deliberate vertical descent and isn't assisted
+    // first-person flight turns about the ship's own axes: looking steeply down, a sideways mouse
+    // move pans the view toward the screen's right instead of spinning the picture about the local
+    // up, and pitching on carries the view through the vertical without stopping at the clamp
     #[test]
-    fn a_fast_dive_pitches_the_view_up_but_not_during_a_landing() {
+    fn ship_axes_turn_in_screen_directions_at_any_attitude() {
+        let (mut player, planet) = flying_player();
+        player.ship_axes = true;
+        player.cam_pitch = -1.4;
+        let (screen_right, screen_up, forward) = camera_axes(&player);
+        tick(&mut player, &planet, (40.0, 0.0), NO_KEYS, true);
+        let (_, screen_up2, forward2) = camera_axes(&player);
+        let moved = forward2 - forward;
+        assert!(
+            moved.dot(screen_right) > 0.07,
+            "didn't pan right: {moved:?}"
+        );
+        assert!(screen_up2.dot(screen_up) > 0.999, "the picture spun");
+
+        let (mut player, planet) = flying_player();
+        player.ship_axes = true;
+        player.cam_pitch = -1.4;
+        let (_, _, forward) = camera_axes(&player);
+        let right = player.rotation * Vec3::X;
+        for _ in 0..10 {
+            tick(&mut player, &planet, (0.0, 15.0), NO_KEYS, true); // 0.3 rad down in all
+        }
+        let (_, _, forward2) = camera_axes(&player);
+        let expected = Quat::from_axis_angle(right, -0.3) * forward;
+        assert!(
+            forward2.dot(expected) > 0.999,
+            "{forward2:?} vs {expected:?}"
+        );
+    }
+
+    // planet fly mode: diving down through the clouds, the glide pitches the view up (the route
+    // follows); an F landing is a deliberate vertical descent and isn't assisted
+    #[test]
+    fn a_dive_through_the_clouds_pitches_the_view_up_but_not_during_a_landing() {
         for landing in [false, true] {
             let (mut player, planet) = flying_player();
+            place(&mut player, 30);
+            tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+            place(&mut player, 20);
             player.cam_pitch = -1.4;
             player.landing = landing;
             let up = player.position.normalize();
-            let ground =
-                crate::gen::CoordSystem::get_layer_radius(planet.surface(0, 10, 10) + 1, 32);
-            let altitude = player.position.length() - ground;
-            // diving at the ground fast enough to hit it in about 1 s
-            player.velocity = (player.rotation * Vec3::NEG_Z * 0.1 - up).normalize() * altitude;
+            player.velocity = (player.rotation * Vec3::NEG_Z * 0.1 - up).normalize() * 20.0;
             let before = player.cam_pitch;
             tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
             if landing {
@@ -763,6 +939,75 @@ mod tests {
                 assert!(player.cam_pitch > before, "no pull-up");
             }
         }
+    }
+
+    // a fly-mode player over column (0, 10, 10) at `layer` (32-resolution planet: the clouds lie
+    // between layers 20 and 23, the glide ceiling between 25 and 28)
+    fn place(player: &mut Player, layer: u32) {
+        let dir = crate::gen::CoordSystem::get_block_center(0, 10, 10, layer, 32).normalize();
+        player.position = dir * crate::gen::CoordSystem::get_layer_radius(layer, 32);
+    }
+
+    // the glide assist engages when a descent comes down below the glide ceiling (armed above it),
+    // and the player takes over by pitching with the mouse — then it stays off until the next descent
+    // from above the ceiling
+    #[test]
+    fn the_glide_engages_below_the_ceiling_and_the_mouse_takes_over() {
+        let (mut player, planet) = flying_player();
+        let ceiling = crate::landing::glide_ceiling(16.0);
+        place(&mut player, 30);
+        assert!(player.position.length() > ceiling);
+        let down = -player.position.normalize();
+        player.velocity = down * 5.0;
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        assert!(
+            player.glide.is_none() && player.glide_armed,
+            "above the ceiling"
+        );
+        place(&mut player, 20);
+        assert!(player.position.length() < ceiling);
+        player.velocity = -player.position.normalize() * 5.0;
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        assert!(player.glide.is_some(), "didn't engage below the ceiling");
+        tick(&mut player, &planet, (0.0, 4.0), NO_KEYS, true);
+        assert!(player.glide.is_none(), "the mouse didn't take over");
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        assert!(
+            player.glide.is_none(),
+            "engaged again without leaving the clouds"
+        );
+        // a sideways mouse turn doesn't take over
+        let (mut player, planet) = flying_player();
+        place(&mut player, 30);
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        place(&mut player, 20);
+        player.velocity = -player.position.normalize() * 5.0;
+        tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+        tick(&mut player, &planet, (4.0, 0.0), NO_KEYS, true);
+        assert!(
+            player.glide.is_some(),
+            "a sideways turn cancelled the glide"
+        );
+    }
+
+    // below the clouds released A/D let the roll level itself with the horizon (arcade style); above
+    // them (space) it stays rolled (roll_ramps_up_and_coasts_to_a_stop)
+    #[test]
+    fn below_the_clouds_the_roll_levels_itself() {
+        let (mut player, planet) = flying_player();
+        place(&mut player, 20);
+        player.cam_roll = 0.8;
+        let mut lowest = player.cam_roll;
+        for _ in 0..300 {
+            tick(&mut player, &planet, (0.0, 0.0), NO_KEYS, true);
+            lowest = lowest.min(player.cam_roll);
+        }
+        assert!(
+            player.cam_roll.abs() < 0.01,
+            "not level: {}",
+            player.cam_roll
+        );
+        assert!(lowest > -0.02, "overshot to {lowest}");
     }
 
     // an F landing ignores the roll keys and eases the roll level; the take-off climb ignores them too

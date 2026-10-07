@@ -16,6 +16,17 @@ pub const ROLL_ACCEL: f32 = 5.0; // rad/s^2
 pub const FLIGHT_TURN_SPEED: f32 = 1.5; // rad/s
 pub const TURN_ACCEL: f32 = 5.0; // rad/s^2
 
+// roll levelling (planet fly mode below the clouds, A/D released): the roll rate is
+// steered toward ROLL_LEVEL_GAIN × the remaining roll (capped at ROLL_SPEED), ramping at ROLL_ACCEL
+// like a key, so it eases out instead of snapping level
+pub const ROLL_LEVEL_GAIN: f32 = 1.5; // 1/s
+
+// the roll rate (rad/s, positive rolls left) that levels a roll of `roll` radians (positive: rolled
+// left, the camera's right side up)
+pub fn roll_level_rate(roll: f32) -> f32 {
+    (-roll * ROLL_LEVEL_GAIN).clamp(-ROLL_SPEED, ROLL_SPEED)
+}
+
 // `current` eased toward `target` over `dt` with time constant `tau` (frame-rate independent)
 pub fn ease_toward(current: Vec3, target: Vec3, dt: f32, tau: f32) -> Vec3 {
     current + (target - current) * (1.0 - (-dt / tau).exp())

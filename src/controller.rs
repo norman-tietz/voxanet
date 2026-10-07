@@ -139,6 +139,7 @@ impl Controller {
             key_axis(self.keys[5], self.keys[6]) * TURN_SPEED * dt
         };
 
+        player.ship_axes = in_flight;
         let touched_down = player.update(
             dt,
             planet,

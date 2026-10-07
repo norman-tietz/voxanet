@@ -38,12 +38,20 @@ pub fn handover_overlay_opacity(elapsed: f32) -> Option<f32> {
 // where it is and a rolled view stays rolled; pitch is clamped to MAX_PITCH.
 pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32, f32) {
     let up = eye.normalize();
+    let (player_rotation, pitch, roll) = camera_angles(up, rotation, MAX_PITCH);
+    (eye - up * Physics::EYE_HEIGHT, player_rotation, pitch, roll)
+}
+
+// a camera orientation split into the planet player's upright rotation (local Y = `up`, local -Z =
+// heading), pitch (clamped to ±`max_pitch`) and roll, so rotation * pitch * roll gives it back
+// (Player::get_view_matrix) whenever the pitch isn't clamped
+pub fn camera_angles(up: Vec3, rotation: Quat, max_pitch: f32) -> (Quat, f32, f32) {
     let forward = rotation * Vec3::NEG_Z;
     let pitch = forward
         .dot(up)
         .clamp(-1.0, 1.0)
         .asin()
-        .clamp(-MAX_PITCH, MAX_PITCH);
+        .clamp(-max_pitch, max_pitch);
     // heading: the view direction flattened onto the horizon; looking (almost) straight down or up
     // it's undefined, so take where the top of the screen points (flipped when looking up)
     let mut heading = forward - up * forward.dot(up);
@@ -63,12 +71,7 @@ pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32, f
     let roll = right
         .dot(unrolled * Vec3::Y)
         .atan2(right.dot(unrolled * Vec3::X));
-    (
-        eye - up * Physics::EYE_HEIGHT,
-        player_rotation.normalize(),
-        pitch,
-        roll,
-    )
+    (player_rotation.normalize(), pitch, roll)
 }
 
 // the planet engine's player -> galaxy flight: eye position and the camera's orientation (the same
@@ -173,43 +176,144 @@ pub fn takeoff_climb_speed(remaining: f32) -> f32 {
     (remaining * LAND_DESCENT_RATE).max(LAND_MIN_DESCENT)
 }
 
-// dive assist (planet fly mode): racing steeply at the surface, the flight is bent toward the horizon
-// so it becomes a sweeping descent instead of a crash. It engages when the surface (ground or water)
-// is less than DIVE_ASSIST_SECONDS away at the current downward speed, pulls harder the closer the
-// impact, and stops at DIVE_ASSIST_TARGET below the horizon; slow descents are left alone
-pub const DIVE_ASSIST_SECONDS: f32 = 4.0;
-pub const DIVE_ASSIST_TARGET: f32 = 10.0 * std::f32::consts::PI / 180.0;
-const DIVE_ASSIST_MIN_SPEED: f32 = 15.0; // world units/s downward
-const DIVE_ASSIST_MAX_RATE: f32 = 1.5; // rad/s of pitch-up, approached as the impact nears
+// glide assist (planet fly mode): a descent coming down below the glide ceiling (twice the cloud
+// layer's altitude, glide_ceiling; `Player::glide`) is brought onto a line at the take-off height
+// (takeoff_target_layer, fixed when it engages) and follows the planet's curve there instead of
+// flying on straight and out again. The path's climb angle is steered toward GLIDE_TAU seconds of
+// the remaining height at the current speed (at most GLIDE_MAX_DESCENT down, GLIDE_MAX_CLIMB up),
+// turning velocity and view together, at GLIDE_SOFT_RATE — harder (up to GLIDE_HARD_RATE) only when
+// the pull-out wouldn't fit into GLIDE_ROOM of the remaining height otherwise. Fly speed grows with
+// altitude, so a soft curve needs the ship slower than that: while pulling out it brakes toward
+// GLIDE_BRAKE × the remaining height per second (GlidePull::max_speed).
+// A steep pull-out goes toward the ship's own up (the camera's, so it follows the roll): over the
+// top, even when the flight line passes a little below the planet's centre as seen from the ship
+// and the way over leads through a vertical dive; only when the line hits the planet's lower
+// GLIDE_UNDER_SHARE of its diameter (along the ship's up) does it bend down and pass under. The
+// side is kept until the pull-out is done (GlidePull::axis).
+pub const GLIDE_TAU: f32 = 3.0; // s
+pub const GLIDE_MAX_DESCENT: f32 = 75.0 * std::f32::consts::PI / 180.0;
+pub const GLIDE_MAX_CLIMB: f32 = 20.0 * std::f32::consts::PI / 180.0;
+const GLIDE_SOFT_RATE: f32 = 0.6; // rad/s
+const GLIDE_HARD_RATE: f32 = 4.0; // rad/s
+const GLIDE_ROOM: f32 = 0.7; // share of the remaining height a pull-out may use
+const GLIDE_BRAKE: f32 = 0.5; // 1/s: pulling out, at most this × the remaining height per second
+const GLIDE_CEILING_CLOUDS: f32 = 2.0; // the glide ceiling in cloud-layer altitudes
+const GLIDE_MIN_SPEED: f32 = 2.0; // world units/s: slower (W released, coasting out) isn't steered
+                                  // a path this much steeper than wanted is a pull-out (side chosen by the ship's up); closer, it's
+                                  // tracked in the vertical plane
+const GLIDE_PULL_OUT: f32 = 5.0 * std::f32::consts::PI / 180.0;
+pub const GLIDE_UNDER_SHARE: f32 = 0.3; // over 70 %, under 30 %
 
-// the pitch-up (radians, toward the horizon) the dive assist applies this step, for a velocity
-// `velocity` at `altitude` above the surface (`up`: the local radial up); 0 when not engaged
-pub fn dive_assist(velocity: Vec3, up: Vec3, altitude: f32, dt: f32) -> f32 {
-    let down = -velocity.dot(up);
-    if down < DIVE_ASSIST_MIN_SPEED || altitude <= 0.0 {
-        return 0.0;
-    }
-    let time_to_impact = altitude / down;
-    let dive = (down / velocity.length()).clamp(-1.0, 1.0).asin();
-    if time_to_impact >= DIVE_ASSIST_SECONDS || dive <= DIVE_ASSIST_TARGET {
-        return 0.0;
-    }
-    let pull = DIVE_ASSIST_MAX_RATE * (1.0 - time_to_impact / DIVE_ASSIST_SECONDS);
-    (pull * dt).min(dive - DIVE_ASSIST_TARGET)
+// the radius below which a descent engages the glide assist, on a planet of `radius` (sea level)
+pub fn glide_ceiling(radius: f32) -> f32 {
+    radius * (1.0 + GLIDE_CEILING_CLOUDS * (crate::common::CLOUD_ALT - 1.0))
 }
 
-// the radius of the surface below `position`: the top of its column, or the water surface above it
-pub fn surface_radius(planet: &crate::common::PlanetData, position: Vec3) -> f32 {
-    let res = planet.resolution;
-    let sea = planet.terrain.sea_level();
-    // the column's water level: its lake's, else the sea (dry land stands above it anyway)
-    let top = crate::gen::CoordSystem::pos_to_id(position, res).map_or(sea + 1, |id| {
-        planet
-            .surface(id.face, id.u, id.v)
-            .max(planet.terrain.water_level(id.face, id.u, id.v))
-            + 1
+// one step of the glide assist: the world rotation it applies to the velocity and the camera
+pub struct GlidePull {
+    pub rotation: Quat,
+    // the pull-out's turn axis, passed back in on the next step so it keeps its side while the ship
+    // rolls; None once the path is on track
+    pub axis: Option<Vec3>,
+    // still pulling over the top, before the vertical: the ship's up points away from the horizon
+    // the flight is turned toward, so levelling the roll now would flip it upside down and back
+    pub over_the_top: bool,
+    // pulling out: the speed to brake to, so the curve stays soft
+    pub max_speed: Option<f32>,
+}
+
+// the climb angle (radians, negative: descending) the glide assist steers toward, `height` above its
+// line at `speed`
+pub fn glide_path_angle(height: f32, speed: f32) -> f32 {
+    (-height / (GLIDE_TAU * speed.max(1e-3)))
+        .clamp(-GLIDE_MAX_DESCENT.sin(), GLIDE_MAX_CLIMB.sin())
+        .asin()
+}
+
+// the glide assist's step for a velocity `velocity` at `position` (planet centre at the origin),
+// steering onto the sphere `target_radius`, with the camera's up `camera_up`; `axis`: the previous
+// step's (None: a pull-out chooses its side afresh). None when there's nothing to turn
+pub fn glide_assist(
+    velocity: Vec3,
+    position: Vec3,
+    target_radius: f32,
+    camera_up: Vec3,
+    axis: Option<Vec3>,
+    dt: f32,
+) -> Option<GlidePull> {
+    let speed = velocity.length();
+    if speed < GLIDE_MIN_SPEED {
+        return None;
+    }
+    let up = position.normalize();
+    let dir = velocity / speed;
+    let climb = dir.dot(up).clamp(-1.0, 1.0).asin();
+    let height = position.length() - target_radius;
+    let wanted = glide_path_angle(height, speed);
+    // soft, unless levelling out at this speed wouldn't fit into the room left above the line
+    let steeper = (wanted - climb).max(0.0);
+    let needed = speed * (1.0 - steeper.cos()) / (GLIDE_ROOM * height.max(0.5));
+    let step = needed.clamp(GLIDE_SOFT_RATE, GLIDE_HARD_RATE) * dt;
+    let max_speed = (steeper > 0.05).then(|| GLIDE_BRAKE * height.max(0.0));
+    // toward the nearest horizon
+    let horizon = (up - dir * up.dot(dir)).try_normalize()?;
+
+    let latched = axis.and_then(|axis| axis.cross(dir).try_normalize());
+    if latched.is_none() && climb > wanted - GLIDE_PULL_OUT {
+        // on track: turn up or down in the vertical plane
+        let turn = (wanted - climb).clamp(-step, step);
+        if turn.abs() < 1e-6 {
+            return None;
+        }
+        return Some(GlidePull {
+            rotation: Quat::from_axis_angle(dir.cross(horizon).normalize(), turn),
+            axis: None,
+            over_the_top: false,
+            max_speed,
+        });
+    }
+    // pull-out
+    let bend = latched.unwrap_or_else(|| {
+        // the ship's up across the flight line; with the camera looking across the flight, fall
+        // back to the nearest horizon
+        let bend = (camera_up - dir * camera_up.dot(dir))
+            .try_normalize()
+            .unwrap_or(horizon);
+        // where the line passes the planet's centre, along the ship's up, in radii of the glide's
+        // sphere (-1: its lower edge as seen from the ship, 1 its upper edge)
+        let offset = (position - dir * position.dot(dir)).dot(bend) / target_radius;
+        if offset < 2.0 * GLIDE_UNDER_SHARE - 1.0 {
+            -bend
+        } else {
+            bend
+        }
     });
-    crate::gen::CoordSystem::get_layer_radius(top, res)
+    // the turn still needed in the plane of `dir` and `bend` until the climb angle is `wanted`: the
+    // direction turned by θ rises along up as a·cos θ + b·sin θ = A·cos(θ − φ)
+    let (a, b) = (dir.dot(up), bend.dot(up));
+    let (amplitude, phase) = ((a * a + b * b).sqrt(), b.atan2(a));
+    let spread = (wanted.sin() / amplitude).clamp(-1.0, 1.0).acos();
+    // the nearer of the two crossings ahead; one just passed (a step landing a little beyond it)
+    // counts as reached rather than as a full turn away
+    let (pi, tau) = (std::f32::consts::PI, std::f32::consts::TAU);
+    let remaining = [phase - spread, phase + spread]
+        .map(|t| {
+            let t = (t + pi).rem_euclid(tau) - pi;
+            if t < -GLIDE_PULL_OUT {
+                t + tau
+            } else {
+                t.max(0.0)
+            }
+        })
+        .into_iter()
+        .fold(f32::MAX, f32::min);
+    let axis = dir.cross(bend).normalize();
+    Some(GlidePull {
+        rotation: Quat::from_axis_angle(axis, step.min(remaining)),
+        axis: (remaining > step).then_some(axis),
+        over_the_top: bend.dot(horizon) < 0.0,
+        max_speed,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,62 +477,174 @@ mod tests {
         (-v.normalize().dot(up)).asin().to_degrees()
     }
 
-    // a fast, steep dive at the surface (impact within DIVE_ASSIST_SECONDS) is bent up toward a
-    // shallow descent: the assist pitches up, harder the closer the impact, and stops at the target
-    #[test]
-    fn a_fast_dive_is_bent_toward_a_shallow_descent() {
-        let up = Vec3::Y;
-        let mut v = Vec3::new(0.0, -200.0, -20.0); // ~84 degrees down, fast
-        let mut altitude = 600.0; // 3 s to impact
+    // a flight on a radius-100 planet from `position` along `v`, at its fly speed (fly_speed: 2.5 ×
+    // the altitude per second) braked as the glide asks, eased like Player::update, with the glide
+    // assist turning velocity and camera together toward the sphere `target`, for `seconds`; returns
+    // the final position, velocity, camera, the lowest radius and the hardest turn (rad/s)
+    fn glide(
+        mut position: Vec3,
+        mut v: Vec3,
+        mut camera: Quat,
+        target: f32,
+        seconds: f32,
+    ) -> (Vec3, Vec3, Quat, f32, f32) {
         let dt = 1.0 / 60.0;
-        for _ in 0..600 {
-            let pitch = dive_assist(v, up, altitude, dt);
-            if pitch > 0.0 {
-                let axis = v.cross(up).normalize();
-                v = Quat::from_axis_angle(axis, pitch) * v;
+        let (mut axis, mut lowest, mut hardest) = (None, f32::MAX, 0.0f32);
+        for _ in 0..(seconds / dt) as u32 {
+            let mut speed = fly_speed(5.0, false, position.length() - 100.0, Some(200.0));
+            if let Some(pull) = glide_assist(v, position, target, camera * Vec3::Y, axis, dt) {
+                v = pull.rotation * v;
+                camera = pull.rotation * camera;
+                axis = pull.axis;
+                hardest = hardest.max(pull.rotation.to_axis_angle().1 / dt);
+                speed = pull.max_speed.map_or(speed, |max| speed.min(max.max(5.0)));
             }
-            altitude = (altitude + v.dot(up) * dt).max(1.0);
+            let target_v = v.normalize() * speed;
+            v = crate::smoothing::ease_toward(
+                v,
+                target_v,
+                dt,
+                crate::smoothing::FLIGHT_EASE_SECONDS,
+            );
+            position += v * dt;
+            lowest = lowest.min(position.length());
         }
-        let dive = dive_deg(v, up);
+        (position, v, camera, lowest, hardest)
+    }
+
+    // a camera at `position` looking along `v`, rolled by `roll` from level
+    fn camera_along(v: Vec3, position: Vec3, roll: f32) -> Quat {
+        let (forward, up) = (v.normalize(), position.normalize());
+        let right = forward.cross(up).normalize();
+        let level = Quat::from_mat3(&Mat3::from_cols(right, right.cross(forward), -forward));
+        level * Quat::from_axis_angle(Vec3::Z, roll)
+    }
+
+    // a steep dive through the clouds levels off onto the glide's line and then follows the planet's
+    // curve along it, instead of flying on straight and out of the atmosphere again
+    #[test]
+    fn a_dive_levels_off_onto_the_line_and_follows_the_curve() {
+        let target = 110.0;
+        let position = Vec3::new(0.0, glide_ceiling(100.0), 0.0);
+        let v = Vec3::new(0.0, -1.0, -0.12).normalize() * 160.0; // ~83 degrees down at fly speed
+        let camera = camera_along(v, position, 0.0);
+        let (end, v2, camera2, lowest, _) = glide(position, v, camera, target, 20.0);
+        assert!(lowest > target - 2.0, "dropped to {lowest}");
+        // 20 s on the line is radians of arc on this sphere: it stayed on it
         assert!(
-            (dive - DIVE_ASSIST_TARGET.to_degrees()).abs() < 0.5,
-            "ended at {dive} degrees"
+            (end.length() - target).abs() < 1.0,
+            "ended at radius {}",
+            end.length()
+        );
+        assert!(dive_deg(v2, end.normalize()).abs() < 2.0, "not level");
+        assert!(
+            (camera2 * Vec3::Y).dot(end.normalize()) > 0.9,
+            "camera not upright"
         );
     }
 
-    // the closer the impact, the harder the pull
+    // a 45° approach is a soft, long curve: on this small planet (radius 100) it needs only a little
+    // more than the soft rate, briefly, to fit above the line
     #[test]
-    fn the_pull_grows_as_impact_nears() {
-        let (up, v) = (Vec3::Y, Vec3::new(0.0, -200.0, -20.0));
-        let far = dive_assist(v, up, 700.0, 0.1); // 3.5 s
-        let near = dive_assist(v, up, 200.0, 0.1); // 1 s
-        assert!(far > 0.0 && near > far, "{far} {near}");
+    fn a_shallow_approach_curves_softly() {
+        let position = Vec3::new(0.0, glide_ceiling(250.0) * 100.0 / 250.0, 0.0);
+        let v = Vec3::new(0.0, -1.0, -1.0).normalize() * 160.0; // 45 degrees down
+        let camera = camera_along(v, position, 0.0);
+        let (_, _, _, lowest, hardest) = glide(position, v, camera, 110.0, 20.0);
+        assert!(hardest < 1.0, "turned at {hardest} rad/s");
+        assert!(lowest > 108.0, "dropped to {lowest}");
     }
 
-    // left alone: slow descents, shallow dives, impacts further than DIVE_ASSIST_SECONDS away, climbs
+    // below the line it climbs back up to it, gently
     #[test]
-    fn slow_shallow_distant_or_climbing_flight_is_not_assisted() {
+    fn below_the_line_it_climbs_back() {
+        let position = Vec3::new(0.0, 104.0, 0.0);
+        let v = Vec3::new(0.0, 0.0, -30.0);
+        let (end, _, _, _, _) = glide(position, v, camera_along(v, position, 0.0), 110.0, 10.0);
+        assert!(
+            (end.length() - 110.0).abs() < 1.0,
+            "ended at radius {}",
+            end.length()
+        );
+    }
+
+    // upside down (rolled 180°), steeply diving: the flight line passes the centre a little below it
+    // as seen from the ship, so the pull-out still goes toward the ship's up, over the top through a
+    // vertical dive, and comes out upright heading the other way (a split-S)
+    #[test]
+    fn upside_down_a_steep_dive_is_pulled_over_the_top() {
+        let (target, position) = (110.0, Vec3::new(0.0, 132.0, 0.0));
+        let v = Vec3::new(0.0, -80.0, -8.0); // ~84 degrees down: offset about -0.1
+        let camera = camera_along(v, position, std::f32::consts::PI);
+        let dir = v.normalize();
+        let offset = (position - dir * position.dot(dir)).dot(camera * Vec3::Y) / target;
+        assert!(offset < 0.0 && offset > -0.4, "offset {offset}");
+        let first = glide_assist(v, position, target, camera * Vec3::Y, None, 1.0 / 60.0).unwrap();
+        assert!(first.over_the_top);
+        let (end, v2, camera2, _, _) = glide(position, v, camera, target, 1.0);
+        assert!(v2.z > 0.0, "went under instead of over: {v2:?}");
+        assert!(
+            (camera2 * Vec3::Y).dot(end.normalize()) > 0.5,
+            "not upright after the split-S"
+        );
+    }
+
+    // upside down in a shallower dive the line hits the lower 30 % (seen from the ship): too far
+    // below to go over, so the pull-out bends toward the ship's down (the near horizon)
+    #[test]
+    fn upside_down_a_shallow_dive_passes_under() {
+        let (target, position) = (110.0, Vec3::new(0.0, 132.0, 0.0));
+        let v = Vec3::new(0.0, -40.0, -40.0); // 45 degrees down: offset about -0.8
+        let camera = camera_along(v, position, std::f32::consts::PI);
+        let first = glide_assist(v, position, target, camera * Vec3::Y, None, 1.0 / 60.0).unwrap();
+        assert!(!first.over_the_top);
+        let (_, v2, camera2, _, _) = glide(position, v, camera, target, 1.0);
+        assert!(v2.z < 0.0, "went over instead of under: {v2:?}");
+        assert!((camera2 * Vec3::Y).y < -0.5, "rolled during the push");
+    }
+
+    // the glide assist's view, split into the player's rotation, pitch and roll every step, can turn
+    // through a vertical dive (with MAX_PITCH it would stick at the clamp)
+    #[test]
+    fn camera_angles_follow_a_view_through_the_vertical() {
         let up = Vec3::Y;
-        assert_eq!(
-            dive_assist(Vec3::new(0.0, -10.0, -1.0), up, 20.0, 0.1),
-            0.0,
-            "slow"
-        );
-        assert_eq!(
-            dive_assist(Vec3::new(0.0, -15.0, -200.0), up, 30.0, 0.1),
-            0.0,
-            "shallow"
-        );
-        assert_eq!(
-            dive_assist(Vec3::new(0.0, -200.0, -20.0), up, 1000.0, 0.1),
-            0.0,
-            "5 s away"
-        );
-        assert_eq!(
-            dive_assist(Vec3::new(0.0, 200.0, -20.0), up, 50.0, 0.1),
-            0.0,
-            "climbing"
-        );
+        let mut camera = Quat::from_rotation_x(-1.45);
+        let step = Quat::from_rotation_x(-0.02); // nose down about the camera's right axis
+        let expected = Quat::from_rotation_x(-1.45 - 0.02 * 20.0);
+        for _ in 0..20 {
+            let (rotation, pitch, roll) =
+                camera_angles(up, step * camera, std::f32::consts::FRAC_PI_2);
+            camera = rotation
+                * Quat::from_axis_angle(Vec3::X, pitch)
+                * Quat::from_axis_angle(Vec3::Z, roll);
+        }
+        let (got, want) = (camera * Vec3::NEG_Z, expected * Vec3::NEG_Z);
+        assert!(got.dot(want) > 1.0 - 1e-4, "{got:?} vs {want:?}");
+        assert!((camera * Vec3::Y).dot(expected * Vec3::Y) > 1.0 - 1e-4);
+    }
+
+    // nothing to steer: coasting to a stop, or already on the line
+    #[test]
+    fn slow_or_on_track_flight_is_left_alone() {
+        let position = Vec3::new(0.0, 110.0, 0.0);
+        assert!(glide_assist(
+            Vec3::new(0.0, -1.0, -1.0),
+            position,
+            100.0,
+            Vec3::Y,
+            None,
+            0.1
+        )
+        .is_none());
+        assert!(glide_assist(
+            Vec3::new(0.0, 0.0, -30.0),
+            position,
+            110.0,
+            Vec3::Y,
+            None,
+            0.1
+        )
+        .is_none());
     }
 
     // F during the take-off climb stops it: the player hovers where they are
@@ -619,14 +835,12 @@ mod tests {
         );
     }
     #[test]
-    fn lava_lakes_refuse_landing_and_surfaces_use_the_lake_level() {
+    fn lava_lakes_refuse_landing() {
         use crate::biome::PlanetType;
         let (planet, (face, u, v)) = crate::common::tests::lake_planet(PlanetType::Volcanic);
         let res = planet.resolution;
         let level = planet.terrain.water_level(face, u, v);
         let above = crate::gen::CoordSystem::get_block_center(face, u, v, level + 5, res);
         assert!(over_damaging_liquid(&planet, above));
-        let lake_surface = crate::gen::CoordSystem::get_layer_radius(level + 1, res);
-        assert!((surface_radius(&planet, above) - lake_surface).abs() < 1e-3);
     }
 }
