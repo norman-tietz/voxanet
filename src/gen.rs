@@ -1176,7 +1176,7 @@ impl MeshGen {
         inds: &mut Vec<u32>,
         idx: &mut u32,
     ) {
-        Self::add_voxel_with(id, data, verts, inds, idx, &|b| data.exists(b));
+        Self::add_voxel_with(id, data, verts, inds, idx, &|b| data.exists(b), false);
     }
 
     pub(crate) fn add_voxel_with(
@@ -1186,6 +1186,9 @@ impl MeshGen {
         inds: &mut Vec<u32>,
         idx: &mut u32,
         solid: &dyn Fn(BlockId) -> bool,
+        // one colour per face (the low-poly mesher's flat shading takes each triangle's first vertex,
+        // so the top face's per-corner AO would split it into two shades): the corners' mean
+        flat: bool,
     ) {
         let res = data.resolution;
 
@@ -1265,6 +1268,12 @@ impl MeshGen {
             let ao_tl = Self::calculate_ao(n(-1, 0), n(0, 1), n(-1, 1));
             let top_sky = sky(0, 0);
             let apply = |ao: f32| apply(ao * top_sky);
+            let (ao_bl, ao_br, ao_tr, ao_tl) = if flat {
+                let mean = (ao_bl + ao_br + ao_tr + ao_tl) / 4.0;
+                (mean, mean, mean, mean)
+            } else {
+                (ao_bl, ao_br, ao_tr, ao_tl)
+            };
             // quad() splits along vertex 0-2; split along the darker diagonal so the AO gradient stays symmetric
             if ao_bl + ao_tr > ao_br + ao_tl {
                 Self::quad(

@@ -143,9 +143,15 @@ pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Ve
     if let Some(mods) = data.edits.chunks.get(&key) {
         let mut idx = verts.len() as u32;
         for &id in mods.placed.keys() {
-            crate::gen::MeshGen::add_voxel_with(id, data, &mut verts, &mut inds, &mut idx, &|b| {
-                field.placed(b)
-            });
+            crate::gen::MeshGen::add_voxel_with(
+                id,
+                data,
+                &mut verts,
+                &mut inds,
+                &mut idx,
+                &|b| field.placed(b),
+                true,
+            );
         }
     }
     (verts, inds)
@@ -543,6 +549,53 @@ mod tests {
                 "corner ({du}, {dv}, {dl}) missing: faces culled against the terrain"
             );
         }
+    }
+
+    // a placed block's faces are one colour each, also the top face next to another placed block
+    // (its per-corner AO would otherwise split it diagonally into two shades)
+    #[test]
+    fn placed_block_faces_are_one_colour() {
+        let mut planet = PlanetData::new(32);
+        let (u, v) = (12u32, 14u32);
+        let layer = planet.surface(0, u, v) + 1;
+        for (du, dl) in [(0, 0), (1, 0), (1, 1)] {
+            planet
+                .add_block(
+                    BlockId {
+                        face: 0,
+                        layer: layer + dl,
+                        u: u + du,
+                        v,
+                    },
+                    BlockType::Stone,
+                )
+                .unwrap();
+        }
+        let (verts, inds) = build_chunk_lowpoly(
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            &planet,
+        );
+        // the placed cubes follow the terrain facets (indexed 0, 1, 2, ...) as quads (0, 1, 2, 2, 3, 0)
+        let terrain = inds
+            .iter()
+            .enumerate()
+            .position(|(i, &x)| x as usize != i)
+            .unwrap()
+            - 3; // the first quad's first triangle continues the sequence
+        let mut quads = 0;
+        for t in inds[terrain..].chunks_exact(6) {
+            assert!(t[3] == t[2] && t[5] == t[0]);
+            let c = verts[t[0] as usize].color;
+            for k in 1..4 {
+                assert_eq!(verts[t[0] as usize + k].color, c, "two-tone face");
+            }
+            quads += 1;
+        }
+        assert!(quads >= 10, "{quads} quads");
     }
 
     // facets are one flat colour each
