@@ -229,6 +229,31 @@ impl CoordSystem {
         (s * ((r as f64 / s).ln() / Self::K + 1.0)) as f32
     }
 
+    // the up to eight columns around (face, u, v): the four edge neighbours and the diagonals, which
+    // across a cube-face edge are stepped from the in-face neighbour (neighbor_column's own diagonals
+    // are unreliable where only one axis crosses an edge); seven at a three-face cube corner
+    pub fn neighbour_columns(face: u8, u: u32, v: u32, res: u32) -> Vec<(u8, u32, u32)> {
+        let column = |f, cu, cv, du, dv| Self::neighbor_column(f, cu, cv, du, dv, res);
+        let mut out = Vec::with_capacity(8);
+        for (su, sv) in [(1i32, 1i32), (-1, 1), (1, -1), (-1, -1)] {
+            let (c1, c3) = (column(face, u, v, su, 0), column(face, u, v, 0, sv));
+            out.extend(c1.into_iter().chain(c3));
+            let (Some(c1), Some(c3)) = (c1, c3) else {
+                continue;
+            };
+            let diagonal = match (c1.0 == face, c3.0 == face) {
+                (true, true) => column(face, u, v, su, sv),
+                (false, true) => column(c3.0, c3.1, c3.2, su, 0),
+                (true, false) => column(c1.0, c1.1, c1.2, 0, sv),
+                (false, false) => None,
+            };
+            out.extend(diagonal);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     // the column next to (face, u, v) in direction (du, dv) as (face, u, v); across a cube-face edge that
     // is a column of the neighbouring face, found by continuing the line from the inner neighbour outward
     pub fn neighbor_column(
@@ -760,7 +785,35 @@ impl MeshGen {
     // sea level; flush with the beaches) over every column that holds water (PlanetData::holds_water:
     // natural ocean and lakes, holes dug below their level alike) and whose cell above is open — under a ceiling (a tunnel dug at
     // sea level) the surface would lie against the solid face above and flicker; that water has none.
+    // the water level a dry column on a low-poly shore is covered at: the highest level of the water
+    // columns around it, if its own cell at that level is solid (a column dug out beside a lake keeps
+    // its wall of water: no flow, see PlanetData::holds_water)
+    fn shore_level(data: &PlanetData, face: u8, u: u32, v: u32) -> Option<u32> {
+        let level = data
+            .neighbour_columns(face, u, v)
+            .into_iter()
+            .filter(|&(f, cu, cv)| data.holds_water(f, cu, cv))
+            .map(|(f, cu, cv)| data.terrain.water_level(f, cu, cv))
+            .max()?;
+        data.exists(BlockId {
+            face,
+            layer: level,
+            u,
+            v,
+        })
+        .then_some(level)
+    }
+
+    // a chunk's water surface in the current terrain style (lowpoly.rs)
     pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        Self::build_water_styled(key, data, crate::lowpoly::style())
+    }
+
+    pub fn build_water_styled(
+        key: ChunkKey,
+        data: &PlanetData,
+        style: crate::lowpoly::TerrainStyle,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         if data.planet_type.def().liquid.is_none() {
             return (Vec::new(), Vec::new());
         }
@@ -770,16 +823,30 @@ impl MeshGen {
         let v_start = key.v_idx * CHUNK_SIZE;
         for u in u_start..(u_start + CHUNK_SIZE).min(res) {
             for v in v_start..(v_start + CHUNK_SIZE).min(res) {
-                let level = data.terrain.water_level(key.face, u, v);
-                let above = BlockId {
-                    face: key.face,
-                    layer: level + 1,
-                    u,
-                    v,
-                };
-                if !data.holds_water(key.face, u, v) || data.exists(above) {
+                let (level, water) = if data.holds_water(key.face, u, v) {
+                    let level = data.terrain.water_level(key.face, u, v);
+                    let above = BlockId {
+                        face: key.face,
+                        layer: level + 1,
+                        u,
+                        v,
+                    };
+                    if data.exists(above) {
+                        continue;
+                    }
+                    (level, data.water_surface_radius(key.face, u, v))
+                } else if style == crate::lowpoly::TerrainStyle::LowPoly {
+                    // low-poly shore: the drawn terrain crosses the water level between column
+                    // centres, so the water plane reaches one column onto the land beside the water
+                    // (hidden where the terrain is higher) and meets the terrain at its own coastline
+                    // instead of ending in column steps over unflooded dips
+                    match Self::shore_level(data, key.face, u, v) {
+                        Some(level) => (level, 0.0),
+                        None => continue,
+                    }
+                } else {
                     continue;
-                }
+                };
                 let p =
                     |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, level + 1, res);
                 let corners = [p(0, 0), p(1, 0), p(1, 1), p(0, 1)];
@@ -791,7 +858,7 @@ impl MeshGen {
                         pos: c.to_array(),
                         color,
                         normal: c.normalize().to_array(),
-                        water: data.water_surface_radius(key.face, u, v),
+                        water,
                     });
                 }
                 inds.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
@@ -1569,7 +1636,10 @@ mod biome_tests {
             v,
             layer: 0,
         });
-        MeshGen::build_water(key, planet).0.len() / 4
+        MeshGen::build_water_styled(key, planet, crate::lowpoly::TerrainStyle::Cubes)
+            .0
+            .len()
+            / 4
     }
 
     // digging a land column down below sea level: the hole gets a water surface (water table)
@@ -1791,6 +1861,79 @@ mod biome_tests {
         assert!(brightness(shallow) > brightness(deep));
         let dist = |c: [f32; 3]| Vec3::from(c).distance(Vec3::from(liquid.deep_color));
         assert!(dist(deep) < dist(shallow)); // fs_water keeps 5 % of the floor (opacity <= 0.95)
+    }
+
+    // low-poly shores: the drawn terrain crosses the water level between column centres, so the
+    // water plane reaches one column onto the land beside every water column (hidden where the
+    // terrain is higher); without it dry shore columns drawn below the water level were unflooded
+    // dips you could look into and under the water surface
+    #[test]
+    fn low_poly_water_reaches_one_column_onto_the_shore() {
+        use crate::lowpoly::TerrainStyle;
+        let planet = PlanetData::new(64);
+        let res = planet.resolution;
+        let n = res.div_ceil(CHUNK_SIZE);
+        let quads = |style: TerrainStyle| {
+            let mut cols = std::collections::HashSet::new();
+            for face in 0..6u8 {
+                for u_idx in 0..n {
+                    for v_idx in 0..n {
+                        let (verts, _) = MeshGen::build_water_styled(
+                            ChunkKey { face, u_idx, v_idx },
+                            &planet,
+                            style,
+                        );
+                        for q in verts.chunks_exact(4) {
+                            let c = q.iter().map(|vx| Vec3::from_array(vx.pos)).sum::<Vec3>() / 4.0;
+                            let id =
+                                CoordSystem::pos_to_id(c.normalize() * (res as f32 / 2.0), res)
+                                    .unwrap();
+                            cols.insert((id.face, id.u, id.v));
+                        }
+                    }
+                }
+            }
+            cols
+        };
+        let (lowpoly, cubes) = (quads(TerrainStyle::LowPoly), quads(TerrainStyle::Cubes));
+        let mut dips = 0;
+        for face in 0..6u8 {
+            for v in 0..res {
+                for u in 0..res {
+                    if planet.holds_water(face, u, v) {
+                        continue;
+                    }
+                    let level = planet.terrain.water_level(face, u, v);
+                    let shore = planet
+                        .neighbour_columns(face, u, v)
+                        .into_iter()
+                        .any(|(f, cu, cv)| planet.holds_water(f, cu, cv));
+                    // dry columns get no water in cube style
+                    assert!(
+                        !cubes.contains(&(face, u, v)),
+                        "cube water on dry ({face}, {u}, {v})"
+                    );
+                    if shore {
+                        assert!(
+                            lowpoly.contains(&(face, u, v)),
+                            "dry shore ({face}, {u}, {v}) not covered"
+                        );
+                    }
+                    // the defect: a dry column drawn below its water level must be covered
+                    if planet.smooth_height(face, u, v) < level as f32 {
+                        dips += 1;
+                        assert!(
+                            lowpoly.contains(&(face, u, v)),
+                            "unflooded dip at ({face}, {u}, {v})"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            dips > 0,
+            "test planet has no shore dips: the check is vacuous"
+        );
     }
 
     #[test]

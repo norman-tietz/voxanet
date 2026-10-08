@@ -10,10 +10,6 @@ use std::sync::Arc;
 // --- CONSTANTS ---
 pub const CHUNK_SIZE: u32 = 32;
 
-// the smooth height map (low-poly terrain, lowpoly.rs) averages each column over this many columns
-// around it in every direction: 1 → 3×3
-pub const SMOOTH_RADIUS: i32 = 1;
-
 // edit limits (PlanetData::build_ceiling, mining_floor, add_block/remove_block)
 const BUILD_MARGIN: u32 = 24; // layers above the highest natural peak that can be built on
 const BEDROCK_DEPTH: u32 = 32; // layers below the lowest natural column that can be mined
@@ -169,7 +165,7 @@ pub struct PlanetData {
     edit_generation: u64, // bumped by every successful edit (an outdated near impostor), not by restoring
     pub resolution: u32,
     pub terrain: crate::noise::PlanetTerrain,
-    // per column the mean effective height of its (2·SMOOTH_RADIUS + 1)² neighbourhood, in layers: the
+    // per column the mean effective height of its 3×3 neighbourhood, in layers: the
     // surface the low-poly terrain is drawn on (blocks stay the truth; lowpoly.rs)
     pub smooth: Arc<Vec<f32>>,
     pub planet_type: PlanetType,
@@ -439,6 +435,11 @@ impl PlanetData {
         crate::gen::CoordSystem::neighbor_column(face, u, v, du, dv, self.resolution)
     }
 
+    // the up to eight columns around (face, u, v) (CoordSystem::neighbour_columns)
+    pub fn neighbour_columns(&self, face: u8, u: u32, v: u32) -> Vec<(u8, u32, u32)> {
+        crate::gen::CoordSystem::neighbour_columns(face, u, v, self.resolution)
+    }
+
     pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
         self.neighbor_column(face, u, v, du, dv)
             .map_or(0, |(f, nu, nv)| self.effective_height(f, nu, nv))
@@ -464,17 +465,13 @@ impl PlanetData {
                 let face = (row as u32 / res) as u8;
                 let v = row as u32 % res;
                 for u in 0..res {
-                    let (mut sum, mut n) = (0.0, 0.0);
-                    for dv in -SMOOTH_RADIUS..=SMOOTH_RADIUS {
-                        for du in -SMOOTH_RADIUS..=SMOOTH_RADIUS {
-                            if let Some((f, cu, cv)) =
-                                crate::gen::CoordSystem::neighbor_column(face, u, v, du, dv, res)
-                            {
-                                sum += eff(f, cu, cv);
-                                n += 1.0;
-                            }
-                        }
-                    }
+                    let around = crate::gen::CoordSystem::neighbour_columns(face, u, v, res);
+                    let sum = eff(face, u, v)
+                        + around
+                            .iter()
+                            .map(|&(f, cu, cv)| eff(f, cu, cv))
+                            .sum::<f32>();
+                    let n = 1.0 + around.len() as f32;
                     out[u as usize] = sum / n;
                 }
             });
@@ -1236,19 +1233,17 @@ pub(crate) mod tests {
     fn smooth_height_crosses_face_edges() {
         let planet = PlanetData::new(32);
         let (face, u, v) = (0u8, 0u32, 12u32);
-        let mut sum = 0.0;
-        let mut other_face = false;
-        for dv in -1..=1 {
-            for du in -1..=1 {
-                let (f, cu, cv) = planet.neighbor_column(face, u, v, du, dv).unwrap();
-                other_face |= f != face;
-                sum += planet.effective_height(f, cu, cv) as f32;
-            }
-        }
+        let around = planet.neighbour_columns(face, u, v);
+        assert_eq!(around.len(), 8);
         assert!(
-            other_face,
+            around.iter().any(|&(f, _, _)| f != face),
             "the edge column has no neighbour on another face"
         );
+        let sum = planet.effective_height(face, u, v) as f32
+            + around
+                .iter()
+                .map(|&(f, cu, cv)| planet.effective_height(f, cu, cv) as f32)
+                .sum::<f32>();
         assert!((planet.smooth_height(face, u, v) - sum / 9.0).abs() < 1e-5);
     }
 

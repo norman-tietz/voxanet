@@ -3198,21 +3198,12 @@ pub(crate) fn chunks_to_refresh(id: BlockId, planet: &PlanetData) -> HashSet<Chu
         })
     };
     let mut keys = HashSet::from([PlanetData::chunk_key(id)]);
-    let column = |du: i32, dv: i32| planet.neighbor_column(id.face, id.u, id.v, du, dv);
-    for (su, sv) in [(1i32, 1i32), (-1, 1), (1, -1), (-1, -1)] {
-        let (c1, c3) = (column(su, 0), column(0, sv));
-        keys.extend(c1.into_iter().chain(c3).map(key));
-        let (Some(c1), Some(c3)) = (c1, c3) else {
-            continue;
-        };
-        let diagonal = match (c1.0 == id.face, c3.0 == id.face) {
-            (true, true) => column(su, sv),
-            (false, true) => planet.neighbor_column(c3.0, c3.1, c3.2, su, 0),
-            (true, false) => planet.neighbor_column(c1.0, c1.1, c1.2, 0, sv),
-            (false, false) => None,
-        };
-        keys.extend(diagonal.map(key));
-    }
+    keys.extend(
+        planet
+            .neighbour_columns(id.face, id.u, id.v)
+            .into_iter()
+            .map(key),
+    );
     keys
 }
 
