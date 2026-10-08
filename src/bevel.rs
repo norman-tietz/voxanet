@@ -92,6 +92,57 @@ impl BevelSettings {
     }
 }
 
+pub const BEVEL_USAGE: &str = "Usage: /bevel get|on|off|width <0-0.25>|cavity <0-1>";
+const MAX_WIDTH: f32 = 0.25;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BevelCommand {
+    Get,
+    Width(f32),
+    Cavity(f32),
+    On,
+    Off,
+}
+
+impl BevelCommand {
+    // the words after /bevel
+    pub fn parse(args: &[&str]) -> Result<BevelCommand, &'static str> {
+        let value = |s: &str, max: f32| {
+            s.parse::<f32>()
+                .ok()
+                .filter(|v| (0.0..=max).contains(v))
+                .ok_or(BEVEL_USAGE)
+        };
+        match args {
+            ["get"] => Ok(BevelCommand::Get),
+            ["on"] => Ok(BevelCommand::On),
+            ["off"] => Ok(BevelCommand::Off),
+            ["width", v] => value(v, MAX_WIDTH).map(BevelCommand::Width),
+            ["cavity", v] => value(v, 1.0).map(BevelCommand::Cavity),
+            _ => Err(BEVEL_USAGE),
+        }
+    }
+}
+
+impl BevelSettings {
+    // applies a /bevel command; returns the line to log
+    pub fn apply(&mut self, cmd: BevelCommand) -> String {
+        match cmd {
+            BevelCommand::Get => {}
+            BevelCommand::Width(w) => {
+                self.width = w;
+                if w > 0.0 {
+                    self.last_width = w;
+                }
+            }
+            BevelCommand::Cavity(c) => self.cavity = c,
+            BevelCommand::On => self.width = self.last_width,
+            BevelCommand::Off => self.width = 0.0,
+        }
+        format!("Bevel: width {:.2}, cavity {:.2}", self.width, self.cavity)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +244,46 @@ mod tests {
         let s = BevelSettings::default();
         assert_eq!(s.uniform(), [DEFAULT_WIDTH, DEFAULT_CAVITY, 0.0, 0.0]);
         assert_eq!((DEFAULT_WIDTH, DEFAULT_CAVITY), (0.06, 0.2));
+    }
+    #[test]
+    fn bevel_command_parses_and_checks_ranges() {
+        assert_eq!(BevelCommand::parse(&["get"]), Ok(BevelCommand::Get));
+        assert_eq!(BevelCommand::parse(&["on"]), Ok(BevelCommand::On));
+        assert_eq!(BevelCommand::parse(&["off"]), Ok(BevelCommand::Off));
+        assert_eq!(
+            BevelCommand::parse(&["width", "0.1"]),
+            Ok(BevelCommand::Width(0.1))
+        );
+        assert_eq!(
+            BevelCommand::parse(&["cavity", "0.5"]),
+            Ok(BevelCommand::Cavity(0.5))
+        );
+        for bad in [
+            &["width", "0.3"][..],
+            &["cavity", "2"],
+            &["width", "x"],
+            &["width"],
+            &[],
+            &["nope"],
+        ] {
+            assert_eq!(BevelCommand::parse(bad), Err(BEVEL_USAGE), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn off_and_on_restore_the_last_width() {
+        let mut s = BevelSettings::default();
+        s.apply(BevelCommand::Width(0.1));
+        s.apply(BevelCommand::Off);
+        assert_eq!(s.width, 0.0);
+        s.apply(BevelCommand::On);
+        assert_eq!(s.width, 0.1);
+        // width 0 is "off": on afterwards brings back the last non-zero width, not 0
+        s.apply(BevelCommand::Width(0.0));
+        s.apply(BevelCommand::On);
+        assert_eq!(s.width, 0.1);
+        s.apply(BevelCommand::Cavity(0.5));
+        assert_eq!(s.cavity, 0.5);
+        assert!(s.apply(BevelCommand::Get).contains("0.10"));
     }
 }

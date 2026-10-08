@@ -711,6 +711,10 @@ impl Game {
             console.exec(cmd.trim(), player);
         }
 
+        if let Some(cmd) = console.bevel_request.take() {
+            let msg = renderer.bevel.apply(cmd);
+            console.log(&msg, [0.0, 1.0, 0.0]);
+        }
         if let Some(on) = console.hw_shadows_request.take() {
             let active = renderer.set_hw_shadows(on);
             if on && !active {

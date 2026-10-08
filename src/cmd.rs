@@ -15,11 +15,12 @@ pub enum GalaxyRequest {
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 6] = [
+const HELP_LINES: [&str; 7] = [
     "Commands (up/down recall earlier ones):",
     "  /debug_mode set true|false     /view set first|third",
     "  /move_speed get|set <value>    /jump_force get|set <value>",
     "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
+    "  /bevel get|on|off|width <v>|cavity <v>",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -71,6 +72,7 @@ pub struct Console {
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
     pub terrain_style_request: Option<crate::lowpoly::TerrainStyle>, // set by /terrain_style, applied by the game loop (renderer)
+    pub bevel_request: Option<crate::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -89,6 +91,7 @@ impl Console {
             view_request: None,
             galaxy_request: None,
             terrain_style_request: None,
+            bevel_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -252,6 +255,11 @@ impl Console {
                 _ => self.log("Usage: /hw_shadows set [true/false]", [1.0, 0.5, 0.0]),
             },
 
+            "/bevel" => match crate::bevel::BevelCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.bevel_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/view" => match (parts.get(1), parts.get(2)) {
                 (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
                 (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
@@ -351,6 +359,18 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    #[test]
+    fn bevel_command_sets_a_request() {
+        let c = console_with(&["/bevel width 0.08"]);
+        assert_eq!(
+            c.bevel_request,
+            Some(crate::bevel::BevelCommand::Width(0.08))
+        );
+        let c = console_with(&["/bevel width 9"]);
+        assert_eq!(c.bevel_request, None);
+        assert_eq!(c.history.last().unwrap().0, crate::bevel::BEVEL_USAGE);
     }
 
     #[test]
