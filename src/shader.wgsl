@@ -816,6 +816,44 @@ fn fs_flash() -> @location(0) vec4<f32> {
     return vec4<f32>(local.params.yzw, local.params.x);
 }
 
+// film look (film.rs): a vignette and animated grain over the finished frame, drawn right after the
+// lens flare (under the HUD) in both render paths. local.params = (grain, vignette, time in seconds,
+// width / height). fs_film returns one factor that the "2x multiply" blend applies (out = 2 · src · dst),
+// so grain brightens as much as it darkens and the frame keeps its mean brightness.
+struct FilmOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_film(@builtin(vertex_index) i: u32) -> FilmOut {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return FilmOut(vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0), p);
+}
+
+// PCG hash: well spread for neighbouring pixels and frames, unlike sin-based hashes at 4K coordinates
+fn pcg_hash(v: u32) -> u32 {
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+@fragment
+fn fs_film(in: FilmOut) -> @location(0) vec4<f32> {
+    let grain = local.params.x;
+    let vignette = local.params.y;
+    let aspect = local.params.w;
+    // a new grain pattern every millisecond of clock, i.e. every frame
+    let frame = u32(local.params.z * 1000.0);
+    let h = pcg_hash(u32(in.pos.x) + pcg_hash(u32(in.pos.y) + pcg_hash(frame)));
+    let noise = f32(h) / 4294967295.0 * 2.0 - 1.0;
+    // 0 at the centre, 1 in the corners, round on screen
+    let d = (in.uv - 0.5) * vec2<f32>(aspect, 1.0);
+    let r = length(d) / length(vec2<f32>(aspect, 1.0) * 0.5);
+    let v = 1.0 - vignette * smoothstep(0.4, 1.0, r);
+    return vec4<f32>(vec3<f32>(0.5 * v * (1.0 + grain * noise)), 1.0);
+}
+
 // translucent water surface (MeshGen::build_water), drawn after the lighting over the lit sea floor.
 // Opacity grows with the depth of water along the view ray (G-buffer distance behind the surface).
 // one travelling sine wave in world space (a plane wave crossing the sphere, so there are no seams at cube

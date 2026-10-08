@@ -20,7 +20,7 @@ const HELP_LINES: [&str; 7] = [
     "  /debug_mode set true|false     /view set first|third",
     "  /move_speed get|set <value>    /jump_force get|set <value>",
     "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
-    "  /bevel get|on|off|width <v>|cavity <v>",
+    "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -73,6 +73,7 @@ pub struct Console {
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
     pub terrain_style_request: Option<crate::lowpoly::TerrainStyle>, // set by /terrain_style, applied by the game loop (renderer)
     pub bevel_request: Option<crate::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
+    pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -92,6 +93,7 @@ impl Console {
             galaxy_request: None,
             terrain_style_request: None,
             bevel_request: None,
+            film_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -260,6 +262,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/film" => match crate::film::FilmCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.film_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/view" => match (parts.get(1), parts.get(2)) {
                 (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
                 (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
@@ -359,6 +366,18 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    #[test]
+    fn film_command_sets_a_request() {
+        let c = console_with(&["/film vignette 0.4"]);
+        assert_eq!(
+            c.film_request,
+            Some(crate::film::FilmCommand::Vignette(0.4))
+        );
+        let c = console_with(&["/film grain 1"]);
+        assert_eq!(c.film_request, None);
+        assert_eq!(c.history.last().unwrap().0, crate::film::FILM_USAGE);
     }
 
     #[test]

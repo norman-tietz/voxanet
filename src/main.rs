@@ -8,6 +8,7 @@ mod common;
 mod controller;
 mod deferred;
 mod entity;
+mod film;
 mod flare;
 mod galaxy;
 mod galaxy_render;
@@ -711,6 +712,10 @@ impl Game {
             console.exec(cmd.trim(), player);
         }
 
+        if let Some(cmd) = console.film_request.take() {
+            let msg = renderer.film.apply(cmd);
+            console.log(&msg, [0.0, 1.0, 0.0]);
+        }
         if let Some(cmd) = console.bevel_request.take() {
             let msg = renderer.bevel.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);

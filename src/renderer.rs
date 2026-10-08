@@ -248,6 +248,12 @@ pub struct Renderer {
     flare_bind: wgpu::BindGroup, // rebuilt on resize (it binds the G-buffer distance and depth)
     flash_buf: wgpu::Buffer,
     flash_bind: wgpu::BindGroup,
+    pub film: crate::film::FilmSettings, // grain and vignette (console: /film)
+    film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
+    film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
+    film_buf: wgpu::Buffer,
+    film_bind: wgpu::BindGroup,
+    film_clock: std::time::Instant, // grain animation time
     heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
     heat_bind: wgpu::BindGroup,
     console_panel_bind: wgpu::BindGroup, // the console's background in galaxy mode, drawn with flash_pipeline
@@ -592,6 +598,21 @@ impl Renderer {
             label: None,
         });
 
+        // film look (film.rs, fs_film): params = grain, vignette, time, aspect, written by update_film
+        let film_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Film Uniform"),
+            contents: bytemuck::cast_slice(&[default_local]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let film_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: film_buf.as_entire_binding(),
+            }],
+            label: None,
+        });
+
         let heat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Heat Glow Uniform"),
             contents: bytemuck::cast_slice(&[default_local]),
@@ -865,6 +886,56 @@ impl Renderer {
             cache: None,
         });
 
+        // film look over the finished frame: "2x multiply" (out = 2 · src · dst), alpha kept. Two variants:
+        // planet mode draws it in the lighting pass (depth attached) under the crosshair and console,
+        // galaxy mode in its HUD pass (no depth)
+        let film_pipeline_for = |depth: Option<wgpu::DepthStencilState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Film Pipeline"),
+                layout: Some(&flash_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_film"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_film"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Dst,
+                                dst_factor: wgpu::BlendFactor::Src,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: depth,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let film_pipeline = film_pipeline_for(None);
+        let film_pipeline_depth = film_pipeline_for(Some(wgpu::DepthStencilState {
+            format: crate::deferred::DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }));
+
         // --- MESHES ---
         let (pv, pi) = MeshGen::generate_cylinder(0.4, 1.8, 16);
         let player_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -998,6 +1069,12 @@ impl Renderer {
             flare_bind,
             flash_buf,
             flash_bind,
+            film: crate::film::FilmSettings::default(),
+            film_pipeline,
+            film_pipeline_depth,
+            film_buf,
+            film_bind,
+            film_clock: std::time::Instant::now(),
             heat_buf,
             heat_bind,
             console_panel_bind,
@@ -2212,6 +2289,37 @@ impl Renderer {
         self.draw_full_screen(pass, &self.flash_bind, alpha);
     }
 
+    // uploads this frame's film look; false when it's off (nothing to draw)
+    fn update_film(&mut self) -> bool {
+        // wrapped, so the f32 time keeps millisecond steps (a new grain pattern every frame)
+        let time = self.film_clock.elapsed().as_secs_f32() % 3600.0;
+        let params = self
+            .film
+            .uniform(time, self.config.width as f32 / self.config.height as f32);
+        self.queue.write_buffer(
+            &self.film_buf,
+            0,
+            bytemuck::cast_slice(&[LocalUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array(),
+                params,
+            }]),
+        );
+        params[0] > 0.0 || params[1] > 0.0
+    }
+
+    // grain and vignette over everything the pass holds so far (the camera image); before the HUD
+    fn draw_film(&self, pass: &mut wgpu::RenderPass, on: bool, depth_attached: bool) {
+        if on {
+            pass.set_pipeline(if depth_attached {
+                &self.film_pipeline_depth
+            } else {
+                &self.film_pipeline
+            });
+            pass.set_bind_group(1, &self.film_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
     fn draw_full_screen(&self, pass: &mut wgpu::RenderPass, bind: &wgpu::BindGroup, alpha: f32) {
         if alpha > 0.001 {
             pass.set_pipeline(&self.flash_pipeline);
@@ -2293,6 +2401,7 @@ impl Renderer {
 
         // before cull_frustum below, which may keep self borrowed for the rest of the frame
         let flash_alpha = self.update_flash(std::time::Instant::now());
+        let film = self.update_film();
 
         // --- FRUSTUM CULLING LOGIC ---
         let current_frustum = crate::common::Frustum::from_matrix(mvp);
@@ -2689,6 +2798,9 @@ impl Renderer {
                 pass.set_pipeline(&self.pipeline_cursor);
                 pass.draw_indexed(0..self.cursor_inds, 0, 0..1);
             }
+
+            // the camera image ends here: grain and vignette under the crosshair and console
+            self.draw_film(&mut pass, film, true);
 
             if controller.first_person {
                 pass.set_pipeline(&self.pipeline_line);
@@ -3269,6 +3381,7 @@ impl Renderer {
 
         let flash_alpha = self.update_flash(std::time::Instant::now());
         let heat_alpha = self.update_heat_glow(heat);
+        let film = self.update_film();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3296,6 +3409,7 @@ impl Renderer {
             if flare {
                 self.draw_flare(&mut pass);
             }
+            self.draw_film(&mut pass, film, false);
             if console_panel_px > 0 {
                 let panel_height = console_panel_px.min(self.config.height);
                 pass.set_scissor_rect(0, 0, self.config.width, panel_height);
