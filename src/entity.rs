@@ -108,7 +108,7 @@ fn fly_terrain_floor(
     for i in 0..=FLY_LOOKAHEAD_SAMPLES {
         let dist = lookahead_dist * (i as f32) / (FLY_LOOKAHEAD_SAMPLES as f32);
         let sample_pos = pos + horizontal_dir * dist;
-        if let Some(id) = crate::gen::CoordSystem::pos_to_id(sample_pos, res) {
+        if let Some(id) = planet.cell_at(sample_pos) {
             max_height = max_height.max(planet.effective_height(id.face, id.u, id.v));
         }
     }

@@ -260,6 +260,9 @@ const HEAT_WARNING: f32 = 0.35;
 // block cursor: 12 edge bars of 6 quads each
 const CURSOR_VERTS: usize = 12 * 6 * 4;
 const CURSOR_INDS: usize = 12 * 6 * 6;
+// a hex column's cursor (hex.rs): up to 8 outline corners, so up to 24 bars
+const CURSOR_MAX_VERTS: usize = 24 * 6 * 4;
+const CURSOR_MAX_INDS: usize = 24 * 6 * 6;
 const STATUS_SECONDS: f32 = 2.5;
 const STATUS_FADE_SECONDS: f32 = 0.5;
 
@@ -845,13 +848,13 @@ impl Renderer {
 
         let cursor_v_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cursor V"),
-            size: (CURSOR_VERTS * std::mem::size_of::<Vertex>()) as u64,
+            size: (CURSOR_MAX_VERTS * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let cursor_i_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cursor I"),
-            size: (CURSOR_INDS * std::mem::size_of::<u32>()) as u64,
+            size: (CURSOR_MAX_INDS * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1128,7 +1131,8 @@ impl Renderer {
     // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
     // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
     pub(crate) fn camera_water_radius(planet: &PlanetData, cam_pos: Vec3) -> f32 {
-        CoordSystem::pos_to_id(cam_pos, planet.resolution)
+        planet
+            .cell_at(cam_pos)
             .map_or(0.0, |id| planet.water_surface_radius(id.face, id.u, id.v))
     }
 
@@ -1939,7 +1943,14 @@ impl Renderer {
     }
 
     pub fn update_cursor(&mut self, planet: &PlanetData, id: Option<BlockId>) {
-        if let Some(id) = id {
+        if let (Some(id), crate::common::CellShape::Hex) = (id, planet.cells) {
+            let (verts, inds) = hex_cursor(planet, id);
+            self.queue
+                .write_buffer(&self.cursor_v_buf, 0, bytemuck::cast_slice(&verts));
+            self.queue
+                .write_buffer(&self.cursor_i_buf, 0, bytemuck::cast_slice(&inds));
+            self.cursor_inds = inds.len() as u32;
+        } else if let Some(id) = id {
             let res = planet.resolution;
             let p = |u, v, l| {
                 CoordSystem::get_vertex_pos(id.face, id.u + u, id.v + v, id.layer + l, res)
@@ -3182,6 +3193,68 @@ impl Renderer {
     }
 }
 
+// the block cursor of a hex column (hex.rs): a bar along every edge of the prism (the outline's corners
+// at the bottom and top of the layer, and the verticals between them), each extended by its half-width
+// past both ends so the bars close the corners, like the cube cursor's
+fn hex_cursor(planet: &PlanetData, id: BlockId) -> (Vec<Vertex>, Vec<u32>) {
+    let res = planet.resolution;
+    let pts = crate::hex::outline(id.u, id.v, res);
+    let at = |p: (i64, i64), l: u32| {
+        CoordSystem::get_vertex_pos_six(id.face, p.0, p.1, id.layer + l, res)
+    };
+    let (cu, cv) = crate::hex::centroid(&pts);
+    let centre = CoordSystem::get_direction_f(id.face, cu, cv, res)
+        * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
+    let thickness = 0.025;
+    let color = [1.0, 1.0, 0.0];
+    let (mut verts, mut inds) = (Vec::new(), Vec::new());
+    let mut bar = |a: Vec3, b: Vec3, s: Vec3| {
+        let dir = (b - a).normalize();
+        let s = (s - dir * s.dot(dir)).normalize() * thickness;
+        let t = dir.cross(s).normalize() * thickness;
+        let ring = |c: Vec3| [c - s - t, c + s - t, c + s + t, c - s + t];
+        let (ra, rb) = (ring(a - dir * thickness), ring(b + dir * thickness));
+        let mut quad = |q: [Vec3; 4]| {
+            let n = ((q[1] - q[0]).cross(q[2] - q[0])).normalize();
+            let mid = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+            let n = if n.dot(mid - (a + b) * 0.5) < 0.0 {
+                -n
+            } else {
+                n
+            };
+            let base = verts.len() as u32;
+            for pos in q {
+                verts.push(Vertex {
+                    pos: pos.to_array(),
+                    color,
+                    normal: n.to_array(),
+                    water: 0.0,
+                });
+            }
+            inds.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        };
+        for k in 0..4 {
+            let k1 = (k + 1) % 4;
+            quad([ra[k], ra[k1], rb[k1], rb[k]]);
+        }
+        quad(ra);
+        quad(rb);
+    };
+    for i in 0..pts.len() {
+        let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+        for l in 0..2 {
+            let (a, b) = (at(p, l), at(q, l));
+            // ring bars: sides along the radial up and across the edge
+            bar(a, b, a.normalize());
+        }
+        let (a, b) = (at(p, 0), at(p, 1));
+        // verticals: sides toward the cell's centre and across
+        bar(a, b, centre - a);
+    }
+    debug_assert!(verts.len() <= CURSOR_MAX_VERTS && inds.len() <= CURSOR_MAX_INDS);
+    (verts, inds)
+}
+
 // the chunks whose meshes an edit of block `id` changes: its own and those of its eight neighbouring
 // columns, which may lie on another cube face. The diagonals matter for the low-poly mesher: the cell
 // between four columns belongs to the chunk of its smallest column, so editing block (32k, 32k) changes
@@ -3228,6 +3301,27 @@ pub(crate) mod tests {
         assert!(all_voxel(2 * 40));
         assert!(!all_voxel(2 * 300));
         assert!(!all_voxel(2 * 500));
+    }
+
+    // every hex column's cursor fits the cursor buffers (border cells have up to 8 corners)
+    #[test]
+    fn hex_cursors_fit_the_cursor_buffers() {
+        let mut planet = PlanetData::new(16);
+        planet.cells = crate::common::CellShape::Hex;
+        for v in 0..16 {
+            for u in 0..16 {
+                let id = BlockId {
+                    face: 3,
+                    layer: 9,
+                    u,
+                    v,
+                };
+                let (verts, inds) = hex_cursor(&planet, id);
+                let corners = crate::hex::outline(u, v, 16).len();
+                assert_eq!(verts.len(), corners * 3 * 6 * 4);
+                assert!(verts.len() <= CURSOR_MAX_VERTS && inds.len() <= CURSOR_MAX_INDS);
+            }
+        }
     }
 
     // an edit refreshes the chunks of all eight neighbouring columns: at a chunk corner the four chunks

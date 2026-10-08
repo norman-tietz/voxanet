@@ -158,7 +158,7 @@ pub fn takeoff_target_layer(planet: &crate::common::PlanetData, position: Vec3) 
     let sea = planet.terrain.sea_level();
     let (_, peak) = planet.terrain.height_range();
     let in_water = planet.water_depth(position).is_some_and(|d| d > 0.0);
-    let ground = match crate::gen::CoordSystem::pos_to_id(position, planet.resolution) {
+    let ground = match planet.cell_at(position) {
         Some(id) if !in_water => planet.surface(id.face, id.u, id.v) + 1,
         Some(id) => planet.terrain.water_level(id.face, id.u, id.v) + 1,
         None => sea + 1,
@@ -352,7 +352,8 @@ pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) 
     let res = planet.resolution;
     let probe = position.normalize_or_zero() * (res as f32 / 2.0);
     // the same water rule as swimming and the rendered surface, so a dug, lava-filled hole counts too
-    crate::gen::CoordSystem::pos_to_id(probe, res)
+    planet
+        .cell_at(probe)
         .is_some_and(|id| planet.holds_water(id.face, id.u, id.v))
 }
 

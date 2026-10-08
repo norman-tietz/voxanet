@@ -168,10 +168,10 @@ pub fn edges(u: u32, v: u32, res: u32) -> Vec<Edge> {
     out
 }
 
-// a point's distance to segment a → b (sixths) in columns
-pub fn distance_to_edge(u: f64, v: f64, e: &Edge) -> f64 {
-    let (ax, ay) = (e.a.0 as f64 / 6.0, e.a.1 as f64 / 6.0);
-    let (bx, by) = (e.b.0 as f64 / 6.0, e.b.1 as f64 / 6.0);
+// a point's distance to edge a → b (sixths) in columns
+pub fn distance_to_edge(u: f64, v: f64, a: (i64, i64), b: (i64, i64)) -> f64 {
+    let (ax, ay) = (a.0 as f64 / 6.0, a.1 as f64 / 6.0);
+    let (bx, by) = (b.0 as f64 / 6.0, b.1 as f64 / 6.0);
     let (dx, dy) = (bx - ax, by - ay);
     let t = (((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
     let (px, py) = (ax + dx * t - u, ay + dy * t - v);
@@ -237,7 +237,7 @@ mod tests {
                 // points on a boundary may go either way; skip those within a hair of one
                 let near_edge = edges(cu, cv, res)
                     .iter()
-                    .any(|e| distance_to_edge(u, v, e) < 1e-9);
+                    .any(|e| distance_to_edge(u, v, e.a, e.b) < 1e-9);
                 assert!(
                     near_edge || inside(&pts, u, v),
                     "res {res}: ({u}, {v}) -> ({cu}, {cv}) {pts:?}"

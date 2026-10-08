@@ -2,7 +2,6 @@
 
 use crate::common::*;
 use crate::entity::Player;
-use crate::gen::CoordSystem;
 use crate::material::BlockType;
 use crate::physics::Physics;
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -375,7 +374,7 @@ impl Controller {
             // since blocks are now approx 1.0 unit thick/wide, 0.25 is a safe step.
             let step = 0.25;
 
-            if let Some(id) = CoordSystem::pos_to_id(p, planet.resolution) {
+            if let Some(id) = planet.cell_at(p) {
                 let exists = planet.exists(id);
                 if place_mode {
                     if exists {

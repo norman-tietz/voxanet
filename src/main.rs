@@ -78,7 +78,7 @@ fn parse_seed(args: &[String]) -> u64 {
 // liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
 fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
     let res = planet.resolution;
-    if let Some(id) = crate::gen::CoordSystem::pos_to_id(dir * (res as f32 / 2.0), res) {
+    if let Some(id) = planet.cell_at(dir * (res as f32 / 2.0)) {
         crate::gen::CoordSystem::get_layer_radius(planet.effective_height(id.face, id.u, id.v), res)
             + margin
     } else {

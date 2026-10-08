@@ -418,11 +418,8 @@ impl PlanetData {
         }
         // whether the column under `dir` holds the liquid (a lake or the sea)
         let probe_wet = |dir: glam::Vec3| {
-            crate::gen::CoordSystem::pos_to_id(
-                dir * (self.resolution as f32 / 2.0),
-                self.resolution,
-            )
-            .map(|id| self.holds_water(id.face, id.u, id.v))
+            self.cell_at(dir * (self.resolution as f32 / 2.0))
+                .map(|id| self.holds_water(id.face, id.u, id.v))
         };
         if probe_wet(preferred) != Some(true) {
             return preferred;
@@ -654,7 +651,7 @@ impl PlanetData {
     // how far `pos` lies below its column's water surface (negative above it), or None outside water
     // (holds_water)
     pub fn water_depth(&self, pos: glam::Vec3) -> Option<f32> {
-        let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
+        let id = self.cell_at(pos)?;
         if !self.holds_water(id.face, id.u, id.v) {
             return None;
         }
@@ -704,7 +701,7 @@ impl PlanetData {
     // the BlockType at `pos`'s column, at the layer pos itself sits in (for "what is the player
     // standing on" checks — entity.rs's slippery-ice friction)
     pub fn ground_block(&self, pos: glam::Vec3) -> Option<BlockType> {
-        let id = crate::gen::CoordSystem::pos_to_id(pos, self.resolution)?;
+        let id = self.cell_at(pos)?;
         self.block_type(id)
     }
 }

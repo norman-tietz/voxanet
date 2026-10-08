@@ -21,6 +21,9 @@ impl Physics {
     }
 
     pub fn is_solid(pos: Vec3, planet: &PlanetData) -> bool {
+        if planet.cells == crate::common::CellShape::Hex {
+            return Self::is_solid_hex(pos, planet);
+        }
         let res = planet.resolution;
 
         // 1. get precise block id and local position 0.0 - 1.0
@@ -92,6 +95,43 @@ impl Physics {
         true
     }
 
+    // is_solid for hex columns (hex.rs): the same surface shaving, off each of the cell's walls whose
+    // column across is empty, measured in face space
+    fn is_solid_hex(pos: Vec3, planet: &PlanetData) -> bool {
+        let res = planet.resolution;
+        let Some((id, u, v, f_layer)) = planet.cell_local(pos) else {
+            let s = res as f32 / 2.0;
+            return pos.length() < s * (-0.85_f32).exp();
+        };
+        if !planet.exists(id) {
+            return false;
+        }
+        let margin = 0.05;
+        for w in planet.hex_walls(id.face, id.u, id.v) {
+            let Some((face, cu, cv)) = w.across else {
+                continue;
+            };
+            if crate::hex::distance_to_edge(u, v, w.a, w.b) < margin
+                && !planet.exists(BlockId {
+                    face,
+                    layer: id.layer,
+                    u: cu,
+                    v: cv,
+                })
+            {
+                return false;
+            }
+        }
+        let empty = |layer: u32| !planet.exists(BlockId { layer, ..id });
+        if f_layer < margin as f32 && id.layer > 0 && empty(id.layer - 1) {
+            return false;
+        }
+        if f_layer > 1.0 - margin as f32 && empty(id.layer + 1) {
+            return false;
+        }
+        true
+    }
+
     fn get_grid_axes(up: Vec3, pos: Vec3) -> (Vec3, Vec3) {
         let abs_p = pos.abs();
         // determine dominant axis (Face) to align hitboxes with walls
@@ -130,7 +170,7 @@ impl Physics {
     pub fn overlaps_block(pos: Vec3, id: BlockId, planet: &PlanetData) -> bool {
         Self::body_points(pos)
             .into_iter()
-            .any(|p| CoordSystem::pos_to_id(p, planet.resolution) == Some(id))
+            .any(|p| planet.cell_at(p) == Some(id))
     }
 
     // the points of the player's body that collision samples: feet, waist, eyes and head, each at the
@@ -310,6 +350,55 @@ mod tests {
         assert!(
             !Physics::overlaps_block(feet, beside, &planet),
             "two columns over"
+        );
+    }
+
+    // hex columns: collision follows the hex cells (solid exactly where the cell under the point
+    // exists, away from the shaved margins), not the square grid
+    #[test]
+    fn hex_collision_follows_the_hex_cells() {
+        let mut planet = PlanetData::new(32);
+        planet.cells = crate::common::CellShape::Hex;
+        let res = planet.resolution;
+        let (mut solid, mut checked, mut differs) = (0, 0, 0);
+        let mut s = 0x2545f4914f6cdd1du64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20_000 {
+            let face = (next() * 6.0) as u8;
+            let (u, v) = (next() * res as f64, next() * res as f64);
+            let (fu, fv) = (u as u32, v as u32);
+            let layer = planet.effective_height(face, fu.min(res - 1), fv.min(res - 1)) as f32
+                + (next() as f32 - 0.5) * 6.0;
+            let dir = CoordSystem::get_direction_f(face, u, v, res);
+            let p = dir * CoordSystem::get_layer_radius_f(layer.max(1.0), res);
+            let Some((id, cu, cv, f_layer)) = planet.cell_local(p) else {
+                continue;
+            };
+            let near_wall = planet
+                .hex_walls(id.face, id.u, id.v)
+                .iter()
+                .any(|w| crate::hex::distance_to_edge(cu, cv, w.a, w.b) < 0.06);
+            if near_wall || !(0.06..0.94).contains(&f_layer) {
+                continue;
+            }
+            checked += 1;
+            let exists = planet.exists(id);
+            assert_eq!(Physics::is_solid(p, &planet), exists, "{id:?}");
+            solid += exists as u32;
+            // where the hex cell's column differs from the square one's height, the square rule
+            // would have answered differently
+            let square = CoordSystem::pos_to_id(p, res).unwrap();
+            differs += (planet.exists(square) != exists) as u32;
+        }
+        assert!(checked > 5_000 && solid > 1_000, "{checked} {solid}");
+        assert!(
+            differs > 0,
+            "the sample never told hex and square cells apart"
         );
     }
 }

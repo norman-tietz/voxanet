@@ -952,6 +952,9 @@ impl MeshGen {
 
         // check a 3x3x3 area around the player
         let range = 2;
+        if planet.cells == crate::common::CellShape::Hex {
+            return Self::hex_collision_debug(player_pos, planet, range, color, normal);
+        }
 
         if let Some((center_id, _)) = CoordSystem::get_local_coords(player_pos, res) {
             let start_u = (center_id.u as i32 - range).max(0);
@@ -1049,6 +1052,56 @@ impl MeshGen {
                             }
                             idx += 8;
                         }
+                    }
+                }
+            }
+        }
+        (verts, inds)
+    }
+
+    // generate_collision_debug for hex columns: the outline prisms of the solid cells around the player,
+    // shrunk toward their centres like the cube boxes
+    fn hex_collision_debug(
+        player_pos: Vec3,
+        planet: &PlanetData,
+        range: i32,
+        color: [f32; 3],
+        normal: [f32; 3],
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let (mut verts, mut inds) = (Vec::new(), Vec::new());
+        let res = planet.resolution;
+        let Some(c) = planet.cell_at(player_pos) else {
+            return (verts, inds);
+        };
+        let clamp = |x: i32, hi: u32| x.clamp(0, hi as i32 - 1) as u32;
+        for layer in clamp(c.layer as i32 - range, res * 2)..=c.layer + range as u32 {
+            for v in clamp(c.v as i32 - range, res)..=clamp(c.v as i32 + range, res) {
+                for u in clamp(c.u as i32 - range, res)..=clamp(c.u as i32 + range, res) {
+                    let pts = crate::hex::outline(u, v, res);
+                    let (cu, cv) = crate::hex::centroid(&pts);
+                    let centre = CoordSystem::get_direction_f(c.face, cu, cv, res)
+                        * CoordSystem::get_layer_radius_f(layer as f32 + 0.5, res);
+                    if !crate::physics::Physics::is_solid(centre, planet) {
+                        continue;
+                    }
+                    let base = verts.len() as u32;
+                    let n = pts.len() as u32;
+                    for l in 0..2 {
+                        for &(u6, v6) in &pts {
+                            let p = CoordSystem::get_vertex_pos_six(c.face, u6, v6, layer + l, res);
+                            verts.push(Vertex {
+                                pos: (centre + (p - centre) * 0.9).to_array(),
+                                color,
+                                normal,
+                                water: 0.0,
+                            });
+                        }
+                    }
+                    for i in 0..n {
+                        let j = (i + 1) % n;
+                        inds.extend_from_slice(&[base + i, base + j]);
+                        inds.extend_from_slice(&[base + n + i, base + n + j]);
+                        inds.extend_from_slice(&[base + i, base + n + i]);
                     }
                 }
             }
