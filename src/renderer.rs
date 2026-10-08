@@ -36,6 +36,8 @@ pub(crate) const FLARE_SHADER: &str = concat!(
 
 pub(crate) const SCENE_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
+    "\n",
+    include_str!("clouds.wgsl"),
     include_str!("star.wgsl"),
     "\n",
     include_str!("shader.wgsl")
@@ -54,7 +56,7 @@ pub struct GlobalUniform {
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub screen: [f32; 4], // width, height in pixels, sea surface radius, time in seconds (water animation)
-    pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed
+    pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed; y: radians per screen pixel (cloud map level of detail)
 }
 
 #[repr(C)]
@@ -183,6 +185,7 @@ pub struct Renderer {
 
     deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
     galaxy: crate::galaxy_render::GalaxyRenderer,
+    cloud_map: crate::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
     global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
 
     // --- MESHES ---
@@ -389,6 +392,8 @@ impl Renderer {
             None,
         );
 
+        let cloud_map = crate::cloud_map::CloudMap::new(&device);
+        let cloud_layout = crate::cloud_map::CloudMap::layout_entries();
         let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -436,6 +441,10 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 8-10: the cloud map (cloud_map.rs, clouds.wgsl)
+                cloud_layout[0],
+                cloud_layout[1],
+                cloud_layout[2],
             ],
             label: Some("global_layout"),
         });
@@ -488,6 +497,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let cloud_entries = cloud_map.bind_entries();
         let global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &global_layout,
             entries: &[
@@ -507,6 +517,10 @@ impl Renderer {
                     binding: 3,
                     resource: biome_buf.as_entire_binding(),
                 },
+                // 8-10: the cloud map
+                cloud_entries[0].clone(),
+                cloud_entries[1].clone(),
+                cloud_entries[2].clone(),
             ],
             label: None,
         });
@@ -693,7 +707,7 @@ impl Renderer {
             config.width,
             config.height,
         );
-        let galaxy = crate::galaxy_render::GalaxyRenderer::new(&device, &config);
+        let galaxy = crate::galaxy_render::GalaxyRenderer::new(&device, &config, &cloud_map);
 
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -935,6 +949,10 @@ impl Renderer {
                     binding: 3,
                     resource: biome_buf.as_entire_binding(),
                 },
+                // 8-10: the cloud map
+                cloud_entries[0].clone(),
+                cloud_entries[1].clone(),
+                cloud_entries[2].clone(),
             ],
             label: Some("Identity Bind Group"),
         });
@@ -984,6 +1002,7 @@ impl Renderer {
             status: None,
             deferred,
             galaxy,
+            cloud_map,
 
             font_system,
             swash_cache,
@@ -2219,6 +2238,9 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.poll(&self.device);
         }
+        // before the backdrop, which draws clouds too; cloud time wraps hourly like the shaders' clock
+        self.cloud_map
+            .update(&self.device, &self.queue, time % 3600.0);
 
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
@@ -2318,7 +2340,12 @@ impl Renderer {
                 sun_dir.z,
                 if self.output_p3 { 1.0 } else { 0.0 },
             ],
-            motion: [motion_blur, 0.0, 0.0, 0.0],
+            motion: [
+                motion_blur,
+                controller.fov_y() / self.config.height as f32,
+                0.0,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -2983,6 +3010,7 @@ impl Renderer {
         t: f64,
         console: &Console,
     ) {
+        self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
             | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,

@@ -13,6 +13,8 @@ use wgpu::util::DeviceExt;
 // galaxy mode's shader: the shared atmosphere maths (atmosphere.wgsl) followed by galaxy.wgsl
 pub(crate) const GALAXY_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
+    "\n",
+    include_str!("clouds.wgsl"),
     include_str!("star.wgsl"),
     "\n",
     include_str!("galaxy.wgsl")
@@ -42,6 +44,7 @@ struct GalaxyCameraUniform {
     screen: [f32; 4],
     ray_dirs: [[f32; 4]; 3],
     forward: [f32; 4], // the view direction (xyz), for the star's reversed-Z depth
+    pixel: [f32; 4],   // x: radians per screen pixel (cloud map level of detail)
 }
 
 // the star's uniform for vs_star/fs_star (must match StarUniform in galaxy.wgsl)
@@ -258,7 +261,11 @@ pub struct GalaxyRenderer {
 }
 
 impl GalaxyRenderer {
-    pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        cloud_map: &crate::cloud_map::CloudMap, // its bindings join the camera's group 0 (clouds.wgsl)
+    ) -> Self {
         let (verts, indices) = crate::icosphere::generate(ICOSPHERE_SUBDIVISIONS);
         let vert_data: Vec<[f32; 3]> = verts.iter().map(|v| v.to_array()).collect();
         let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -272,18 +279,25 @@ impl GalaxyRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        let cloud_layout = crate::cloud_map::CloudMap::layout_entries();
+        let cloud_entries = cloud_map.bind_entries();
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("galaxy_camera_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                cloud_layout[0],
+                cloud_layout[1],
+                cloud_layout[2],
+            ],
         });
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Galaxy Camera Uniform"),
@@ -294,10 +308,15 @@ impl GalaxyRenderer {
         let camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("galaxy_camera_bind"),
             layout: &camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                cloud_entries[0].clone(),
+                cloud_entries[1].clone(),
+                cloud_entries[2].clone(),
+            ],
         });
 
         let star_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -870,6 +889,7 @@ impl GalaxyRenderer {
                 screen: [screen.0, screen.1, (t % 3600.0) as f32, overlay_opacity],
                 ray_dirs,
                 forward: (camera.rotation * Vec3::NEG_Z).extend(0.0).to_array(),
+                pixel: [camera.fov_y / screen.1, 0.0, 0.0, 0.0],
             }]),
         );
     }

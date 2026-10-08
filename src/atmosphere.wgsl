@@ -1,5 +1,5 @@
 // atmosphere.wgsl
-// Sky, atmosphere limb, clouds, air fog and tone mapping shared by the voxel engine (shader.wgsl) and
+// Sky, atmosphere limb, clouds (the noise; clouds.wgsl samples it from the baked cloud map), air fog and tone mapping shared by the voxel engine (shader.wgsl) and
 // the galaxy planet impostors (galaxy.wgsl). Both are compiled with this file prepended (renderer.rs
 // SCENE_SHADER, galaxy_render.rs GALAXY_SHADER), so a planet looks the same from galaxy flight and from
 // the voxel engine at the landing handover. Everything here is in the planet's own frame (centre at
@@ -83,7 +83,8 @@ fn value_noise3(p: vec3<f32>) -> f32 {
     return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
 }
 
-// cumulus-like coverage at a direction on the cloud shell: a domain-warped FBM (the warp is what keeps
+// cumulus-like coverage at a direction on the cloud shell: a domain-warped FBM; baked into the cloud map
+// (cloud_map.rs, cloud_bake.wgsl) and sampled from there (clouds.wgsl) (the warp is what keeps
 // it from reading as a single tiling noise field, the same trick ripple_curvature uses for caustics)
 fn fbm_clouds(dir: vec3<f32>, t: f32) -> f32 {
     let wind = vec3<f32>(t * CLOUD_WIND_SPEED, 0.0, t * CLOUD_WIND_SPEED * 0.6);
@@ -103,10 +104,6 @@ fn fbm_clouds(dir: vec3<f32>, t: f32) -> f32 {
         amp *= 0.5;
     }
     return f;
-}
-
-fn cloud_coverage(dir: vec3<f32>, t: f32) -> f32 {
-    return smoothstep(CLOUD_COVERAGE, CLOUD_COVERAGE + CLOUD_SOFTNESS, fbm_clouds(dir, t));
 }
 
 // single-octave, unwarped: cheap enough to sample once per shaded pixel for cloud shadows
@@ -137,38 +134,6 @@ fn atmo_cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32, planet_r: f32) 
     if (hit_t < 0.0) { return 1.0; }
     let coverage = cloud_coverage_fast(normalize(world_pos + L * hit_t), t);
     return 1.0 - coverage * CLOUD_SHADOW_STRENGTH;
-}
-
-// cloud colour and coverage at `hit` (a point already known to be on the shell). Raymarches a short span
-// around it along the view ray instead of taking one sample: at a grazing/horizon angle that span covers
-// far more of the shell's thickness, so clouds naturally thicken and brighten near the horizon.
-fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>, a: Atmosphere) -> vec4<f32> {
-    let up = normalize(hit);
-    let thickness = a.planet_r * CLOUD_THICKNESS;
-    let radial = max(abs(dot(ray_dir, up)), 0.05);
-    let span = min(thickness / radial, thickness * 10.0);
-
-    var density = 0.0;
-    for (var i = 0; i < 4; i++) {
-        let s = (f32(i) + 0.5) / 4.0 - 0.5;
-        density += cloud_coverage(normalize(hit + ray_dir * (s * span)), t);
-    }
-    density *= 0.25;
-
-    let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(a.cloud_dark, a.cloud_light, ndotl) * a.sun_color * 0.55;
-    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light;
-    // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
-    // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
-    let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
-    return vec4<f32>((lit + silver) * daylight, clamp(density, 0.0, 1.0));
-}
-
-// clouds along an arbitrary ray (camera view ray, or a water reflection ray); empty if it misses the shell
-fn atmo_clouds(origin: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>, a: Atmosphere) -> vec4<f32> {
-    let hit_t = sphere_hit(origin, ray_dir, a.planet_r * CLOUD_ALT);
-    if (hit_t < 0.0) { return vec4<f32>(0.0); }
-    return atmo_cloud_shade(origin + ray_dir * hit_t, ray_dir, t, L, a);
 }
 
 // --- SKY ---

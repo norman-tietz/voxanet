@@ -7,7 +7,7 @@ struct Global {
     camera_pos: vec4<f32>, // w: planet radius (rt.resolution is 0 in hardware shadow mode, see hw_rt.rs)
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
-    motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed
+    motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed; y: radians per screen pixel (clouds.wgsl)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -477,12 +477,13 @@ fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32) -> f32 {
     return atmo_cloud_shadow(world_pos, L, t, global.camera_pos.w);
 }
 
-fn cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4<f32> {
-    return atmo_cloud_shade(hit, ray_dir, t, L, engine_atmosphere());
+// `dist`: from the camera to `hit` (picks the cloud map's level of detail)
+fn cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, dist: f32, L: vec3<f32>) -> vec4<f32> {
+    return atmo_cloud_shade(hit, ray_dir, global.motion.y * dist, L, engine_atmosphere());
 }
 
-fn clouds(origin: vec3<f32>, ray_dir: vec3<f32>, t: f32, L: vec3<f32>) -> vec4<f32> {
-    return atmo_clouds(origin, ray_dir, t, L, engine_atmosphere());
+fn clouds(origin: vec3<f32>, ray_dir: vec3<f32>, L: vec3<f32>) -> vec4<f32> {
+    return atmo_clouds(origin, ray_dir, global.motion.y, L, engine_atmosphere());
 }
 
 fn sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> f32 {
@@ -684,7 +685,7 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
     let cloud_r = global.camera_pos.w * CLOUD_ALT;
     let cloud_t = sphere_hit(cam_pos, ray_dir, cloud_r);
     if (cloud_t > 0.0 && (dist <= 0.0 || cloud_t < dist)) {
-        let cl = cloud_shade(cam_pos + ray_dir * cloud_t, ray_dir, t, L);
+        let cl = cloud_shade(cam_pos + ray_dir * cloud_t, ray_dir, cloud_t, L);
         color = cl.rgb * cl.a + color * (1.0 - cl.a);
         alpha = cl.a + alpha * (1.0 - cl.a);
     }
@@ -867,7 +868,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         if (!underwater) {
             refl_dir -= up * (2.0 * min(dot(refl_dir, up), 0.0));
         }
-        let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, t, L);
+        let refl_cloud = clouds(global.camera_pos.xyz, refl_dir, L);
         let refl = mix(sky_over_black(refl_dir, global.camera_pos.xyz, L), refl_cloud.rgb, refl_cloud.a);
         color = mix(color, refl * 1.2, fresnel);
         spec = pow(max(dot(N, normalize(L + V)), 0.0), 300.0) * shadow;

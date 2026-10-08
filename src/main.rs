@@ -1,6 +1,7 @@
 // engine main.rs
 
 mod biome;
+mod cloud_map;
 mod cmd;
 mod common;
 mod controller;

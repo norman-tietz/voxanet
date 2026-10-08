@@ -9,6 +9,7 @@ struct Camera {
     screen: vec4<f32>,      // x, y: width/height in pixels, z: cloud animation time (seconds, wrapped at 3600), w: handover overlay opacity (fs_planet_overlay)
     ray_dirs: array<vec4<f32>, 3>, // camera basis corners for the starfield background
     forward: vec4<f32>,     // the view direction (xyz), for the star's reversed-Z depth
+    pixel: vec4<f32>,       // x: radians per screen pixel (cloud map level of detail, clouds.wgsl)
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -218,7 +219,7 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let ray_dir = normalize(in.local_pos - cam);
     let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
     if (cloud_t > 0.0 && cloud_t < distance(cam, in.local_pos)) {
-        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
+        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, camera.pixel.x * cloud_t, L, a);
         color = mix(color, cl.rgb, cl.a);
     }
     return aces_and_gamma(color);
@@ -259,7 +260,7 @@ fn fs_atmosphere(in: AtmosphereVertexOut) -> @location(0) vec4<f32> {
     var color = atmo_sky_dome(ray_dir, cam, L, a) * alpha;
     let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
     if (cloud_t > 0.0) {
-        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, t, L, a);
+        let cl = atmo_cloud_shade(cam + ray_dir * cloud_t, ray_dir, camera.pixel.x * cloud_t, L, a);
         color = cl.rgb * cl.a + color * (1.0 - cl.a);
         alpha = cl.a + alpha * (1.0 - cl.a);
     }
