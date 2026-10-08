@@ -13,6 +13,19 @@ pub enum GalaxyRequest {
     }, // debug: append a planet to the galaxy
 }
 
+// every command with its options, shown when the console opens and by `help`; two per line so the
+// whole list fits the quarter-screen console (about 8 lines at 800 px)
+const HELP_LINES: [&str; 6] = [
+    "Commands (up/down recall earlier ones):",
+    "  /debug_mode set true|false     /view set first|third",
+    "  /move_speed get|set <value>    /jump_force get|set <value>",
+    "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
+    "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
+    "  /screenshot <path>             help",
+];
+const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
+const HELP_COLOR: [f32; 3] = [0.8, 0.8, 0.8];
+
 const GALAXY_USAGE: &str = "Usage: /galaxy home|goto <n> <radii>|add <type> <radius>";
 
 // parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
@@ -87,7 +100,30 @@ impl Console {
         if self.is_open {
             self.input_buffer.clear();
             self.history_cursor = None;
+            if !self.help_is_last() {
+                self.show_help();
+            }
         }
+    }
+
+    fn show_help(&mut self) {
+        for (i, line) in HELP_LINES.iter().enumerate() {
+            let color = if i == 0 {
+                HELP_HEADER_COLOR
+            } else {
+                HELP_COLOR
+            };
+            self.log(line, color);
+        }
+    }
+
+    // the log already ends with the command list (reopened without running anything): don't repeat it
+    fn help_is_last(&self) -> bool {
+        self.history.len() >= HELP_LINES.len()
+            && self.history[self.history.len() - HELP_LINES.len()..]
+                .iter()
+                .zip(HELP_LINES)
+                .all(|((text, _), line)| text == line)
     }
 
     pub fn log(&mut self, text: &str, color: [f32; 3]) {
@@ -248,29 +284,7 @@ impl Console {
                 None => self.log("Usage: /screenshot <path>", [1.0, 0.5, 0.0]),
             },
 
-            "help" => {
-                self.log("Available Commands:", [0.0, 1.0, 1.0]);
-                self.log("  /debug_mode set true", [0.8, 0.8, 0.8]);
-                self.log("  /move_speed set {value}", [0.8, 0.8, 0.8]);
-                self.log("  /jump_force set {value}", [0.8, 0.8, 0.8]);
-                self.log(
-                    "  /hw_shadows set true|false  (hardware ray-traced shadows)",
-                    [0.8, 0.8, 0.8],
-                );
-                self.log(
-                    "  /screenshot <path>  (save the current frame as PNG)",
-                    [0.8, 0.8, 0.8],
-                );
-                self.log("  /view set first|third", [0.8, 0.8, 0.8]);
-                self.log(
-                    "  /terrain_style cubes|lowpoly|hex  (terrain look, for comparison)",
-                    [0.8, 0.8, 0.8],
-                );
-                self.log(
-                    "  /galaxy home|goto <n> <radii>|add <type> <radius>",
-                    [0.8, 0.8, 0.8],
-                );
-            }
+            "help" => self.show_help(),
             _ => {
                 self.log(&format!("Unknown command: {}", command), [1.0, 0.0, 0.0]);
             }
@@ -337,6 +351,22 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    #[test]
+    fn opening_the_console_lists_the_commands_once() {
+        let mut c = Console::new();
+        c.toggle();
+        assert_eq!(c.history.len(), HELP_LINES.len());
+        assert_eq!(c.history[0].0, HELP_LINES[0]);
+        c.toggle();
+        c.toggle(); // reopened with nothing run in between: not listed again
+        assert_eq!(c.history.len(), HELP_LINES.len());
+        c.exec("/view set third", &mut Player::new());
+        c.toggle();
+        c.toggle(); // something else was logged since: listed again, at the bottom
+        assert!(c.help_is_last());
+        assert_eq!(c.history.len(), 2 * HELP_LINES.len() + 1);
     }
 
     #[test]

@@ -245,6 +245,7 @@ pub struct Renderer {
     flash_bind: wgpu::BindGroup,
     heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
     heat_bind: wgpu::BindGroup,
+    console_panel_bind: wgpu::BindGroup, // the console's background in galaxy mode, drawn with flash_pipeline
     status: Option<(String, std::time::Instant)>, // timed HUD status line, see show_status
     screenshot_flash: Option<std::time::Instant>, // set right after a capture, so the flash itself is never in the PNG
 }
@@ -279,6 +280,11 @@ const CONSOLE_SCREEN_FRACTION: f32 = 0.25;
 fn console_height_px(screen_height: f32, height_fraction: f32) -> f32 {
     screen_height * CONSOLE_SCREEN_FRACTION * height_fraction
 }
+
+const CONSOLE_PANEL_COLOR: [f32; 3] = [0.1, 0.1, 0.15];
+// the galaxy HUD's console panel (fs_flash, unlit, linear): what planet mode's panel shows on screen,
+// sRGB (38, 42, 63), since that one goes through shade() and post_process
+const CONSOLE_PANEL_GALAXY_COLOR: [f32; 3] = [0.019, 0.023, 0.050];
 
 fn console_bottom_ndc(height_fraction: f32) -> f32 {
     1.0 - 2.0 * CONSOLE_SCREEN_FRACTION * height_fraction
@@ -580,6 +586,28 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: heat_buf.as_entire_binding(),
+            }],
+            label: None,
+        });
+        // galaxy mode's console background: flash_pipeline at full opacity, clipped to the panel by a scissor rect (the galaxy HUD pass has no depth for pipeline_ui)
+        let console_panel_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Console Panel Uniform"),
+            contents: bytemuck::cast_slice(&[LocalUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array(),
+                params: [
+                    1.0,
+                    CONSOLE_PANEL_GALAXY_COLOR[0],
+                    CONSOLE_PANEL_GALAXY_COLOR[1],
+                    CONSOLE_PANEL_GALAXY_COLOR[2],
+                ],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let console_panel_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: console_panel_buf.as_entire_binding(),
             }],
             label: None,
         });
@@ -951,6 +979,7 @@ impl Renderer {
             flash_bind,
             heat_buf,
             heat_bind,
+            console_panel_bind,
             screenshot_flash: None,
             status: None,
             deferred,
@@ -1193,6 +1222,68 @@ impl Renderer {
         pass.draw(0..6, 0..8);
     }
 
+    // the console's log and input line (when it is at least partly open), as (buffer, top) at x = 10;
+    // shared by planet mode's text pass and the galaxy HUD
+    fn console_text(&mut self, console: &Console) -> Vec<(Buffer, f32)> {
+        let mut text_buffers = Vec::new();
+        if console.height_fraction > 0.0 {
+            let console_pixel_height =
+                console_height_px(self.config.height as f32, console.height_fraction);
+            let start_y = console_pixel_height - 40.0;
+            let line_height = 20.0;
+
+            for (i, (line_text, color)) in console.history.iter().rev().enumerate() {
+                let y = start_y - (i as f32 * line_height);
+                if y < 0.0 {
+                    break;
+                }
+
+                let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+                buffer.set_size(
+                    Some(self.config.width as f32),
+                    Some(self.config.height as f32),
+                );
+                buffer.set_text(
+                    line_text,
+                    &Attrs::new()
+                        .family(Family::Monospace)
+                        .color(glyphon::Color::rgb(
+                            (color[0] * 255.0) as u8,
+                            (color[1] * 255.0) as u8,
+                            (color[2] * 255.0) as u8,
+                        )),
+                    Shaping::Advanced,
+                    None,
+                );
+                buffer.shape_until_scroll(&mut self.font_system, false);
+                text_buffers.push((buffer, y));
+            }
+
+            let input_y = console_pixel_height - 20.0;
+            let mut input_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+            input_buf.set_size(
+                Some(self.config.width as f32),
+                Some(self.config.height as f32),
+            );
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let cursor = if (time / 500) % 2 == 0 { "_" } else { " " };
+            input_buf.set_text(
+                &format!("> {}{}", console.input_buffer, cursor),
+                &Attrs::new()
+                    .family(Family::Monospace)
+                    .color(glyphon::Color::rgb(255, 255, 0)),
+                Shaping::Advanced,
+                None,
+            );
+            input_buf.shape_until_scroll(&mut self.font_system, false);
+            text_buffers.push((input_buf, input_y));
+        }
+        text_buffers
+    }
+
     pub fn update_console_mesh(&mut self, t: f32) {
         if t <= 0.001 {
             self.console_inds = 0;
@@ -1201,7 +1292,7 @@ impl Renderer {
 
         let bottom_y = console_bottom_ndc(t);
 
-        let color = [0.1, 0.1, 0.15];
+        let color = CONSOLE_PANEL_COLOR;
         let normal = [0.0, 0.0, 1.0];
 
         let verts = vec![
@@ -2578,62 +2669,7 @@ impl Renderer {
         // --- PASS 4: TEXT RENDER ---
         // run this pass every frame to show FPS
         {
-            let mut text_buffers = Vec::new();
-            if console.height_fraction > 0.0 {
-                let console_pixel_height =
-                    console_height_px(self.config.height as f32, console.height_fraction);
-                let start_y = console_pixel_height - 40.0;
-                let line_height = 20.0;
-
-                for (i, (line_text, color)) in console.history.iter().rev().enumerate() {
-                    let y = start_y - (i as f32 * line_height);
-                    if y < 0.0 {
-                        break;
-                    }
-
-                    let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
-                    buffer.set_size(
-                        Some(self.config.width as f32),
-                        Some(self.config.height as f32),
-                    );
-                    buffer.set_text(
-                        line_text,
-                        &Attrs::new()
-                            .family(Family::Monospace)
-                            .color(glyphon::Color::rgb(
-                                (color[0] * 255.0) as u8,
-                                (color[1] * 255.0) as u8,
-                                (color[2] * 255.0) as u8,
-                            )),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    buffer.shape_until_scroll(&mut self.font_system, false);
-                    text_buffers.push((buffer, y));
-                }
-
-                let input_y = console_pixel_height - 20.0;
-                let mut input_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
-                input_buf.set_size(
-                    Some(self.config.width as f32),
-                    Some(self.config.height as f32),
-                );
-                let time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                let cursor = if (time / 500) % 2 == 0 { "_" } else { " " };
-                input_buf.set_text(
-                    &format!("> {}{}", console.input_buffer, cursor),
-                    &Attrs::new()
-                        .family(Family::Monospace)
-                        .color(glyphon::Color::rgb(255, 255, 0)),
-                    Shaping::Advanced,
-                    None,
-                );
-                input_buf.shape_until_scroll(&mut self.font_system, false);
-                text_buffers.push((input_buf, input_y));
-            }
+            let text_buffers = self.console_text(console);
 
             // 2. FPS Text
             let mut fps_buffer = Buffer::new(&mut self.font_system, Metrics::new(20.0, 24.0));
@@ -2919,6 +2955,7 @@ impl Renderer {
         camera: &crate::galaxy_render::GalaxyCamera,
         galaxy: &crate::galaxy::Galaxy,
         t: f64,
+        console: &Console,
     ) {
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
@@ -2961,7 +2998,7 @@ impl Renderer {
             [0.0; 4],
             [0.0; 4],
         );
-        self.render_galaxy_overlay(&view, camera, galaxy, t, heat, flare);
+        self.render_galaxy_overlay(&view, camera, galaxy, t, heat, flare, console);
         if let Some(path) = self.screenshot_request.take() {
             crate::screenshot::capture(
                 &self.device,
@@ -2980,6 +3017,7 @@ impl Renderer {
     // Galaxy-mode HUD, drawn over the finished galaxy frame: the same FPS readout as planet mode,
     // plus a compass strip across the top showing where the star and each planet are relative to
     // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
+    #[allow(clippy::too_many_arguments)]
     fn render_galaxy_overlay(
         &mut self,
         view: &wgpu::TextureView,
@@ -2988,6 +3026,7 @@ impl Renderer {
         t: f64,
         heat: f32,   // the star's heat at the camera (galaxy::star_heat): glow and warning
         flare: bool, // draw the lens flare (update_flare wrote its uniform)
+        console: &Console,
     ) {
         const COMPASS_HALF_WIDTH: f32 = 240.0; // px, covers ±COMPASS_SPAN_DEG
         const COMPASS_SPAN_DEG: f32 = 90.0;
@@ -3102,7 +3141,7 @@ impl Renderer {
             ));
         }
 
-        let buffers: Vec<(Buffer, f32, f32)> = texts
+        let mut buffers: Vec<(Buffer, f32, f32)> = texts
             .into_iter()
             .map(|(text, x, y, size, color)| {
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
@@ -3117,6 +3156,16 @@ impl Renderer {
                 (buf, x, y)
             })
             .collect();
+        let console_panel_px = console_height_px(height, console.height_fraction).round() as u32;
+        if console_panel_px > 0 {
+            // the panel covers the HUD text that starts under it (compass, FPS)
+            buffers.retain(|(_, _, y)| *y >= console_panel_px as f32);
+            buffers.extend(
+                self.console_text(console)
+                    .into_iter()
+                    .map(|(buf, y)| (buf, 10.0, y)),
+            );
+        }
         let text_areas: Vec<TextArea> = buffers
             .iter()
             .map(|(buf, x, y)| TextArea {
@@ -3182,6 +3231,12 @@ impl Renderer {
             self.draw_full_screen(&mut pass, &self.heat_bind, heat_alpha);
             if flare {
                 self.draw_flare(&mut pass);
+            }
+            if console_panel_px > 0 {
+                let panel_height = console_panel_px.min(self.config.height);
+                pass.set_scissor_rect(0, 0, self.config.width, panel_height);
+                self.draw_full_screen(&mut pass, &self.console_panel_bind, 1.0);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
             self.text_renderer
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)

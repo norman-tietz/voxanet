@@ -113,14 +113,10 @@ enum GameMode {
 }
 
 // galaxy mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
-// third person (Controller::raw_input gates it on first_person && !mouse_released); and the console
-// isn't drawn in galaxy mode, while an open one swallows all keyboard input (WASD included)
-fn enter_galaxy_controls(controller: &mut Controller, console: &mut Console) {
+// third person (Controller::raw_input gates it on first_person && !mouse_released)
+fn enter_galaxy_controls(controller: &mut Controller) {
     controller.first_person = true;
     controller.mouse_released = false;
-    if console.is_open {
-        console.toggle();
-    }
 }
 
 // a galaxy planet baked on a background thread: its voxel world plus the near impostor built from it
@@ -551,7 +547,7 @@ impl Game {
             *flight_frame = FlightFrame::Captured(i);
             player.landing = false;
             *mode = GameMode::Galaxy;
-            enter_galaxy_controls(controller, console);
+            enter_galaxy_controls(controller);
             println!("Liftoff into the orbit of #{}", i + 1);
         }
 
@@ -688,7 +684,7 @@ impl Game {
                             glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
                         *flight_frame = FlightFrame::Captured(n - 1);
                         *mode = GameMode::Galaxy;
-                        enter_galaxy_controls(controller, console);
+                        enter_galaxy_controls(controller);
                         say(
                             console,
                             &format!(
@@ -987,7 +983,7 @@ impl Game {
                             &self.galaxy,
                             t,
                         );
-                        renderer.render_galaxy(&camera, &self.galaxy, t)
+                        renderer.render_galaxy(&camera, &self.galaxy, t, &self.console)
                     }
                 }
             }
