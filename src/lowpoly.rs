@@ -1072,6 +1072,42 @@ mod tests {
         assert_manifold(&planet);
     }
 
+    // how far the drawn surface over a column centre (layer coordinate smooth + 1) lies from the top of
+    // its top block (h + 1), in layers, over every column: (max, 99th percentile, mean, share > 1 layer)
+    fn smooth_mismatch(planet: &PlanetData) -> (f32, f32, f32, f32) {
+        let res = planet.resolution;
+        let mut d: Vec<f32> = (0..6u8)
+            .flat_map(|f| (0..res).flat_map(move |v| (0..res).map(move |u| (f, u, v))))
+            .map(|(f, u, v)| {
+                (planet.smooth_height(f, u, v) - planet.effective_height(f, u, v) as f32).abs()
+            })
+            .collect();
+        d.sort_by(f32::total_cmp);
+        let p99 = d[(d.len() * 99) / 100];
+        let mean = d.iter().sum::<f32>() / d.len() as f32;
+        let over = d.iter().filter(|&&x| x > 1.0).count() as f32 / d.len() as f32;
+        (*d.last().unwrap(), p99, mean, over)
+    }
+
+    // the drawn surface vs the blocks on a small planet: measured max 1.67, p99 0.78, mean 0.17 layers
+    #[test]
+    fn smooth_surface_stays_near_the_blocks() {
+        let (max, p99, mean, over) = smooth_mismatch(&PlanetData::new(64));
+        println!("res 64: max {max} p99 {p99} mean {mean} share>1 {over}");
+        assert!(max < 2.0 && p99 < 1.0 && mean < 0.25, "{max} {p99} {mean}");
+    }
+
+    // the same on the game's start planet (res 337): measured max 2.78, p99 0.56, mean 0.16 layers —
+    // up to ~3 layers on crests and valleys (cargo test --release start_planet_smooth -- --ignored)
+    #[test]
+    #[ignore]
+    fn start_planet_smooth_surface_stays_near_the_blocks() {
+        let planet = crate::galaxy::Galaxy::generate(1).planets[0].bake();
+        let (max, p99, mean, over) = smooth_mismatch(&planet);
+        println!("start planet: max {max} p99 {p99} mean {mean} share>1 {over}");
+        assert!(max < 4.0 && p99 < 1.0 && mean < 0.3, "{max} {p99} {mean}");
+    }
+
     // a planar ramp rising `slope` layers per column along u over face 0 (the rest of face 0 flattened
     // onto its ends): its low-poly facets, as (normal · up, centroid) for those over columns 11..21
     fn ramp_facets(slope: f32) -> Vec<(f32, Vec3)> {
