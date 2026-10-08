@@ -900,15 +900,11 @@ impl MeshGen {
             let colors = vec![shade(0.4); walls.len()];
             fan(verts, inds, idx, id.layer, &colors, shade(0.4));
         }
-        let n = walls.len();
         for (i, w) in walls.iter().enumerate().filter(|&(i, _)| open[i]) {
             let c = shade(0.8 * w.across.map_or(1.0, sky));
             let water = w
                 .across
                 .map_or(0.0, |(f, u, v)| data.water_surface_radius(f, u, v));
-            // an end is rounded off only where the cell turns a corner, not between one-sixth pieces
-            let starts_side = side_of[i] != side_of[(i + n - 1) % n];
-            let ends_side = side_of[i] != side_of[(i + 1) % n];
             Self::quad(
                 verts,
                 inds,
@@ -923,8 +919,7 @@ impl MeshGen {
                 false,
                 block_center,
                 water,
-                // edges: bottom, end at b, top, end at a
-                [true, ends_side, true, starts_side],
+                crate::bevel::wall_mask(&side_of, i),
             );
         }
     }

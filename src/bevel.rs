@@ -40,6 +40,16 @@ pub fn polygon_edges(p: Vec3, side_of: &[usize], pieces: &[(Vec3, Vec3)]) -> Edg
     d
 }
 
+// which edges of hex wall piece i (quad bottom, end at b, top, end at a) are rounded off
+// (side_of from polygon_lines): bottom and top always, an end only where the cell turns a corner, not
+// at a joint between one-sixth pieces of one border side
+pub fn wall_mask(side_of: &[usize], i: usize) -> [bool; 4] {
+    let n = side_of.len();
+    let starts_side = side_of[i] != side_of[(i + n - 1) % n];
+    let ends_side = side_of[i] != side_of[(i + 1) % n];
+    [true, ends_side, true, starts_side]
+}
+
 // Vertex::edge's f16 form
 pub fn pack(d: Edges) -> [u16; SLOTS] {
     d.map(|x| half::f16::from_f32(x).to_bits())
@@ -272,6 +282,43 @@ mod tests {
             assert!((a - b).abs() <= a * 1e-3 + 1e-5, "{a} → {b}");
         }
         assert_eq!(unpack(pack([NO_EDGE; SLOTS])), [NO_EDGE; SLOTS]);
+    }
+
+    // a hex cell on a cube-face border: its border side comes in one-sixth pieces (hex::edges), and a
+    // wall piece rounds off only the ends that are corners of the cell, never the joints between pieces
+    #[test]
+    fn wall_pieces_round_off_only_cell_corners() {
+        let res = 33;
+        let edges = crate::hex::edges(0, 5, res);
+        let pieces: Vec<_> = edges.iter().map(|e| (e.a, e.b)).collect();
+        let side_of = polygon_lines(&pieces);
+        let n = pieces.len();
+        let mut joints = 0;
+        for i in 0..n {
+            let [bottom, end_b, top, end_a] = wall_mask(&side_of, i);
+            assert!(bottom && top);
+            // an end is a corner exactly where the outline turns
+            let turns = |p: usize, q: usize| {
+                let (d, e) = (
+                    (
+                        pieces[p].1 .0 - pieces[p].0 .0,
+                        pieces[p].1 .1 - pieces[p].0 .1,
+                    ),
+                    (
+                        pieces[q].1 .0 - pieces[q].0 .0,
+                        pieces[q].1 .1 - pieces[q].0 .1,
+                    ),
+                );
+                d.0 * e.1 - d.1 * e.0 != 0
+            };
+            assert_eq!(end_a, turns((i + n - 1) % n, i), "piece {i} start");
+            assert_eq!(end_b, turns(i, (i + 1) % n), "piece {i} end");
+            joints += usize::from(!end_b);
+        }
+        assert!(
+            joints >= 5,
+            "the border side should come in pieces: {pieces:?}"
+        );
     }
 
     #[test]
