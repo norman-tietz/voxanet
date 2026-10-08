@@ -2,7 +2,7 @@
 // both render paths right after the lens flare, under the HUD. Settings and the /film console command;
 // no GPU code.
 
-pub const DEFAULT_GRAIN: f32 = 0.04; // ± per-pixel brightness noise, as a fraction
+pub const DEFAULT_GRAIN: f32 = MAX_GRAIN; // ± per-pixel brightness noise, as a fraction (weaker was invisible)
 pub const DEFAULT_VIGNETTE: f32 = 0.25; // how much darker the corners get
 const MAX_GRAIN: f32 = 0.2;
 pub const FILM_USAGE: &str = "Usage: /film get|on|off|grain <0-0.2>|vignette <0-1>";
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn default_settings_feed_the_uniform() {
         let s = FilmSettings::default();
-        assert_eq!((DEFAULT_GRAIN, DEFAULT_VIGNETTE), (0.04, 0.25));
+        assert_eq!((DEFAULT_GRAIN, DEFAULT_VIGNETTE), (MAX_GRAIN, 0.25));
         assert_eq!(
             s.uniform(12.5, 1.6),
             [DEFAULT_GRAIN, DEFAULT_VIGNETTE, 12.5, 1.6]
