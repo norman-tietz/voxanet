@@ -12,6 +12,7 @@ mod galaxy_render;
 mod galaxy_terrain;
 mod gen;
 mod gpu_timer;
+mod hex;
 mod hw_rt;
 mod icosphere;
 mod landing;

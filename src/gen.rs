@@ -2092,3 +2092,111 @@ mod biome_tests {
         .all(|m| m.height == 0.0));
     }
 }
+
+// the cube style's meshes, pinned while hex columns (hex.rs) were added beside them: a fingerprint of
+// the chunk and water meshes of a few chunks (a face corner, an interior one, an edited one, one with
+// water). build_chunk_cubes collects its blocks in a HashSet, so the fingerprint is order-independent:
+// a wrapping sum of per-triangle hashes
+#[cfg(test)]
+mod cube_fingerprint {
+    use super::*;
+    use crate::common::{ChunkKey, PlanetData};
+
+    fn triangle_sum(verts: &[Vertex], inds: &[u32]) -> (usize, u64) {
+        let mut sum = 0u64;
+        for tri in inds.chunks_exact(3) {
+            // FNV-1a over the triangle's vertex bits
+            let mut h = 0xcbf29ce484222325u64;
+            for &i in tri {
+                let v = verts[i as usize];
+                for f in v
+                    .pos
+                    .iter()
+                    .chain(&v.color)
+                    .chain(&v.normal)
+                    .chain([&v.water])
+                {
+                    for b in f.to_bits().to_le_bytes() {
+                        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
+            sum = sum.wrapping_add(h);
+        }
+        (inds.len() / 3, sum)
+    }
+
+    pub(crate) fn fingerprint(planet: &PlanetData) -> Vec<(usize, u64)> {
+        let keys = [
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            ChunkKey {
+                face: 2,
+                u_idx: 1,
+                v_idx: 1,
+            },
+            ChunkKey {
+                face: 4,
+                u_idx: 1,
+                v_idx: 0,
+            },
+            ChunkKey {
+                face: 5,
+                u_idx: 0,
+                v_idx: 1,
+            },
+        ];
+        let mut out = Vec::new();
+        for key in keys {
+            let (v, i) = MeshGen::build_chunk_cubes(key, planet);
+            out.push(triangle_sum(&v, &i));
+            let (v, i) =
+                MeshGen::build_water_styled(key, planet, crate::lowpoly::TerrainStyle::Cubes);
+            out.push(triangle_sum(&v, &i));
+        }
+        out
+    }
+
+    pub(crate) fn edited_planet() -> PlanetData {
+        let mut planet = PlanetData::new(64);
+        // dig a pit and build a small tower in chunk (4, 1, 0), and dig at the face edge of (0, 0, 0)
+        for (face, u, v) in [(4u8, 40u32, 10u32), (4, 41, 10), (0, 0, 5)] {
+            let h = planet.surface(face, u, v);
+            for layer in h.saturating_sub(3)..=h {
+                let _ = planet.remove_block(BlockId { face, layer, u, v });
+            }
+        }
+        let h = planet.surface(4, 45, 12);
+        for layer in h + 1..h + 4 {
+            let _ = planet.add_block(
+                BlockId {
+                    face: 4,
+                    layer,
+                    u: 45,
+                    v: 12,
+                },
+                crate::material::BlockType::Stone,
+            );
+        }
+        planet
+    }
+
+    #[test]
+    fn cube_meshes_are_unchanged() {
+        let got = fingerprint(&edited_planet());
+        let want = vec![
+            (3276, 10882691970822256782),
+            (458, 2367537745188859897),
+            (2982, 3011035848723356312),
+            (364, 12695061272210051173),
+            (3066, 62841614696602891),
+            (742, 14632956052046115683),
+            (2992, 2153993205474278395),
+            (1158, 8045856442357342524),
+        ];
+        assert_eq!(got, want);
+    }
+}
