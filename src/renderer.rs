@@ -3204,6 +3204,15 @@ pub(crate) fn chunks_to_refresh(id: BlockId, planet: &PlanetData) -> HashSet<Chu
             .into_iter()
             .map(key),
     );
+    // hex columns: the cells across a cube-face seam needn't be the square neighbours' (hex.rs)
+    if planet.cells == crate::common::CellShape::Hex {
+        keys.extend(
+            planet
+                .column_neighbors(id.face, id.u, id.v)
+                .into_iter()
+                .map(key),
+        );
+    }
     keys
 }
 

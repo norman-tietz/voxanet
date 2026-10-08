@@ -229,7 +229,10 @@ impl Console {
                 Some(&"lowpoly") => {
                     self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::LowPoly)
                 }
-                _ => self.log("Usage: /terrain_style cubes|lowpoly", [1.0, 0.5, 0.0]),
+                Some(&"hex") => {
+                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::Hex)
+                }
+                _ => self.log("Usage: /terrain_style cubes|lowpoly|hex", [1.0, 0.5, 0.0]),
             },
 
             "/galaxy" => match parse_galaxy_command(&parts[1..]) {
@@ -260,7 +263,7 @@ impl Console {
                 );
                 self.log("  /view set first|third", [0.8, 0.8, 0.8]);
                 self.log(
-                    "  /terrain_style cubes|lowpoly  (terrain look, for comparison)",
+                    "  /terrain_style cubes|lowpoly|hex  (terrain look, for comparison)",
                     [0.8, 0.8, 0.8],
                 );
                 self.log(
@@ -451,6 +454,8 @@ mod tests {
         assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::Cubes));
         c.exec("/terrain_style lowpoly", &mut player);
         assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::LowPoly));
+        c.exec("/terrain_style hex", &mut player);
+        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::Hex));
         c.exec("/terrain_style round", &mut player);
         assert_eq!(c.terrain_style_request, None);
     }

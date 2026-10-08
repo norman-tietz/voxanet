@@ -159,6 +159,24 @@ impl ChunkMods {
     }
 }
 
+// the shape of a column's cells: the square grid, or hex columns (hex.rs; /terrain_style hex). Both use
+// the same (face, u, v) columns, heights and edits; only which point lies in which cell differs
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CellShape {
+    #[default]
+    Square,
+    Hex,
+}
+
+// a side wall of a hex cell: edge a → b of its outline (face space in sixths, hex.rs, counter-clockwise)
+// and the column across it, possibly on the next cube face (None: nothing there, never expected)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HexWall {
+    pub a: (i64, i64),
+    pub b: (i64, i64),
+    pub across: Option<(u8, u32, u32)>,
+}
+
 #[derive(Clone)]
 pub struct PlanetData {
     pub edits: PlanetEdits,
@@ -172,6 +190,8 @@ pub struct PlanetData {
     // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
     // edits record it so they're only restored onto the same terrain
     pub seed: u32,
+    // the cells' shape (set with /terrain_style; physics, the raycast, water and the meshes follow it)
+    pub cells: CellShape,
 }
 
 impl PlanetData {
@@ -214,6 +234,7 @@ impl PlanetData {
             smooth,
             planet_type,
             seed,
+            cells: CellShape::Square,
         }
     }
 
@@ -438,6 +459,97 @@ impl PlanetData {
     // the up to eight columns around (face, u, v) (CoordSystem::neighbour_columns)
     pub fn neighbour_columns(&self, face: u8, u: u32, v: u32) -> Vec<(u8, u32, u32)> {
         crate::gen::CoordSystem::neighbour_columns(face, u, v, self.resolution)
+    }
+
+    // the cell containing `pos` in this planet's cell shape (square: CoordSystem::pos_to_id). Gameplay
+    // code asks this rather than pos_to_id, so the cursor, collision, water and landing follow the cells
+    pub fn cell_at(&self, pos: glam::Vec3) -> Option<BlockId> {
+        match self.cells {
+            CellShape::Square => crate::gen::CoordSystem::pos_to_id(pos, self.resolution),
+            CellShape::Hex => self.cell_local(pos).map(|(id, ..)| id),
+        }
+    }
+
+    // the cell containing `pos` (cell_at), with pos's face coordinates (u, v in columns) and its
+    // fractional position within the layer (0..1)
+    pub fn cell_local(&self, pos: glam::Vec3) -> Option<(BlockId, f64, f64, f32)> {
+        let res = self.resolution;
+        let (face, u, v, layer_f) = crate::gen::CoordSystem::face_coords(pos, res)?;
+        let (cu, cv) = match self.cells {
+            CellShape::Square => (
+                (u.floor() as u32).min(res - 1),
+                (v.floor() as u32).min(res - 1),
+            ),
+            CellShape::Hex => crate::hex::cell_at(u, v, res),
+        };
+        let layer = layer_f.floor();
+        let id = BlockId {
+            face,
+            layer: layer as u32,
+            u: cu,
+            v: cv,
+        };
+        Some((id, u, v, (layer_f - layer) as f32))
+    }
+
+    // the side walls of hex column (face, u, v), with the column across each. Along the face border the
+    // next face's cells don't line up with this face's, so border walls come in pieces one sixth of a
+    // column long (every cell boundary of both faces lies on that lattice): both sides of a seam then
+    // have vertices at the same points, and their meshes meet without T-junction cracks
+    pub fn hex_walls(&self, face: u8, u: u32, v: u32) -> Vec<HexWall> {
+        crate::hex::edges(u, v, self.resolution)
+            .into_iter()
+            .map(|e| HexWall {
+                a: e.a,
+                b: e.b,
+                across: match e.across {
+                    crate::hex::Across::Cell(cu, cv) => Some((face, cu, cv)),
+                    crate::hex::Across::Border => self.across_border(face, &e),
+                },
+            })
+            .collect()
+    }
+
+    // the column of the next cube face across border piece `e` of a hex cell on `face`: the line from a
+    // point just inside the border through the border point, continued onto the next face
+    fn across_border(&self, face: u8, e: &crate::hex::Edge) -> Option<(u8, u32, u32)> {
+        use crate::gen::CoordSystem;
+        let res = self.resolution;
+        let (mu, mv) = ((e.a.0 + e.b.0) as f64 / 12.0, (e.a.1 + e.b.1) as f64 / 12.0);
+        let (dx, dy) = ((e.b.0 - e.a.0) as f64, (e.b.1 - e.a.1) as f64);
+        let len = (dx * dx + dy * dy).sqrt();
+        // inward is left of a → b (counter-clockwise outline)
+        let here = CoordSystem::get_direction_f(face, mu, mv, res);
+        let inner =
+            CoordSystem::get_direction_f(face, mu - dy / len * 0.01, mv + dx / len * 0.01, res);
+        let out = (here * 2.0 - inner).normalize() * (res as f32 / 2.0);
+        let (f, cu, cv, _) = CoordSystem::face_coords(out, res)?;
+        if f == face {
+            return None;
+        }
+        let (hu, hv) = crate::hex::cell_at(cu, cv, res);
+        Some((f, hu, hv))
+    }
+
+    // the columns sharing a side with (face, u, v), across cube-face edges too: square cells' four, hex
+    // cells' six (more or fewer at a face border)
+    pub fn column_neighbors(&self, face: u8, u: u32, v: u32) -> Vec<(u8, u32, u32)> {
+        match self.cells {
+            CellShape::Square => [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                .into_iter()
+                .filter_map(|(du, dv)| self.neighbor_column(face, u, v, du, dv))
+                .collect(),
+            CellShape::Hex => {
+                let mut out: Vec<_> = self
+                    .hex_walls(face, u, v)
+                    .into_iter()
+                    .filter_map(|w| w.across)
+                    .collect();
+                out.sort_unstable();
+                out.dedup();
+                out
+            }
+        }
     }
 
     pub fn neighbor_height(&self, face: u8, u: u32, v: u32, du: i32, dv: i32) -> u32 {
@@ -1292,5 +1404,139 @@ pub(crate) mod tests {
             let r = crate::gen::CoordSystem::get_layer_radius_f(layer, 32);
             assert!((crate::gen::CoordSystem::layer_of_radius(r, 32) - layer).abs() < 1e-3);
         }
+    }
+}
+
+// hex columns on the planet: the cell lookup and the walls between cells, across cube-face seams too
+#[cfg(test)]
+mod hex_tests {
+    use super::*;
+    use crate::gen::CoordSystem;
+
+    pub(crate) fn hex_planet(res: u32) -> PlanetData {
+        let mut planet = PlanetData::new(res);
+        planet.cells = CellShape::Hex;
+        planet
+    }
+
+    // a wall's two ends in world space (on the sphere at layer res / 2)
+    fn ends(planet: &PlanetData, face: u8, w: &HexWall) -> (glam::Vec3, glam::Vec3) {
+        let (res, l) = (planet.resolution, planet.resolution / 2);
+        (
+            CoordSystem::get_vertex_pos_six(face, w.a.0, w.a.1, l, res),
+            CoordSystem::get_vertex_pos_six(face, w.b.0, w.b.1, l, res),
+        )
+    }
+
+    #[test]
+    fn fractional_directions_match_the_grid_corners() {
+        let res = 16;
+        for face in 0..6u8 {
+            for (u, v) in [(0u32, 0u32), (3, 7), (16, 5), (16, 16), (9, 0)] {
+                assert_eq!(
+                    CoordSystem::get_direction_f(face, u as f64, v as f64, res),
+                    CoordSystem::get_direction(face, u, v, res)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn square_cells_are_pos_to_id() {
+        let planet = PlanetData::new(32);
+        for face in 0..6u8 {
+            for (u, v) in [(0u32, 0u32), (5, 30), (31, 31), (17, 2)] {
+                let p = CoordSystem::get_block_center(face, u, v, 20, 32);
+                assert_eq!(planet.cell_at(p), CoordSystem::pos_to_id(p, 32));
+            }
+        }
+    }
+
+    #[test]
+    fn hex_cell_centres_map_to_their_cells() {
+        let planet = hex_planet(16);
+        let res = planet.resolution;
+        for face in 0..6u8 {
+            for v in 0..res {
+                for u in 0..res {
+                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(u, v, res));
+                    let dir = CoordSystem::get_direction_f(face, cu, cv, res);
+                    let r = CoordSystem::get_layer_radius_f(9.5, res);
+                    let id = planet.cell_at(dir * r).unwrap();
+                    assert_eq!((id.face, id.u, id.v, id.layer), (face, u, v, 9));
+                }
+            }
+        }
+    }
+
+    // every wall is matched by the wall of the column across it: same ends, pointing back —
+    // inside a face and across the seams, where the two faces' cells don't line up
+    #[test]
+    fn hex_walls_pair_up_across_cube_faces() {
+        for res in [16u32, 15] {
+            let planet = hex_planet(res);
+            for face in 0..6u8 {
+                for v in 0..res {
+                    for u in 0..res {
+                        let walls = planet.hex_walls(face, u, v);
+                        if u > 0 && u + 1 < res && v > 0 && v + 1 < res {
+                            assert_eq!(walls.len(), 6);
+                        }
+                        for w in &walls {
+                            if w.across.is_some_and(|(f, ..)| f != face) {
+                                // seam pieces are a sixth long
+                                assert_eq!((w.b.0 - w.a.0).abs() + (w.b.1 - w.a.1).abs(), 1);
+                            }
+                            let (nf, nu, nv) = w.across.expect("a wall facing nothing");
+                            let (a, b) = ends(&planet, face, w);
+                            let back = planet.hex_walls(nf, nu, nv);
+                            let mirrored = back.iter().any(|x| {
+                                let (xa, xb) = ends(&planet, nf, x);
+                                // faces differ in handedness, so a seam wall may run either way
+                                x.across == Some((face, u, v))
+                                    && ((xa.distance(b) < 1e-4 && xb.distance(a) < 1e-4)
+                                        || (xa.distance(a) < 1e-4 && xb.distance(b) < 1e-4))
+                            });
+                            assert!(
+                                mirrored,
+                                "res {res}: ({face}, {u}, {v}) wall {w:?} not mirrored by \
+                                 ({nf}, {nu}, {nv}): {back:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hex_neighbours_are_the_six_around() {
+        let planet = hex_planet(16);
+        // even row: (±1, 0), (−1, ±1), (0, ±1)
+        let even: Vec<_> = planet.column_neighbors(0, 5, 4);
+        assert_eq!(
+            even,
+            vec![
+                (0, 4, 3),
+                (0, 4, 4),
+                (0, 4, 5),
+                (0, 5, 3),
+                (0, 5, 5),
+                (0, 6, 4)
+            ]
+        );
+        // odd row: (±1, 0), (0, ±1), (+1, ±1)
+        let odd: Vec<_> = planet.column_neighbors(0, 5, 5);
+        assert_eq!(
+            odd,
+            vec![
+                (0, 4, 5),
+                (0, 5, 4),
+                (0, 5, 6),
+                (0, 6, 4),
+                (0, 6, 5),
+                (0, 6, 6)
+            ]
+        );
     }
 }

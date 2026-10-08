@@ -403,6 +403,65 @@ impl CoordSystem {
             v,
         })
     }
+
+    // pos as continuous face coordinates: the cube face, u and v in columns (0..=res) and the fractional
+    // layer; None inside the core. pos_to_id's mapping without the rounding to a cell (hex cells,
+    // PlanetData::cell_at, need the position within the face)
+    pub fn face_coords(pos: Vec3, res: u32) -> Option<(u8, f64, f64, f64)> {
+        let dist = pos.length() as f64;
+        let s = res as f64 / 2.0;
+        if dist < s * (-Self::K).exp() {
+            return None;
+        }
+        let layer_f = s * (1.0 + (dist / s).ln() / Self::K);
+        if layer_f < 0.0 {
+            return None;
+        }
+        let cube_pos = Self::cubize_point(pos.normalize());
+        let abs = cube_pos.abs();
+        let (face, u_local, v_local) = if abs.y >= abs.x && abs.y >= abs.z {
+            (if cube_pos.y > 0.0 { 0 } else { 1 }, cube_pos.x, cube_pos.z)
+        } else if abs.x >= abs.y && abs.x >= abs.z {
+            (if cube_pos.x > 0.0 { 2 } else { 3 }, cube_pos.y, cube_pos.z)
+        } else {
+            (if cube_pos.z > 0.0 { 4 } else { 5 }, cube_pos.x, cube_pos.y)
+        };
+        let rf = res as f64;
+        let u = ((u_local as f64 * rf + rf) / 2.0).clamp(0.0, rf);
+        let v = ((v_local as f64 * rf + rf) / 2.0).clamp(0.0, rf);
+        Some((face, u, v, layer_f))
+    }
+
+    // get_direction at a fractional face position (columns); the face border is exactly ±1, like
+    // get_direction's, so neighbouring faces share their border points
+    pub fn get_direction_f(face: u8, u: f64, v: f64, res: u32) -> Vec3 {
+        let rf = res as f64;
+        let local = |c: f64| {
+            if c <= 0.0 {
+                -1.0
+            } else if c >= rf {
+                1.0
+            } else {
+                (c * 2.0 - rf) / rf
+            }
+        };
+        let (x_local, y_local) = (local(u), local(v));
+        let (cx, cy, cz) = match face {
+            0 => (x_local, 1.0, y_local),
+            1 => (x_local, -1.0, y_local),
+            2 => (1.0, x_local, y_local),
+            3 => (-1.0, x_local, y_local),
+            4 => (x_local, y_local, 1.0),
+            _ => (x_local, y_local, -1.0),
+        };
+        Self::cube_to_sphere(cx, cy, cz).normalize()
+    }
+
+    // a hex corner (face space in sixths of a column, hex.rs) at the bottom of `layer`
+    pub fn get_vertex_pos_six(face: u8, u6: i64, v6: i64, layer: u32, res: u32) -> Vec3 {
+        Self::get_direction_f(face, u6 as f64 / 6.0, v6 as f64 / 6.0, res)
+            * Self::get_layer_radius(layer, res)
+    }
 }
 
 // fs_water's opacity and colour rates per unit of water depth (shader.wgsl), for LOD water seen from above
@@ -510,9 +569,10 @@ impl MeshGen {
 
     // a voxel chunk's terrain mesh in the current terrain style (lowpoly.rs)
     pub fn build_chunk(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
-        match crate::lowpoly::style() {
+        match crate::lowpoly::style_for(data) {
             crate::lowpoly::TerrainStyle::LowPoly => crate::lowpoly::build_chunk_lowpoly(key, data),
             crate::lowpoly::TerrainStyle::Cubes => Self::build_chunk_cubes(key, data),
+            crate::lowpoly::TerrainStyle::Hex => Self::build_chunk_hex(key, data),
         }
     }
 
@@ -638,6 +698,222 @@ impl MeshGen {
             }
         }
         (verts, inds)
+    }
+
+    // a voxel chunk in hex columns (hex.rs, PlanetData::cells = Hex): build_chunk_cubes' candidate
+    // rules over the hex neighbours, each block a hex prism (add_voxel_hex)
+    pub fn build_chunk_hex(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        let (mut verts, mut inds, mut idx) = (Vec::new(), Vec::new(), 0u32);
+        let res = data.resolution;
+        let u_start = key.u_idx * CHUNK_SIZE;
+        let v_start = key.v_idx * CHUNK_SIZE;
+        let u_end = (u_start + CHUNK_SIZE).min(res);
+        let v_end = (v_start + CHUNK_SIZE).min(res);
+        let mut candidates = HashSet::new();
+        // the chunks whose mined blocks can expose blocks of this one: its own and its rim cells'
+        // neighbours' (diagonal chunks too, odd rows reach into them; the next face's at a face edge)
+        let mut keys = HashSet::from([key]);
+        for u in u_start..u_end {
+            for v in v_start..v_end {
+                let around = data.column_neighbors(key.face, u, v);
+                let h = data.effective_height(key.face, u, v);
+                let rim = u == u_start || u + 1 == u_end || v == v_start || v + 1 == v_end;
+                if rim {
+                    keys.extend(around.iter().map(|&(face, u, v)| {
+                        PlanetData::chunk_key(BlockId {
+                            face,
+                            u,
+                            v,
+                            layer: 0,
+                        })
+                    }));
+                }
+                if h == 0 {
+                    continue;
+                }
+                // the top block and the cliff below it down to the lowest neighbour
+                let min_h = around
+                    .iter()
+                    .map(|&(f, nu, nv)| data.effective_height(f, nu, nv))
+                    .fold(h, u32::min);
+                for layer in (min_h + 1).min(h)..=h {
+                    candidates.insert(BlockId {
+                        face: key.face,
+                        layer,
+                        u,
+                        v,
+                    });
+                }
+            }
+        }
+        for k in keys {
+            let Some(mods) = data.edits.chunks.get(&k) else {
+                continue;
+            };
+            if k == key {
+                candidates.extend(mods.placed.keys().copied());
+            }
+            for &id in &mods.mined {
+                candidates.insert(BlockId {
+                    layer: id.layer + 1,
+                    ..id
+                });
+                if id.layer > 0 {
+                    candidates.insert(BlockId {
+                        layer: id.layer - 1,
+                        ..id
+                    });
+                }
+                for (face, u, v) in data.column_neighbors(id.face, id.u, id.v) {
+                    candidates.insert(BlockId {
+                        face,
+                        u,
+                        v,
+                        layer: id.layer,
+                    });
+                }
+            }
+        }
+        for id in candidates {
+            let mine = id.face == key.face
+                && (u_start..u_end).contains(&id.u)
+                && (v_start..v_end).contains(&id.v);
+            if mine && data.exists(id) {
+                Self::add_voxel_hex(id, data, &mut verts, &mut inds, &mut idx);
+            }
+        }
+        (verts, inds)
+    }
+
+    // one hex prism (hex columns): a fan on top and bottom over the outline's corners, a quad per open
+    // side wall. The cube voxel's shading: per-corner AO on top (an interior hex corner touches two other
+    // columns, no diagonals), 0.8 × sky cover on the walls, 0.4 underneath
+    fn add_voxel_hex(
+        id: BlockId,
+        data: &PlanetData,
+        verts: &mut Vec<Vertex>,
+        inds: &mut Vec<u32>,
+        idx: &mut u32,
+    ) {
+        let res = data.resolution;
+        let solid = |(face, u, v): (u8, u32, u32), layer: i64| {
+            layer < 0
+                || data.exists(BlockId {
+                    face,
+                    layer: layer as u32,
+                    u,
+                    v,
+                })
+        };
+        let own = (id.face, id.u, id.v);
+        let l = id.layer as i64;
+        let walls = data.hex_walls(id.face, id.u, id.v);
+        let open: Vec<bool> = walls
+            .iter()
+            .map(|w| w.across.is_none_or(|c| !solid(c, l)))
+            .collect();
+        let (has_top, has_btm) = (solid(own, l + 1), solid(own, l - 1));
+        if has_top && has_btm && !open.contains(&true) {
+            return;
+        }
+        let sky = |c: (u8, u32, u32)| {
+            if (1..=8).any(|i| solid(c, l + i)) {
+                0.15
+            } else {
+                1.0
+            }
+        };
+        let base = data.block_type(id).unwrap_or(BlockType::Dirt).color();
+        let shade = |k: f32| [base[0] * k, base[1] * k, base[2] * k];
+        let corner = |p: (i64, i64), layer: u32| {
+            CoordSystem::get_vertex_pos_six(id.face, p.0, p.1, layer, res)
+        };
+        let (cu, cv) = crate::hex::centroid(&crate::hex::outline(id.u, id.v, res));
+        let centre_dir = CoordSystem::get_direction_f(id.face, cu, cv, res);
+        let block_center = centre_dir * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
+        let water_here = data.water_surface_radius(id.face, id.u, id.v);
+
+        let mut fan = |verts: &mut Vec<Vertex>,
+                       inds: &mut Vec<u32>,
+                       idx: &mut u32,
+                       layer: u32,
+                       colors: &[[f32; 3]],
+                       centre_color: [f32; 3]| {
+            let normal = if layer > id.layer {
+                centre_dir
+            } else {
+                -centre_dir
+            };
+            let base_idx = *idx;
+            verts.push(Vertex {
+                pos: (centre_dir * CoordSystem::get_layer_radius(layer, res)).to_array(),
+                color: centre_color,
+                normal: normal.to_array(),
+                water: water_here,
+            });
+            for (w, &color) in walls.iter().zip(colors) {
+                verts.push(Vertex {
+                    pos: corner(w.a, layer).to_array(),
+                    color,
+                    normal: normal.to_array(),
+                    water: water_here,
+                });
+            }
+            let n = walls.len() as u32;
+            for i in 0..n {
+                inds.extend_from_slice(&[base_idx, base_idx + 1 + i, base_idx + 1 + (i + 1) % n]);
+            }
+            *idx += n + 1;
+        };
+
+        if !has_top {
+            // corner i (the start of wall i) touches the columns across walls i − 1 and i
+            let top_sky = sky(own);
+            let n = walls.len();
+            let ao: Vec<f32> = (0..n)
+                .map(|i| {
+                    let (prev, next) = (walls[(i + n - 1) % n].across, walls[i].across);
+                    let a = prev.is_some_and(|c| solid(c, l + 1));
+                    let b = next != prev && next.is_some_and(|c| solid(c, l + 1));
+                    Self::calculate_ao(a, b, false)
+                })
+                .collect();
+            let mean = ao.iter().sum::<f32>() / n as f32;
+            let colors: Vec<_> = ao.iter().map(|&a| shade(a * top_sky)).collect();
+            fan(
+                verts,
+                inds,
+                idx,
+                id.layer + 1,
+                &colors,
+                shade(mean * top_sky),
+            );
+        }
+        if !has_btm {
+            let colors = vec![shade(0.4); walls.len()];
+            fan(verts, inds, idx, id.layer, &colors, shade(0.4));
+        }
+        for (w, _) in walls.iter().zip(&open).filter(|(_, &o)| o) {
+            let c = shade(0.8 * w.across.map_or(1.0, sky));
+            let water = w
+                .across
+                .map_or(0.0, |(f, u, v)| data.water_surface_radius(f, u, v));
+            Self::quad(
+                verts,
+                inds,
+                idx,
+                [
+                    corner(w.a, id.layer),
+                    corner(w.b, id.layer),
+                    corner(w.b, id.layer + 1),
+                    corner(w.a, id.layer + 1),
+                ],
+                [c; 4],
+                false,
+                block_center,
+                water,
+            );
+        }
     }
 
     // side1, side2: the two blocks flanking the vertex
@@ -806,7 +1082,7 @@ impl MeshGen {
 
     // a chunk's water surface in the current terrain style (lowpoly.rs)
     pub fn build_water(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
-        Self::build_water_styled(key, data, crate::lowpoly::style())
+        Self::build_water_styled(key, data, crate::lowpoly::style_for(data))
     }
 
     pub fn build_water_styled(
@@ -847,19 +1123,44 @@ impl MeshGen {
                 } else {
                     continue;
                 };
-                let p =
-                    |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, level + 1, res);
-                let corners = [p(0, 0), p(1, 0), p(1, 1), p(0, 1)];
                 // liquid is Some here (checked above); color is unused by fs_water (which shades
                 // purely from the biome uniform) but should still match the active planet type
                 let color = data.planet_type.def().liquid.unwrap().shallow_color;
-                for c in corners {
+                let mut push = |c: Vec3| {
                     verts.push(Vertex {
                         pos: c.to_array(),
                         color,
                         normal: c.normalize().to_array(),
                         water,
-                    });
+                    })
+                };
+                if style == crate::lowpoly::TerrainStyle::Hex {
+                    // the hex cell's outline (seam pieces included, so neighbouring faces' surfaces
+                    // share their border vertices), a fan around its centre
+                    let pts: Vec<_> = data.hex_walls(key.face, u, v).iter().map(|w| w.a).collect();
+                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(u, v, res));
+                    let radius = CoordSystem::get_layer_radius(level + 1, res);
+                    push(CoordSystem::get_direction_f(key.face, cu, cv, res) * radius);
+                    for &(u6, v6) in &pts {
+                        push(CoordSystem::get_vertex_pos_six(
+                            key.face,
+                            u6,
+                            v6,
+                            level + 1,
+                            res,
+                        ));
+                    }
+                    let n = pts.len() as u32;
+                    for i in 0..n {
+                        inds.extend_from_slice(&[idx, idx + 1 + i, idx + 1 + (i + 1) % n]);
+                    }
+                    idx += n + 1;
+                    continue;
+                }
+                let p =
+                    |du, dv| CoordSystem::get_vertex_pos(key.face, u + du, v + dv, level + 1, res);
+                for c in [p(0, 0), p(1, 0), p(1, 1), p(0, 1)] {
+                    push(c);
                 }
                 inds.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
                 idx += 4;
@@ -1039,7 +1340,7 @@ impl MeshGen {
         data: &PlanetData,
         logical_size: u32,
     ) -> Vec<LodMorph> {
-        Self::generate_lod_morph_styled(key, data, logical_size, crate::lowpoly::style())
+        Self::generate_lod_morph_styled(key, data, logical_size, crate::lowpoly::style_for(data))
     }
 
     pub fn generate_lod_morph_styled(
@@ -1128,7 +1429,7 @@ impl MeshGen {
         key: crate::common::LodKey,
         data: &PlanetData,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        Self::generate_lod_mesh_styled(key, data, crate::lowpoly::style())
+        Self::generate_lod_mesh_styled(key, data, crate::lowpoly::style_for(data))
     }
 
     pub fn generate_lod_mesh_styled(
@@ -2198,5 +2499,120 @@ mod cube_fingerprint {
             (1158, 8045856442357342524),
         ];
         assert_eq!(got, want);
+    }
+}
+
+// hex columns (hex.rs): the voxel meshes close up, inside faces, across cube-face seams and around edits
+#[cfg(test)]
+mod hex_mesh_tests {
+    use super::*;
+    use crate::common::{CellShape, ChunkKey, PlanetData};
+    use std::collections::HashMap;
+
+    fn all_keys(planet: &PlanetData) -> Vec<ChunkKey> {
+        let n = planet.resolution.div_ceil(CHUNK_SIZE);
+        (0..6u8)
+            .flat_map(|face| {
+                (0..n)
+                    .flat_map(move |u_idx| (0..n).map(move |v_idx| ChunkKey { face, u_idx, v_idx }))
+            })
+            .collect()
+    }
+
+    // how many triangles use each (undirected) edge of the whole planet's voxel mesh
+    fn edge_uses(planet: &PlanetData) -> HashMap<([i64; 3], [i64; 3]), u32> {
+        let q = |p: [f32; 3]| p.map(|c| (c as f64 * 4096.0).round() as i64);
+        let mut uses = HashMap::new();
+        for key in all_keys(planet) {
+            let (verts, inds) = MeshGen::build_chunk_hex(key, planet);
+            for tri in inds.chunks_exact(3) {
+                for k in 0..3 {
+                    let (a, b) = (
+                        q(verts[tri[k] as usize].pos),
+                        q(verts[tri[(k + 1) % 3] as usize].pos),
+                    );
+                    if a != b {
+                        *uses.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        uses
+    }
+
+    // closed: every edge is used by an even number of triangles — two, or four where a seam point has
+    // two cells on each face and they alternate high and low around it (like cubes at a diagonal)
+    fn assert_closed(planet: &PlanetData) {
+        let uses = edge_uses(planet);
+        assert!(!uses.is_empty());
+        let open: Vec<_> = uses.iter().filter(|(_, &n)| n % 2 != 0).take(5).collect();
+        assert!(
+            open.is_empty(),
+            "{} of {} edges open, e.g. {open:?}",
+            uses.values().filter(|&&n| n % 2 != 0).count(),
+            uses.len()
+        );
+    }
+
+    #[test]
+    fn hex_planet_mesh_is_closed() {
+        for res in [32u32, 33] {
+            let mut planet = PlanetData::new(res);
+            planet.cells = CellShape::Hex;
+            assert_closed(&planet);
+        }
+    }
+
+    #[test]
+    fn edited_hex_planet_mesh_is_closed() {
+        let mut planet = super::cube_fingerprint::edited_planet();
+        planet.cells = CellShape::Hex;
+        // a pit and a tower on a cube-face seam too
+        for (face, u, v) in [(2u8, 63u32, 30u32), (2, 0, 7)] {
+            let h = planet.surface(face, u, v);
+            let _ = planet.remove_block(BlockId {
+                face,
+                layer: h,
+                u,
+                v,
+            });
+            let _ = planet.add_block(
+                BlockId {
+                    face,
+                    layer: h + 3,
+                    u: (u + 1).min(63),
+                    v,
+                },
+                BlockType::Stone,
+            );
+        }
+        assert_closed(&planet);
+    }
+
+    // the hex style's water: one fan per wet column, centred over that column's own cell
+    #[test]
+    fn hex_water_fans_sit_over_their_cells() {
+        let mut planet = PlanetData::new(32);
+        planet.cells = CellShape::Hex;
+        let mut fans = 0;
+        for key in all_keys(&planet) {
+            let (verts, inds) =
+                MeshGen::build_water_styled(key, &planet, crate::lowpoly::TerrainStyle::Hex);
+            // each fan starts with its centre and is followed by its corners
+            let mut i = 0;
+            while i < inds.len() {
+                let centre = inds[i] as usize;
+                let corners = inds[i..]
+                    .chunks_exact(3)
+                    .take_while(|t| t[0] as usize == centre)
+                    .count();
+                let p = Vec3::from_array(verts[centre].pos);
+                let id = planet.cell_at(p * 0.999).unwrap();
+                assert!(planet.holds_water(id.face, id.u, id.v));
+                fans += 1;
+                i += corners * 3;
+            }
+        }
+        assert!(fans > 0);
     }
 }

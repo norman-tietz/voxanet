@@ -6,29 +6,56 @@ use crate::common::{BlockId, ChunkKey, PlanetData, Vertex, CHUNK_SIZE};
 use crate::gen::CoordSystem;
 use crate::mc_tables::{CUBE_CORNER_OFFSETS, EDGE_VERTEX_PAIRS, TRI_TABLE};
 use glam::Vec3;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-// how terrain is drawn: low-poly (the game's look) or the original cubes (development comparison only,
-// console /terrain_style). Read once per mesh build at the entry points (MeshGen::build_chunk,
-// generate_lod_mesh, generate_lod_morph) and passed down, so tests can pick a style explicitly
+// how terrain is drawn: low-poly (the game's look), the original cubes (development comparison) or hex
+// columns (hex.rs; the planet's cells are hexagonal then, PlanetData::cells), console /terrain_style.
+// Read once per mesh build at the entry points (MeshGen::build_chunk, build_water, generate_lod_mesh,
+// generate_lod_morph, via style_for) and passed down, so tests can pick a style explicitly
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainStyle {
     Cubes,
     LowPoly,
+    Hex,
 }
 
-static CUBES: AtomicBool = AtomicBool::new(false);
+static STYLE: AtomicU8 = AtomicU8::new(1);
 
 pub fn style() -> TerrainStyle {
-    if CUBES.load(Ordering::Relaxed) {
-        TerrainStyle::Cubes
-    } else {
-        TerrainStyle::LowPoly
+    match STYLE.load(Ordering::Relaxed) {
+        0 => TerrainStyle::Cubes,
+        2 => TerrainStyle::Hex,
+        _ => TerrainStyle::LowPoly,
     }
 }
 
 pub fn set_style(s: TerrainStyle) {
-    CUBES.store(s == TerrainStyle::Cubes, Ordering::Relaxed);
+    let v = match s {
+        TerrainStyle::Cubes => 0,
+        TerrainStyle::LowPoly => 1,
+        TerrainStyle::Hex => 2,
+    };
+    STYLE.store(v, Ordering::Relaxed);
+}
+
+// the style `data` is meshed in: hex whenever its cells are hexagonal (the geometry is the planet's, so
+// meshes and gameplay can't disagree), else the global look
+pub fn style_for(data: &PlanetData) -> TerrainStyle {
+    match data.cells {
+        crate::common::CellShape::Hex => TerrainStyle::Hex,
+        crate::common::CellShape::Square => match style() {
+            TerrainStyle::Hex => TerrainStyle::Cubes,
+            s => s,
+        },
+    }
+}
+
+// the cell shape a style plays with
+pub fn cells_for(s: TerrainStyle) -> crate::common::CellShape {
+    match s {
+        TerrainStyle::Hex => crate::common::CellShape::Hex,
+        _ => crate::common::CellShape::Square,
+    }
 }
 
 // a cell is solid above this density
@@ -1337,6 +1364,7 @@ mod tests {
                 let (v, i) = match style {
                     TerrainStyle::Cubes => crate::gen::MeshGen::build_chunk_cubes(key, &planet),
                     TerrainStyle::LowPoly => build_chunk_lowpoly(key, &planet),
+                    TerrainStyle::Hex => crate::gen::MeshGen::build_chunk_hex(key, &planet),
                 };
                 tris += i.len() / 3;
                 verts += v.len();
