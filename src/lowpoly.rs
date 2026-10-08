@@ -996,6 +996,71 @@ mod tests {
         assert!(sum / n < 0.15, "mean {}", sum / n);
     }
 
+    // in an edited chunk the LOD vertices still lie on the voxel low-poly surface: a tunnel leaves the
+    // columns' tops unchanged, and a mined top lowers the column's corners by a layer, like the pit (the
+    // cube path's block corners r(h) sat a layer low, with the voxel colours)
+    #[test]
+    fn lod_vertices_lie_on_the_voxel_surface_in_edited_chunks() {
+        let mut planet = PlanetData::new(64);
+        let res = planet.resolution;
+        let (tu, tv) = (6u32, 7u32);
+        let h = planet.effective_height(0, tu, tv);
+        planet
+            .remove_block(BlockId {
+                face: 0,
+                layer: h - 3,
+                u: tu,
+                v: tv,
+            })
+            .unwrap();
+        let (pu, pv) = (20u32, 21u32);
+        for (du, dv) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let (u, v) = (pu + du, pv + dv);
+            planet
+                .remove_block(BlockId {
+                    face: 0,
+                    layer: planet.effective_height(0, u, v),
+                    u,
+                    v,
+                })
+                .unwrap();
+        }
+        assert!(planet.column_edited(0, 2, 2));
+        let index = MeshIndex::new(&mesh_planet(&planet), res);
+        let key = crate::common::LodKey {
+            face: 0,
+            x: 0,
+            y: 0,
+            size: 64,
+        };
+        let (lod, _) =
+            crate::gen::MeshGen::generate_lod_mesh_styled(key, &planet, TerrainStyle::LowPoly);
+        let (mut worst, mut sum, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        // grid vertices over the edited chunk (columns 0..32), dry land
+        for vy in 2..31u32 {
+            for vx in 2..31u32 {
+                let p = Vec3::from_array(lod[(vy * 65 + vx) as usize].pos);
+                if planet.terrain.water_level(0, vx, vy) >= planet.terrain.get_height(0, vx, vy) {
+                    continue;
+                }
+                // the pit's middle corner: all four columns lowered
+                let pit = (vx, vy) == (pu + 1, pv + 1);
+                if !pit && vx.abs_diff(pu + 1) <= 1 && vy.abs_diff(pv + 1) <= 1 {
+                    continue; // the pit's rim: half its columns lowered, the LOD point-samples one
+                }
+                let r = index.hit(p.normalize(), 128.0).unwrap();
+                let err = (p.length() - r).abs();
+                worst = worst.max(err);
+                sum += err;
+                n += 1.0;
+            }
+        }
+        println!("edited lod vs voxel: n {n} worst {worst} mean {}", sum / n);
+        assert!(n > 300.0);
+        assert!(worst < 0.5, "worst {worst}");
+        assert!(sum / n < 0.15, "mean {}", sum / n);
+    }
+
     // the game's start planet (galaxy seed 1, planet #1, Earth-like, res 337): larger and steeper than
     // the small test planets above. Slow in a debug build (~25 s), hence ignored; run with
     // cargo test --release start_planet_is_a_closed_manifold -- --ignored

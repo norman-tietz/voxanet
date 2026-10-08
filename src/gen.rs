@@ -826,16 +826,23 @@ impl MeshGen {
             let abs_u = (key.x as i64 + step_u).clamp(0, data.resolution as i64) as u32;
             let abs_v = (key.y as i64 + step_v).clamp(0, data.resolution as i64) as u32;
 
-            if style == crate::lowpoly::TerrainStyle::LowPoly
-                && !data.column_edited(
-                    key.face,
+            if style == crate::lowpoly::TerrainStyle::LowPoly {
+                // the low-poly surface at this column corner, or the water surface above it. Edits
+                // shift the smooth surface by how far they moved the column's top (0 where unedited,
+                // and for columns of an edited chunk whose top is unchanged), so edited chunks sit
+                // where the voxel low-poly surface does
+                let (cu, cv) = (
                     abs_u.min(data.resolution - 1),
                     abs_v.min(data.resolution - 1),
-                )
-            {
-                // the low-poly surface at this column corner, or the water surface above it
+                );
+                let shift = if data.column_edited(key.face, cu, cv) {
+                    data.surface(key.face, cu, cv) as f32
+                        - data.effective_height(key.face, cu, cv) as f32
+                } else {
+                    0.0
+                };
                 let land = crate::lowpoly::surface_radius(
-                    data.smooth_corner(key.face, abs_u, abs_v),
+                    data.smooth_corner(key.face, abs_u, abs_v) + shift,
                     data.resolution,
                 );
                 let water = match def.liquid {
@@ -926,8 +933,11 @@ impl MeshGen {
                 None => def.palette.beach.color(),
             }
         } else if style == crate::lowpoly::TerrainStyle::LowPoly
-            && !data.column_edited(key.face, su, sv)
+            && h != data.effective_height(key.face, su, sv)
         {
+            // an edit moved the column's top: that block's own colour, flat like the voxel facets
+            surface.color()
+        } else if style == crate::lowpoly::TerrainStyle::LowPoly {
             crate::material::lowpoly_material(
                 &data.terrain,
                 &def.palette,
