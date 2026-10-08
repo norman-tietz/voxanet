@@ -57,6 +57,7 @@ pub struct GlobalUniform {
     pub sun_dir: [f32; 4],
     pub screen: [f32; 4], // width, height in pixels, sea surface radius, time in seconds (water animation)
     pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed; y: radians per screen pixel (cloud map level of detail)
+    pub bevel: [f32; 4], // x: block bevel width in world units (0 = off), y: cavity darkening (bevel.rs, fs_geom)
 }
 
 #[repr(C)]
@@ -235,9 +236,10 @@ pub struct Renderer {
     rt_center: Option<BlockId>,
     rt_dirty: bool,
     rt_blur: RtBlur,
-    gpu_timer: Option<GpuTimer>,        // None without timestamp queries
-    hw_rt: Option<HwRt>,                // hardware ray-traced shadows, None without ray queries
-    pub hw_shadows: bool,               // use hw_rt instead of the ray march (console: /hw_shadows)
+    gpu_timer: Option<GpuTimer>, // None without timestamp queries
+    hw_rt: Option<HwRt>,         // hardware ray-traced shadows, None without ray queries
+    pub hw_shadows: bool,        // use hw_rt instead of the ray march (console: /hw_shadows)
+    pub bevel: crate::bevel::BevelSettings, // block bevel look (console: /bevel)
     screenshot_request: Option<String>, // set by /screenshot, consumed at the end of the next render()
     flash_pipeline: wgpu::RenderPipeline,
     flare_pipeline: wgpu::RenderPipeline, // lens flares (flare.wgsl), drawn before the HUD text
@@ -922,6 +924,7 @@ impl Renderer {
             screen: [config.width as f32, config.height as f32, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
             motion: [0.0, 0.0, 0.0, 0.0],
+            bevel: [0.0; 4], // overlays aren't bevelled
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1054,6 +1057,7 @@ impl Renderer {
             gpu_timer,
             hw_rt,
             hw_shadows,
+            bevel: crate::bevel::BevelSettings::default(),
             screenshot_request: None,
         }
     }
@@ -2351,6 +2355,7 @@ impl Renderer {
                 0.0,
                 0.0,
             ],
+            bevel: self.bevel.uniform(),
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));

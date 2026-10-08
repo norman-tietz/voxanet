@@ -65,6 +65,33 @@ pub fn polygon_lines(pieces: &[((i64, i64), (i64, i64))]) -> Vec<usize> {
     line_of
 }
 
+pub const DEFAULT_WIDTH: f32 = 0.06; // world units (about a block's 6 %)
+pub const DEFAULT_CAVITY: f32 = 0.2; // albedo darkening right at an edge
+
+// the bevel look, tuned with /bevel (cmd.rs); GlobalUniform.bevel = uniform()
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BevelSettings {
+    pub width: f32, // 0 = off
+    pub cavity: f32,
+    last_width: f32, // the width /bevel on restores
+}
+
+impl Default for BevelSettings {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WIDTH,
+            cavity: DEFAULT_CAVITY,
+            last_width: DEFAULT_WIDTH,
+        }
+    }
+}
+
+impl BevelSettings {
+    pub fn uniform(&self) -> [f32; 4] {
+        [self.width, self.cavity, 0.0, 0.0]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +187,11 @@ mod tests {
         assert_eq!(l[2], (bottom + 1) % m);
         assert_eq!(l[3], (bottom + 2) % m);
         assert_eq!(l[4], (bottom + m - 1) % m);
+    }
+    #[test]
+    fn default_settings_feed_the_uniform() {
+        let s = BevelSettings::default();
+        assert_eq!(s.uniform(), [DEFAULT_WIDTH, DEFAULT_CAVITY, 0.0, 0.0]);
+        assert_eq!((DEFAULT_WIDTH, DEFAULT_CAVITY), (0.06, 0.2));
     }
 }

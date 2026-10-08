@@ -8,6 +8,7 @@ struct Global {
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
     motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed; y: radians per screen pixel (clouds.wgsl)
+    bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening (fs_geom, bevel.rs)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -615,10 +616,56 @@ struct GeomOut {
     @location(2) dist: f32,           // camera distance, 0 = sky
 }
 
+// block bevels (bevel.rs): `edge` holds the fragment's distances to up to four edges of its face (1e4 =
+// none), ex/ey their screen derivatives, px/py world_pos's. Each distance is affine on the face, so its
+// world gradient (in the face plane, pointing away from the edge) is solved exactly from the derivatives.
+// Within global.bevel.x of an edge the normal tilts outward on a quarter circle (45° at the edge, so two
+// faces meeting at 90° agree there) and the albedo darkens by up to global.bevel.y; both fade out where
+// the band is under ~2 px wide. Returns the normal and the albedo factor.
+fn bevel_normal(N: vec3<f32>, edge: vec4<f32>, ex: vec4<f32>, ey: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> vec4<f32> {
+    let w = global.bevel.x;
+    if (w <= 0.0 || min(min(edge.x, edge.y), min(edge.z, edge.w)) >= w) {
+        return vec4<f32>(N, 1.0);
+    }
+    let gxx = dot(px, px);
+    let gxy = dot(px, py);
+    let gyy = dot(py, py);
+    let det = gxx * gyy - gxy * gxy;
+    // edge-on (or degenerate) triangle: no usable gradient
+    if (det <= 1e-6 * gxx * gyy) {
+        return vec4<f32>(N, 1.0);
+    }
+    var tilt = vec3<f32>(0.0);
+    var albedo = 1.0;
+    for (var i = 0; i < 4; i++) {
+        let d = max(edge[i], 0.0);
+        if (d >= w) {
+            continue;
+        }
+        let dx = ex[i];
+        let dy = ey[i];
+        let fade = smoothstep(1.0, 3.0, w / max(length(vec2<f32>(dx, dy)), 1e-9));
+        let g = ((gyy * dx - gxy * dy) * px + (gxx * dy - gxy * dx) * py) / det;
+        let gl = length(g);
+        if (gl <= 0.0) {
+            continue;
+        }
+        let s = (w - d) / (w * 1.41421356); // sin θ, 0 … sin 45°
+        tilt -= g / gl * (s / sqrt(1.0 - s * s)) * fade;
+        let c = 1.0 - d / w;
+        albedo = min(albedo, 1.0 - global.bevel.y * c * c * fade);
+    }
+    return vec4<f32>(normalize(N + tilt), albedo);
+}
+
 @fragment
 fn fs_geom(in: VertexOut) -> GeomOut {
     // derivatives first, while every fragment of the quad still runs (the dither discard below)
-    let facet = cross(dpdx(in.world_pos), dpdy(in.world_pos));
+    let px = dpdx(in.world_pos);
+    let py = dpdy(in.world_pos);
+    let facet = cross(px, py);
+    let ex = dpdx(in.edge);
+    let ey = dpdy(in.edge);
     if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
@@ -636,6 +683,10 @@ fn fs_geom(in: VertexOut) -> GeomOut {
             normal = select(-flat_n, flat_n, dot(flat_n, normal) >= 0.0);
         }
     }
+    // block bevels, after the low-poly branch: its facets carry no edges, its placed cubes do
+    let bev = bevel_normal(normal, in.edge, ex, ey, px, py);
+    normal = bev.xyz;
+    color = color * bev.w;
     out.albedo = vec4<f32>(color, water_depth);
     out.normal = vec4<f32>(normal * 0.5 + 0.5, 0.0);
     out.dist = distance(global.camera_pos.xyz, in.world_pos);
