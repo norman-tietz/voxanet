@@ -1,32 +1,25 @@
 // Block bevels (docs/superpowers/specs/2026-10-09-block-bevels-design.md): every cube/hex block face
-// carries its distance to up to four of its edges (Vertex::edge), which fs_geom turns into rounded
-// edges and darkened joints. Pure geometry and the console settings; no GPU code.
+// carries its distance to up to eight of its edges (Vertex::edge, f16), which fs_geom turns into
+// rounded edges and darkened joints. Pure geometry and the console settings; no GPU code.
 
 use glam::Vec3;
 
-// Vertex::edge component for "no bevelled edge here"
+// Vertex::edge component for "no bevelled edge here" (exact in f16)
 pub const NO_EDGE: f32 = 1e4;
+// edge distances per vertex: four for a cube face, one per side of a hex cell (at most eight)
+pub const SLOTS: usize = 8;
+pub type Edges = [f32; SLOTS];
 
 // distance from p to the infinite line through a and b
 pub fn line_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     (p - a).cross((b - a).normalize()).length()
 }
 
-// p's distances to up to four lines, NO_EDGE for the unused components
-pub fn edge_distances(p: Vec3, lines: &[(Vec3, Vec3)]) -> [f32; 4] {
-    debug_assert!(lines.len() <= 4);
-    let mut d = [NO_EDGE; 4];
-    for (slot, &(a, b)) in d.iter_mut().zip(lines) {
-        *slot = line_distance(p, a, b);
-    }
-    d
-}
-
 // per corner of quad `pos`, its distance to each edge pos[k] → pos[k + 1] that `bevel[k]` marks
 // (NO_EDGE for the others); a corner lies on its own two edges
-pub fn quad_edges(pos: [Vec3; 4], bevel: [bool; 4]) -> [[f32; 4]; 4] {
+pub fn quad_edges(pos: [Vec3; 4], bevel: [bool; 4]) -> [Edges; 4] {
     pos.map(|p| {
-        let mut d = [NO_EDGE; 4];
+        let mut d = [NO_EDGE; SLOTS];
         for k in 0..4 {
             if bevel[k] {
                 d[k] = line_distance(p, pos[k], pos[(k + 1) % 4]);
@@ -34,6 +27,27 @@ pub fn quad_edges(pos: [Vec3; 4], bevel: [bool; 4]) -> [[f32; 4]; 4] {
         }
         d
     })
+}
+
+// p's distance to each side of a cell outline (slot = side, from polygon_lines' side_of): the nearest
+// of the side's piece lines, so p is at 0 on every piece of its own side (on the sphere a border
+// side's pieces aren't quite on one chord) and every top-face vertex can measure every side
+pub fn polygon_edges(p: Vec3, side_of: &[usize], pieces: &[(Vec3, Vec3)]) -> Edges {
+    let mut d = [NO_EDGE; SLOTS];
+    for (&side, &(a, b)) in side_of.iter().zip(pieces) {
+        d[side] = d[side].min(line_distance(p, a, b));
+    }
+    d
+}
+
+// Vertex::edge's f16 form
+pub fn pack(d: Edges) -> [u16; SLOTS] {
+    d.map(|x| half::f16::from_f32(x).to_bits())
+}
+
+#[cfg(test)]
+pub fn unpack(e: [u16; SLOTS]) -> Edges {
+    e.map(|x| half::f16::from_bits(x).to_f32())
 }
 
 // the straight sides of a closed counter-clockwise outline given as pieces a → b (sixths of a column):
@@ -156,16 +170,6 @@ mod tests {
     }
 
     #[test]
-    fn edge_distances_pads_with_no_edge() {
-        let lines = [(Vec3::ZERO, Vec3::X), (Vec3::ZERO, Vec3::Y)];
-        let d = edge_distances(Vec3::new(0.25, 0.5, 0.0), &lines);
-        assert!((d[0] - 0.5).abs() < 1e-6);
-        assert!((d[1] - 0.25).abs() < 1e-6);
-        assert_eq!(d[2], NO_EDGE);
-        assert_eq!(d[3], NO_EDGE);
-    }
-
-    #[test]
     fn quad_corners_sit_on_their_two_edges() {
         // a slightly trapezoidal face, like a cube-sphere block side
         let pos = [
@@ -189,6 +193,7 @@ mod tests {
                     "corner {i} far from edge {k}: {d:?}"
                 );
             }
+            assert!(d[4..].iter().all(|&x| x == NO_EDGE));
         }
     }
 
@@ -239,6 +244,36 @@ mod tests {
         assert_eq!(l[3], (bottom + 2) % m);
         assert_eq!(l[4], (bottom + m - 1) % m);
     }
+    // every vertex of a cell's top face measures all of its sides (slot = side), so the fan can share
+    // its vertices; a side made of several pieces is 0 at every point of each piece
+    #[test]
+    fn polygon_edges_measure_every_side() {
+        let (p0, p1, p2, p3) = (Vec3::ZERO, Vec3::X, Vec3::X + Vec3::Y, Vec3::Y);
+        let mid = Vec3::new(0.5, 0.0, 0.0);
+        // the bottom side in two pieces
+        let pieces = [(p0, mid), (mid, p1), (p1, p2), (p2, p3), (p3, p0)];
+        let side_of = [0, 0, 1, 2, 3];
+        let joint = polygon_edges(mid, &side_of, &pieces);
+        assert!(joint[0].abs() < 1e-6);
+        assert!((joint[1] - 0.5).abs() < 1e-6 && (joint[2] - 1.0).abs() < 1e-6);
+        let corner = polygon_edges(p1, &side_of, &pieces);
+        assert!(corner[0].abs() < 1e-6 && corner[1].abs() < 1e-6);
+        let centre = polygon_edges(Vec3::new(0.5, 0.5, 0.0), &side_of, &pieces);
+        assert!(centre[..4].iter().all(|&d| (d - 0.5).abs() < 1e-6));
+        assert!(centre[4..].iter().all(|&d| d == NO_EDGE));
+    }
+
+    // Vertex::edge holds the distances as f16: exact enough for bevels of a few hundredths
+    #[test]
+    fn packed_distances_round_trip() {
+        let d = [0.0, 0.03, 0.06, 0.5, 1.0, 1.7, 3.0, NO_EDGE];
+        let back = unpack(pack(d));
+        for (a, b) in d.iter().zip(back) {
+            assert!((a - b).abs() <= a * 1e-3 + 1e-5, "{a} → {b}");
+        }
+        assert_eq!(unpack(pack([NO_EDGE; SLOTS])), [NO_EDGE; SLOTS]);
+    }
+
     #[test]
     fn default_settings_feed_the_uniform() {
         let s = BevelSettings::default();

@@ -12,6 +12,7 @@ glam = "0.33"
 rayon = "1.12"
 glyphon = "0.12"
 sysinfo = "0.39"
+half = "2" # f16 bevel edge distances in Vertex (already a wgpu dependency)
 
 
 

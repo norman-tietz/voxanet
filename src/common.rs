@@ -49,16 +49,16 @@ pub struct Vertex {
     pub color: [f32; 3],
     pub normal: [f32; 3],
     pub water: f32, // water surface radius over the cell this face looks into, 0 = dry (caustics)
-    pub edge: [f32; 4], // distances to up to four bevelled edges of the face (bevel.rs), NO_EDGE = none
+    pub edge: [u16; 8], // f16 distances to up to eight bevelled edges of the face (bevel.rs), NO_EDGE = none
 }
 
 impl Vertex {
-    // shader.wgsl VertexIn; edge at location 7, since LOD meshes' LodMorph takes 4–6
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32, 7 => Float32x4
+    // shader.wgsl VertexIn; edge at locations 7 and 8, since LOD meshes' LodMorph takes 4–6
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32, 7 => Float16x4, 8 => Float16x4
     ];
     // not a block face: no bevel
-    pub const NO_EDGE: [f32; 4] = [crate::bevel::NO_EDGE; 4];
+    pub const NO_EDGE: [u16; 8] = [half::f16::from_f32_const(crate::bevel::NO_EDGE).to_bits(); 8];
 }
 
 // geomorphing (LOD meshes only, a second vertex buffer beside Vertex): what the parent LOD level shows at
@@ -1318,7 +1318,7 @@ pub(crate) mod tests {
         assert!(!planet.holds_water(face, du, v));
     }
     // Vertex mirrors shader.wgsl's VertexIn: pos, color, normal (vec3 each), water (f32) at offset 36,
-    // the bevel edge distances (vec4) at offset 40, location 7 (LodMorph uses 4–6)
+    // the eight f16 bevel edge distances as two vec4 at offsets 40/48, locations 7/8 (LodMorph uses 4–6)
     #[test]
     fn vertex_layout_carries_the_water_radius_and_edges() {
         assert_eq!(std::mem::size_of::<Vertex>(), 56);
@@ -1328,6 +1328,13 @@ pub(crate) mod tests {
         assert_eq!(std::mem::offset_of!(Vertex, edge), 40);
         assert_eq!(Vertex::ATTRIBUTES[4].offset, 40);
         assert_eq!(Vertex::ATTRIBUTES[4].shader_location, 7);
+        assert_eq!(Vertex::ATTRIBUTES[4].format, wgpu::VertexFormat::Float16x4);
+        assert_eq!(Vertex::ATTRIBUTES[5].offset, 48);
+        assert_eq!(Vertex::ATTRIBUTES[5].shader_location, 8);
+        assert_eq!(
+            crate::bevel::unpack(Vertex::NO_EDGE),
+            [crate::bevel::NO_EDGE; 8]
+        );
     }
 
     // the smooth map is the mean effective height of the 3×3 columns around each column

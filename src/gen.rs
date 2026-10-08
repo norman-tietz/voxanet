@@ -849,38 +849,28 @@ impl MeshGen {
                 -centre_dir
             };
             let centre = centre_dir * CoordSystem::get_layer_radius(layer, res);
-            let n = walls.len();
-            let piece = |i: usize| (corner(walls[i].a, layer), corner(walls[i].b, layer));
-            // one triangle per wall piece, unshared: each measures its own piece (on the sphere a border
-            // side's pieces aren't quite on one chord) and the pieces meeting its side's two corners
-            for i in 0..n {
-                let k = side_of[i];
-                let mut first = i;
-                while side_of[(first + n - 1) % n] == k {
-                    first = (first + n - 1) % n;
-                }
-                let mut last = i;
-                while side_of[(last + 1) % n] == k {
-                    last = (last + 1) % n;
-                }
-                let near = [piece(i), piece((first + n - 1) % n), piece((last + 1) % n)];
-                let tri = [
-                    (centre, centre_color),
-                    (corner(walls[i].a, layer), colors[i]),
-                    (corner(walls[i].b, layer), colors[(i + 1) % n]),
-                ];
-                for (p, color) in tri {
-                    verts.push(Vertex {
-                        pos: p.to_array(),
-                        color,
-                        normal: normal.to_array(),
-                        water: water_here,
-                        edge: crate::bevel::edge_distances(p, &near),
-                    });
-                }
-                inds.extend_from_slice(&[*idx, *idx + 1, *idx + 2]);
-                *idx += 3;
+            let pieces: Vec<_> = walls
+                .iter()
+                .map(|w| (corner(w.a, layer), corner(w.b, layer)))
+                .collect();
+            // every vertex measures every side of the cell (slot = side), so the fan shares them
+            let vertex = |p: Vec3, color: [f32; 3]| Vertex {
+                pos: p.to_array(),
+                color,
+                normal: normal.to_array(),
+                water: water_here,
+                edge: crate::bevel::pack(crate::bevel::polygon_edges(p, &side_of, &pieces)),
+            };
+            let base_idx = *idx;
+            verts.push(vertex(centre, centre_color));
+            for (&(a, _), &color) in pieces.iter().zip(colors) {
+                verts.push(vertex(a, color));
             }
+            let n = walls.len() as u32;
+            for i in 0..n {
+                inds.extend_from_slice(&[base_idx, base_idx + 1 + i, base_idx + 1 + (i + 1) % n]);
+            }
+            *idx += n + 1;
         };
 
         if !has_top {
@@ -1965,7 +1955,7 @@ impl MeshGen {
                 color: colors[i],
                 normal,
                 water,
-                edge: edges[i],
+                edge: crate::bevel::pack(edges[i]),
             });
         }
 
@@ -2514,9 +2504,10 @@ mod cube_fingerprint {
         let (verts, _) = MeshGen::build_chunk_cubes(key, &planet);
         assert!(!verts.is_empty());
         for v in &verts {
-            let on_edge = v.edge.iter().filter(|d| d.abs() < 1e-3).count();
-            let far = v.edge.iter().filter(|&&d| d > 0.5 && d < 2.0).count();
-            assert_eq!((on_edge, far), (2, 2), "vertex {:?}", v.edge);
+            let e = crate::bevel::unpack(v.edge);
+            let on_edge = e.iter().filter(|d| d.abs() < 1e-3).count();
+            let far = e.iter().filter(|&&d| d > 0.5 && d < 2.0).count();
+            assert_eq!((on_edge, far), (2, 2), "vertex {e:?}");
         }
     }
 
@@ -2635,14 +2626,15 @@ mod hex_mesh_tests {
             planet.cells = CellShape::Hex;
             for key in all_keys(&planet) {
                 let (verts, inds) = MeshGen::build_chunk_hex(key, &planet);
-                for v in &verts {
-                    let min = v.edge.iter().cloned().fold(f32::MAX, f32::min);
-                    assert!(min > -1e-4 && min < crate::bevel::NO_EDGE, "{:?}", v.edge);
+                let edges: Vec<_> = verts.iter().map(|v| crate::bevel::unpack(v.edge)).collect();
+                for e in &edges {
+                    let min = e.iter().cloned().fold(f32::MAX, f32::min);
+                    assert!(min > -1e-4 && min < crate::bevel::NO_EDGE, "{e:?}");
                 }
                 for tri in inds.chunks_exact(3) {
                     let on = tri
                         .iter()
-                        .filter(|&&i| verts[i as usize].edge.iter().any(|d| d.abs() < 1e-3))
+                        .filter(|&&i| edges[i as usize].iter().any(|d| d.abs() < 1e-3))
                         .count();
                     assert!(on >= 2, "triangle {tri:?}");
                 }

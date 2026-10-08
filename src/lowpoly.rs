@@ -365,6 +365,25 @@ mod tests {
 
     use crate::common::Vertex;
 
+    // a block placed on low-poly terrain is drawn as a cube (add_voxel_with) and is bevelled
+    #[test]
+    fn lowpoly_placed_blocks_are_bevelled() {
+        let mut planet = crate::common::PlanetData::new(32);
+        let (face, u, v) = (0u8, 5u32, 5u32);
+        let layer = planet.surface(face, u, v) + 1;
+        let id = crate::common::BlockId { face, layer, u, v };
+        planet
+            .add_block(id, crate::material::BlockType::Stone)
+            .unwrap();
+        let key = crate::common::ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let (verts, _) = build_chunk_lowpoly(key, &planet);
+        assert!(verts.iter().any(|v| v.edge != Vertex::NO_EDGE));
+    }
+
     // terrain facets stay unbevelled (only placed cubes, drawn by add_voxel_with, get edges)
     #[test]
     fn lowpoly_facets_carry_no_edge() {

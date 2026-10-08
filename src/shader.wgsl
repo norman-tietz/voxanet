@@ -87,7 +87,8 @@ struct VertexIn {
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) water: f32, // water surface radius over the cell the face looks into, 0 = dry
-    @location(7) edge: vec4<f32>, // distances to up to four bevelled edges (bevel.rs), 1e4 = none
+    @location(7) edge0: vec4<f32>, // f16 distances to up to eight bevelled edges (bevel.rs), 1e4 = none
+    @location(8) edge1: vec4<f32>,
 };
 
 struct VertexOut {
@@ -98,7 +99,8 @@ struct VertexOut {
     @location(3) view_pos: vec3<f32>,
     @location(4) water: f32,
     @location(5) @interpolate(flat) flat_color: vec3<f32>, // low-poly: one colour per facet (first vertex)
-    @location(6) edge: vec4<f32>, // bevel edge distances, affine on a face, so interpolated exactly
+    @location(6) edge0: vec4<f32>, // bevel edge distances, affine on a face, so interpolated exactly
+    @location(7) edge1: vec4<f32>,
 };
 
 @vertex
@@ -148,7 +150,8 @@ fn transform(in: VertexIn) -> VertexOut {
     out.flat_color = in.color;
     out.view_pos = global.camera_pos.xyz;
     out.water = in.water;
-    out.edge = in.edge;
+    out.edge0 = in.edge0;
+    out.edge1 = in.edge1;
 
     return out;
 }
@@ -616,15 +619,17 @@ struct GeomOut {
     @location(2) dist: f32,           // camera distance, 0 = sky
 }
 
-// block bevels (bevel.rs): `edge` holds the fragment's distances to up to four edges of its face (1e4 =
-// none), ex/ey their screen derivatives, px/py world_pos's. Each distance is affine on the face, so its
-// world gradient (in the face plane, pointing away from the edge) is solved exactly from the derivatives.
-// Within global.bevel.x of an edge the normal tilts outward on a quarter circle (45° at the edge, so two
-// faces meeting at 90° agree there) and the albedo darkens by up to global.bevel.y; both fade out where
-// the band is under ~2 px wide. Returns the normal and the albedo factor.
-fn bevel_normal(N: vec3<f32>, edge: vec4<f32>, ex: vec4<f32>, ey: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> vec4<f32> {
+// block bevels (bevel.rs): edge0/edge1 hold the fragment's distances to up to eight edges of its face
+// (1e4 = none), ex*/ey* their screen derivatives, px/py world_pos's. Each distance is affine on the face,
+// so its world gradient (in the face plane, pointing away from the edge) is solved exactly from the
+// derivatives. Within global.bevel.x of an edge the normal tilts outward on a quarter circle (45° at the
+// edge, so two faces meeting at 90° agree there) and the albedo darkens by up to global.bevel.y; both
+// fade out where the band is under ~2 px wide. Returns the normal and the albedo factor.
+fn bevel_normal(N: vec3<f32>, edge0: vec4<f32>, edge1: vec4<f32>, ex0: vec4<f32>, ey0: vec4<f32>,
+                ex1: vec4<f32>, ey1: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> vec4<f32> {
     let w = global.bevel.x;
-    if (w <= 0.0 || min(min(edge.x, edge.y), min(edge.z, edge.w)) >= w) {
+    let near = min(min(edge0, edge1).xy, min(edge0, edge1).zw);
+    if (w <= 0.0 || min(near.x, near.y) >= w) {
         return vec4<f32>(N, 1.0);
     }
     let gxx = dot(px, px);
@@ -637,13 +642,15 @@ fn bevel_normal(N: vec3<f32>, edge: vec4<f32>, ex: vec4<f32>, ey: vec4<f32>, px:
     }
     var tilt = vec3<f32>(0.0);
     var albedo = 1.0;
-    for (var i = 0; i < 4; i++) {
-        let d = max(edge[i], 0.0);
+    for (var i = 0; i < 8; i++) {
+        let j = i & 3;
+        let lo = i < 4;
+        let d = max(select(edge1[j], edge0[j], lo), 0.0);
         if (d >= w) {
             continue;
         }
-        let dx = ex[i];
-        let dy = ey[i];
+        let dx = select(ex1[j], ex0[j], lo);
+        let dy = select(ey1[j], ey0[j], lo);
         let fade = smoothstep(1.0, 3.0, w / max(length(vec2<f32>(dx, dy)), 1e-9));
         let g = ((gyy * dx - gxy * dy) * px + (gxx * dy - gxy * dx) * py) / det;
         let gl = length(g);
@@ -664,8 +671,10 @@ fn fs_geom(in: VertexOut) -> GeomOut {
     let px = dpdx(in.world_pos);
     let py = dpdy(in.world_pos);
     let facet = cross(px, py);
-    let ex = dpdx(in.edge);
-    let ey = dpdy(in.edge);
+    let ex0 = dpdx(in.edge0);
+    let ey0 = dpdy(in.edge0);
+    let ex1 = dpdx(in.edge1);
+    let ey1 = dpdy(in.edge1);
     if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
@@ -684,7 +693,7 @@ fn fs_geom(in: VertexOut) -> GeomOut {
         }
     }
     // block bevels, after the low-poly branch: its facets carry no edges, its placed cubes do
-    let bev = bevel_normal(normal, in.edge, ex, ey, px, py);
+    let bev = bevel_normal(normal, in.edge0, in.edge1, ex0, ey0, ex1, ey1, px, py);
     normal = bev.xyz;
     color = color * bev.w;
     out.albedo = vec4<f32>(color, water_depth);
