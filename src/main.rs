@@ -1,5 +1,6 @@
 // engine main.rs
 
+mod bevel;
 mod biome;
 mod cloud_map;
 mod cmd;
