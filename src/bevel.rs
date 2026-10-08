@@ -36,15 +36,10 @@ pub fn quad_edges(pos: [Vec3; 4], bevel: [bool; 4]) -> [[f32; 4]; 4] {
     })
 }
 
-pub struct PolygonLines {
-    pub line_of: Vec<usize>,
-    pub ends: Vec<((i64, i64), (i64, i64))>,
-}
-
 // the straight sides of a closed counter-clockwise outline given as pieces a → b (sixths of a column):
 // consecutive collinear pieces (a hex cell's border side, cut into one-sixth pieces) form one line.
-// line_of[i] is piece i's line; lines are numbered in outline order, ends[k] = (first a, last b)
-pub fn polygon_lines(pieces: &[((i64, i64), (i64, i64))]) -> PolygonLines {
+// returns each piece's line; lines are numbered in outline order
+pub fn polygon_lines(pieces: &[((i64, i64), (i64, i64))]) -> Vec<usize> {
     let n = pieces.len();
     let dir = |i: usize| {
         let (a, b) = pieces[i];
@@ -59,17 +54,15 @@ pub fn polygon_lines(pieces: &[((i64, i64), (i64, i64))]) -> PolygonLines {
         .find(|&i| !collinear((i + n - 1) % n, i))
         .unwrap_or(0);
     let mut line_of = vec![0; n];
-    let mut ends: Vec<((i64, i64), (i64, i64))> = Vec::new();
+    let mut line = 0;
     for k in 0..n {
         let i = (start + k) % n;
-        if k == 0 || !collinear((i + n - 1) % n, i) {
-            ends.push(pieces[i]);
-        } else {
-            ends.last_mut().unwrap().1 = pieces[i].1;
+        if k > 0 && !collinear((i + n - 1) % n, i) {
+            line += 1;
         }
-        line_of[i] = ends.len() - 1;
+        line_of[i] = line;
     }
-    PolygonLines { line_of, ends }
+    line_of
 }
 
 #[cfg(test)]
@@ -137,11 +130,9 @@ mod tests {
         let pts = [(0, 0), (6, -1), (12, 0), (12, 5), (6, 6), (0, 5)];
         let pieces: Vec<_> = (0..6).map(|i| (pts[i], pts[(i + 1) % 6])).collect();
         let l = polygon_lines(&pieces);
-        assert_eq!(l.ends.len(), 6);
         // every piece is its own line, numbered in order (any rotation)
         for i in 0..6 {
-            assert_eq!(l.line_of[(i + 1) % 6], (l.line_of[i] + 1) % 6);
-            assert_eq!(l.ends[l.line_of[i]], pieces[i]);
+            assert_eq!(l[(i + 1) % 6], (l[i] + 1) % 6);
         }
     }
 
@@ -159,15 +150,15 @@ mod tests {
             ((1, 0), (2, 0)),
         ];
         let l = polygon_lines(&pieces);
-        assert_eq!(l.ends.len(), 4);
-        let bottom = l.line_of[0];
+        let bottom = l[0];
         for i in [0, 1, 5, 6] {
-            assert_eq!(l.line_of[i], bottom);
+            assert_eq!(l[i], bottom);
         }
-        assert_eq!(l.ends[bottom], ((0, 0), (4, 0)));
-        let m = l.ends.len();
-        // neighbours by number are neighbours around the outline
-        assert_eq!(l.line_of[2], (bottom + 1) % m);
-        assert_eq!(l.line_of[4], (bottom + m - 1) % m);
+        // four sides, numbered around the outline
+        let m = 4;
+        assert_eq!(l.iter().max(), Some(&(m - 1)));
+        assert_eq!(l[2], (bottom + 1) % m);
+        assert_eq!(l[3], (bottom + 2) % m);
+        assert_eq!(l[4], (bottom + m - 1) % m);
     }
 }

@@ -808,6 +808,10 @@ impl MeshGen {
         let own = (id.face, id.u, id.v);
         let l = id.layer as i64;
         let walls = data.hex_walls(id.face, id.u, id.v);
+        // which straight side of the cell each wall piece belongs to (border sides come in one-sixth
+        // pieces): bevels round off the sides' corners, not the joints between pieces
+        let side_of =
+            crate::bevel::polygon_lines(&walls.iter().map(|w| (w.a, w.b)).collect::<Vec<_>>());
         let open: Vec<bool> = walls
             .iter()
             .map(|w| w.across.is_none_or(|c| !solid(c, l)))
@@ -844,28 +848,39 @@ impl MeshGen {
             } else {
                 -centre_dir
             };
-            let base_idx = *idx;
-            verts.push(Vertex {
-                pos: (centre_dir * CoordSystem::get_layer_radius(layer, res)).to_array(),
-                color: centre_color,
-                normal: normal.to_array(),
-                water: water_here,
-                edge: Vertex::NO_EDGE,
-            });
-            for (w, &color) in walls.iter().zip(colors) {
-                verts.push(Vertex {
-                    pos: corner(w.a, layer).to_array(),
-                    color,
-                    normal: normal.to_array(),
-                    water: water_here,
-                    edge: Vertex::NO_EDGE,
-                });
-            }
-            let n = walls.len() as u32;
+            let centre = centre_dir * CoordSystem::get_layer_radius(layer, res);
+            let n = walls.len();
+            let piece = |i: usize| (corner(walls[i].a, layer), corner(walls[i].b, layer));
+            // one triangle per wall piece, unshared: each measures its own piece (on the sphere a border
+            // side's pieces aren't quite on one chord) and the pieces meeting its side's two corners
             for i in 0..n {
-                inds.extend_from_slice(&[base_idx, base_idx + 1 + i, base_idx + 1 + (i + 1) % n]);
+                let k = side_of[i];
+                let mut first = i;
+                while side_of[(first + n - 1) % n] == k {
+                    first = (first + n - 1) % n;
+                }
+                let mut last = i;
+                while side_of[(last + 1) % n] == k {
+                    last = (last + 1) % n;
+                }
+                let near = [piece(i), piece((first + n - 1) % n), piece((last + 1) % n)];
+                let tri = [
+                    (centre, centre_color),
+                    (corner(walls[i].a, layer), colors[i]),
+                    (corner(walls[i].b, layer), colors[(i + 1) % n]),
+                ];
+                for (p, color) in tri {
+                    verts.push(Vertex {
+                        pos: p.to_array(),
+                        color,
+                        normal: normal.to_array(),
+                        water: water_here,
+                        edge: crate::bevel::edge_distances(p, &near),
+                    });
+                }
+                inds.extend_from_slice(&[*idx, *idx + 1, *idx + 2]);
+                *idx += 3;
             }
-            *idx += n + 1;
         };
 
         if !has_top {
@@ -895,11 +910,15 @@ impl MeshGen {
             let colors = vec![shade(0.4); walls.len()];
             fan(verts, inds, idx, id.layer, &colors, shade(0.4));
         }
-        for (w, _) in walls.iter().zip(&open).filter(|(_, &o)| o) {
+        let n = walls.len();
+        for (i, w) in walls.iter().enumerate().filter(|&(i, _)| open[i]) {
             let c = shade(0.8 * w.across.map_or(1.0, sky));
             let water = w
                 .across
                 .map_or(0.0, |(f, u, v)| data.water_surface_radius(f, u, v));
+            // an end is rounded off only where the cell turns a corner, not between one-sixth pieces
+            let starts_side = side_of[i] != side_of[(i + n - 1) % n];
+            let ends_side = side_of[i] != side_of[(i + 1) % n];
             Self::quad(
                 verts,
                 inds,
@@ -914,6 +933,8 @@ impl MeshGen {
                 false,
                 block_center,
                 water,
+                // edges: bottom, end at b, top, end at a
+                [true, ends_side, true, starts_side],
             );
         }
     }
@@ -1713,6 +1734,7 @@ impl MeshGen {
                     true,
                     block_center,
                     water(0, 0),
+                    [true; 4],
                 );
             } else {
                 Self::quad(
@@ -1724,6 +1746,7 @@ impl MeshGen {
                     true,
                     block_center,
                     water(0, 0),
+                    [true; 4],
                 );
             }
         }
@@ -1739,6 +1762,7 @@ impl MeshGen {
                 true,
                 block_center,
                 water(0, 0),
+                [true; 4],
             );
         }
 
@@ -1752,6 +1776,7 @@ impl MeshGen {
                 false,
                 block_center,
                 water(0, -1),
+                [true; 4],
             );
         }
         if !has_back {
@@ -1764,6 +1789,7 @@ impl MeshGen {
                 false,
                 block_center,
                 water(0, 1),
+                [true; 4],
             );
         }
         if !has_left {
@@ -1776,6 +1802,7 @@ impl MeshGen {
                 false,
                 block_center,
                 water(-1, 0),
+                [true; 4],
             );
         }
         if !has_right {
@@ -1788,6 +1815,7 @@ impl MeshGen {
                 false,
                 block_center,
                 water(1, 0),
+                [true; 4],
             );
         }
     }
@@ -1911,7 +1939,8 @@ impl MeshGen {
         colors: [[f32; 3]; 4],
         force_radial: bool,
         block_center: Vec3,
-        water: f32, // Vertex::water for all four corners
+        water: f32,       // Vertex::water for all four corners
+        bevel: [bool; 4], // which edges pos[k] → pos[k + 1] are rounded off (bevel.rs)
     ) {
         let normal = if force_radial {
             let center = (pos[0] + pos[1] + pos[2] + pos[3]) * 0.25;
@@ -1929,13 +1958,14 @@ impl MeshGen {
             normal
         };
 
+        let edges = crate::bevel::quad_edges(pos, bevel);
         for i in 0..4 {
             verts.push(Vertex {
                 pos: pos[i].to_array(),
                 color: colors[i],
                 normal,
                 water,
-                edge: Vertex::NO_EDGE,
+                edge: edges[i],
             });
         }
 
@@ -2472,6 +2502,24 @@ mod cube_fingerprint {
     use super::*;
     use crate::common::{ChunkKey, PlanetData};
 
+    // every cube block face is bevelled: each vertex lies on two of its face's edges
+    #[test]
+    fn cube_faces_carry_edge_distances() {
+        let planet = PlanetData::new(32);
+        let key = ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let (verts, _) = MeshGen::build_chunk_cubes(key, &planet);
+        assert!(!verts.is_empty());
+        for v in &verts {
+            let on_edge = v.edge.iter().filter(|d| d.abs() < 1e-3).count();
+            let far = v.edge.iter().filter(|&&d| d > 0.5 && d < 2.0).count();
+            assert_eq!((on_edge, far), (2, 2), "vertex {:?}", v.edge);
+        }
+    }
+
     fn triangle_sum(verts: &[Vertex], inds: &[u32]) -> (usize, u64) {
         let mut sum = 0u64;
         for tri in inds.chunks_exact(3) {
@@ -2577,6 +2625,30 @@ mod hex_mesh_tests {
     use super::*;
     use crate::common::{CellShape, ChunkKey, PlanetData};
     use std::collections::HashMap;
+
+    // hex block faces are bevelled: no vertex is unbevelled or negative, and every triangle has at least
+    // two vertices on one of its edges (fan corners, wall corners); res 33 has seam cells with pieces
+    #[test]
+    fn hex_mesh_bevel_distances() {
+        for res in [32u32, 33] {
+            let mut planet = PlanetData::new(res);
+            planet.cells = CellShape::Hex;
+            for key in all_keys(&planet) {
+                let (verts, inds) = MeshGen::build_chunk_hex(key, &planet);
+                for v in &verts {
+                    let min = v.edge.iter().cloned().fold(f32::MAX, f32::min);
+                    assert!(min > -1e-4 && min < crate::bevel::NO_EDGE, "{:?}", v.edge);
+                }
+                for tri in inds.chunks_exact(3) {
+                    let on = tri
+                        .iter()
+                        .filter(|&&i| verts[i as usize].edge.iter().any(|d| d.abs() < 1e-3))
+                        .count();
+                    assert!(on >= 2, "triangle {tri:?}");
+                }
+            }
+        }
+    }
 
     fn all_keys(planet: &PlanetData) -> Vec<ChunkKey> {
         let n = planet.resolution.div_ceil(CHUNK_SIZE);
