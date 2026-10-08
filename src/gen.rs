@@ -850,6 +850,7 @@ impl MeshGen {
                 color: centre_color,
                 normal: normal.to_array(),
                 water: water_here,
+                edge: Vertex::NO_EDGE,
             });
             for (w, &color) in walls.iter().zip(colors) {
                 verts.push(Vertex {
@@ -857,6 +858,7 @@ impl MeshGen {
                     color,
                     normal: normal.to_array(),
                     water: water_here,
+                    edge: Vertex::NO_EDGE,
                 });
             }
             let n = walls.len() as u32;
@@ -1011,6 +1013,7 @@ impl MeshGen {
                                 color,
                                 normal,
                                 water: 0.0,
+                                edge: Vertex::NO_EDGE,
                             };
 
                             let corners = [
@@ -1094,6 +1097,7 @@ impl MeshGen {
                                 color,
                                 normal,
                                 water: 0.0,
+                                edge: Vertex::NO_EDGE,
                             });
                         }
                     }
@@ -1185,6 +1189,7 @@ impl MeshGen {
                         color,
                         normal: c.normalize().to_array(),
                         water,
+                        edge: Vertex::NO_EDGE,
                     })
                 };
                 if style == crate::lowpoly::TerrainStyle::Hex {
@@ -1505,6 +1510,7 @@ impl MeshGen {
                     color,
                     normal: normal.to_array(),
                     water: 0.0,
+                    edge: Vertex::NO_EDGE,
                 });
             }
         }
@@ -1547,6 +1553,7 @@ impl MeshGen {
                     color: src_v.color,
                     normal: src_v.normal,
                     water: 0.0,
+                    edge: Vertex::NO_EDGE,
                 });
             }
             let len = coord_pairs.len() as u32;
@@ -1800,6 +1807,7 @@ impl MeshGen {
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             });
 
             verts.push(Vertex {
@@ -1807,6 +1815,7 @@ impl MeshGen {
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             });
         }
 
@@ -1830,6 +1839,7 @@ impl MeshGen {
             color,
             normal: [0.0, 1.0, 0.0],
             water: 0.0,
+            edge: Vertex::NO_EDGE,
         });
         for i in 0..=segments {
             let theta = (i as f32 / segments as f32) * std::f32::consts::TAU;
@@ -1840,6 +1850,7 @@ impl MeshGen {
                 color,
                 normal: [0.0, 1.0, 0.0],
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             });
         }
         for i in 0..segments {
@@ -1862,24 +1873,28 @@ impl MeshGen {
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [s, 0.0, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [0.0, -s, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [0.0, s, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
         ];
         let inds = vec![0, 1, 2, 3];
@@ -1920,6 +1935,7 @@ impl MeshGen {
                 color: colors[i],
                 normal,
                 water,
+                edge: Vertex::NO_EDGE,
             });
         }
 

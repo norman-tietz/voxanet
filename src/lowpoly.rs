@@ -353,6 +353,7 @@ fn cell(
                 color,
                 normal: n.to_array(),
                 water,
+                edge: Vertex::NO_EDGE,
             });
         }
     }
@@ -363,6 +364,20 @@ mod tests {
     use super::*;
 
     use crate::common::Vertex;
+
+    // terrain facets stay unbevelled (only placed cubes, drawn by add_voxel_with, get edges)
+    #[test]
+    fn lowpoly_facets_carry_no_edge() {
+        let planet = crate::common::PlanetData::new(32);
+        let key = crate::common::ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let (verts, _) = build_chunk_lowpoly(key, &planet);
+        assert!(!verts.is_empty());
+        assert!(verts.iter().all(|v| v.edge == Vertex::NO_EDGE));
+    }
     use crate::material::BlockType;
 
     // every chunk of the planet, meshed low-poly

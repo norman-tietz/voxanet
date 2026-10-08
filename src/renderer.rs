@@ -1320,24 +1320,28 @@ impl Renderer {
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [1.0, 1.0, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [-1.0, bottom_y, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
             Vertex {
                 pos: [1.0, bottom_y, 0.0],
                 color,
                 normal,
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             },
         ];
 
@@ -2085,6 +2089,7 @@ impl Renderer {
                         color,
                         normal: normal.to_array(),
                         water: 0.0,
+                        edge: Vertex::NO_EDGE,
                     });
                 }
                 inds.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
@@ -3338,6 +3343,7 @@ fn hex_cursor(planet: &PlanetData, id: BlockId) -> (Vec<Vertex>, Vec<u32>) {
                     color,
                     normal: n.to_array(),
                     water: 0.0,
+                    edge: Vertex::NO_EDGE,
                 });
             }
             inds.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);

@@ -103,6 +103,7 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
                 color,
                 normal: normals[i].normalize_or_zero().to_array(),
                 water: 0.0,
+                edge: Vertex::NO_EDGE,
             }
         })
         .collect();

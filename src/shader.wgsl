@@ -86,6 +86,7 @@ struct VertexIn {
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) water: f32, // water surface radius over the cell the face looks into, 0 = dry
+    @location(7) edge: vec4<f32>, // distances to up to four bevelled edges (bevel.rs), 1e4 = none
 };
 
 struct VertexOut {
@@ -96,6 +97,7 @@ struct VertexOut {
     @location(3) view_pos: vec3<f32>,
     @location(4) water: f32,
     @location(5) @interpolate(flat) flat_color: vec3<f32>, // low-poly: one colour per facet (first vertex)
+    @location(6) edge: vec4<f32>, // bevel edge distances, affine on a face, so interpolated exactly
 };
 
 @vertex
@@ -145,6 +147,7 @@ fn transform(in: VertexIn) -> VertexOut {
     out.flat_color = in.color;
     out.view_pos = global.camera_pos.xyz;
     out.water = in.water;
+    out.edge = in.edge;
 
     return out;
 }

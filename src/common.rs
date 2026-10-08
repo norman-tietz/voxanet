@@ -49,12 +49,16 @@ pub struct Vertex {
     pub color: [f32; 3],
     pub normal: [f32; 3],
     pub water: f32, // water surface radius over the cell this face looks into, 0 = dry (caustics)
+    pub edge: [f32; 4], // distances to up to four bevelled edges of the face (bevel.rs), NO_EDGE = none
 }
 
 impl Vertex {
-    // shader.wgsl VertexIn
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32];
+    // shader.wgsl VertexIn; edge at location 7, since LOD meshes' LodMorph takes 4–6
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32, 7 => Float32x4
+    ];
+    // not a block face: no bevel
+    pub const NO_EDGE: [f32; 4] = [crate::bevel::NO_EDGE; 4];
 }
 
 // geomorphing (LOD meshes only, a second vertex buffer beside Vertex): what the parent LOD level shows at
@@ -1313,13 +1317,17 @@ pub(crate) mod tests {
         // dug below the lake's level but above the sea: dry (no flow from the lake)
         assert!(!planet.holds_water(face, du, v));
     }
-    // Vertex mirrors shader.wgsl's VertexIn: pos, color, normal (vec3 each), water (f32) at offset 36
+    // Vertex mirrors shader.wgsl's VertexIn: pos, color, normal (vec3 each), water (f32) at offset 36,
+    // the bevel edge distances (vec4) at offset 40, location 7 (LodMorph uses 4–6)
     #[test]
-    fn vertex_layout_carries_the_water_radius() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 40);
+    fn vertex_layout_carries_the_water_radius_and_edges() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 56);
         assert_eq!(std::mem::offset_of!(Vertex, water), 36);
         assert_eq!(Vertex::ATTRIBUTES[3].offset, 36);
         assert_eq!(Vertex::ATTRIBUTES[3].shader_location, 3);
+        assert_eq!(std::mem::offset_of!(Vertex, edge), 40);
+        assert_eq!(Vertex::ATTRIBUTES[4].offset, 40);
+        assert_eq!(Vertex::ATTRIBUTES[4].shader_location, 7);
     }
 
     // the smooth map is the mean effective height of the 3×3 columns around each column
