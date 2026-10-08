@@ -5,6 +5,8 @@
 // 2. shadow prep (cs_gbuf_down): the shadow-resolution G-buffer of rt_blur.rs, from the full-resolution one
 //    (then the shadow compute pass and the blur run as before)
 // 3. lighting pass (fs_light): a full-screen triangle that shades each pixel once (shade() in shader.wgsl)
+// While radial motion blur is active, step 3 is split: fs_shade shades each pixel once into `shaded`, then
+// fs_motion_blur blurs that image onto the swapchain (shader.wgsl explains why).
 // The translucent water surface (fs_water) and the overlays (cursor box, collision lines, crosshair,
 // console) are drawn forward after the lighting pass, depth-tested against the G-buffer depth.
 
@@ -14,6 +16,10 @@ use crate::rt_blur::RtBlur;
 const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgb10a2Unorm; // normal * 0.5 + 0.5
 const DIST_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float; // camera distance, full precision
+
+// the shaded image before post-processing, for the motion blur: premultiplied HDR colour + coverage
+const SHADED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub struct Deferred {
@@ -22,6 +28,8 @@ pub struct Deferred {
     pub geom_lod_fill: wgpu::RenderPipeline, // LOD meshes: vs_lod with the LodMorph vertex buffer
     pub geom_lod_wire: wgpu::RenderPipeline,
     pub light_pipeline: wgpu::RenderPipeline,
+    pub shade_pipeline: wgpu::RenderPipeline, // fs_shade into `shaded` (motion blur only)
+    pub blur_pipeline: wgpu::RenderPipeline,  // fs_motion_blur: `shaded` onto the swapchain
     pub water_pipeline: wgpu::RenderPipeline,
     down_pipeline: wgpu::ComputePipeline,
     textures_layout: wgpu::BindGroupLayout, // group 3: the full-resolution G-buffer
@@ -31,6 +39,9 @@ pub struct Deferred {
     dist: wgpu::TextureView,
     pub depth: wgpu::TextureView,
     pub textures_bind: wgpu::BindGroup,
+    shaded_layout: wgpu::BindGroupLayout, // group 3 of fs_motion_blur: `shaded`
+    shaded: wgpu::TextureView,
+    pub shaded_bind: wgpu::BindGroup,
 }
 
 impl Deferred {
@@ -139,39 +150,76 @@ impl Deferred {
             ],
             immediate_size: 0,
         });
-        let light_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Lighting Pipeline"),
-            layout: Some(&light_layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs_full"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs_light"),
-                compilation_options: Default::default(),
-                // blended over the galaxy backdrop: fs_light outputs premultiplied colour and the sky's
-                // opacity as alpha (1 for terrain and for a thick, lit atmosphere)
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
+        // blended over the galaxy backdrop: fs_light outputs premultiplied colour and the sky's opacity as
+        // alpha (1 for terrain and for a thick, lit atmosphere); so does fs_motion_blur
+        let full_screen = |label, layout, entry_point, format, blend, depth: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_full"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: depth.then_some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blend = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let light_pipeline = full_screen(
+            "Lighting Pipeline",
+            &light_layout,
+            "fs_light",
+            surface_format,
+            blend,
+            true,
+        );
+        // its own pass, before the lighting pass: no depth
+        let shade_pipeline = full_screen(
+            "Shade Pipeline",
+            &light_layout,
+            "fs_shade",
+            SHADED_FORMAT,
+            None,
+            false,
+        );
+        let shaded_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shaded_layout"),
+            entries: &[tex_entry(6, wgpu::ShaderStages::FRAGMENT)],
         });
+        let blur_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("motion_blur_layout"),
+            bind_group_layouts: &[Some(global_layout), None, None, Some(&shaded_layout)],
+            immediate_size: 0,
+        });
+        let blur_pipeline = full_screen(
+            "Motion Blur Pipeline",
+            &blur_layout,
+            "fs_motion_blur",
+            surface_format,
+            blend,
+            true,
+        );
 
         // water: scene vertices, alpha-blended over the lit image, depth-tested but not written
         let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -263,12 +311,15 @@ impl Deferred {
 
         let (albedo, normal, dist, depth, textures_bind) =
             Self::make_targets(device, &textures_layout, width, height);
+        let (shaded, shaded_bind) = Self::make_shaded(device, &shaded_layout, width, height);
         Self {
             geom_fill,
             geom_wire,
             geom_lod_fill,
             geom_lod_wire,
             light_pipeline,
+            shade_pipeline,
+            blur_pipeline,
             water_pipeline,
             down_pipeline,
             textures_layout,
@@ -278,7 +329,57 @@ impl Deferred {
             dist,
             depth,
             textures_bind,
+            shaded_layout,
+            shaded,
+            shaded_bind,
         }
+    }
+
+    fn make_shaded(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::TextureView, wgpu::BindGroup) {
+        let shaded = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("Shaded (motion blur)"),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SHADED_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shaded_bind"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&shaded),
+            }],
+        });
+        (shaded, bind)
+    }
+
+    // colour attachment of the motion blur's shading pass (every pixel is written, nothing to load)
+    pub fn shaded_target(&self) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+        Some(wgpu::RenderPassColorAttachment {
+            depth_slice: None,
+            view: &self.shaded,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })
     }
 
     fn make_targets(
@@ -346,6 +447,8 @@ impl Deferred {
             self.depth,
             self.textures_bind,
         ) = Self::make_targets(device, &self.textures_layout, width, height);
+        (self.shaded, self.shaded_bind) =
+            Self::make_shaded(device, &self.shaded_layout, width, height);
     }
 
     // the camera-distance G-buffer (0 = sky), for the lens flare's occlusion taps

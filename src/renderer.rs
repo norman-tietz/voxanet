@@ -2557,6 +2557,26 @@ impl Renderer {
             self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
         }
 
+        // while the motion blur is on, every pixel is shaded once into Deferred::shaded first, and the
+        // lighting pass blurs that image instead of shading (deferred.rs); counted as lighting time,
+        // since the GPU timer measures each part from the previous part's end
+        let blurring = motion_blur > 0.0;
+        if blurring {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shade Pass (motion blur)"),
+                color_attachments: &[self.deferred.shaded_target()],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.deferred.shade_pipeline);
+            pass.set_bind_group(0, &self.global_bind, &[]);
+            pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
+            pass.set_bind_group(3, &self.deferred.textures_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // --- PASS 3: LIGHTING (ONCE PER PIXEL) + FORWARD OVERLAYS ---
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2588,11 +2608,17 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.deferred.light_pipeline);
             pass.set_bind_group(0, &self.global_bind, &[]);
             pass.set_bind_group(2, &self.rt_blur.sample_bind, &[]);
-            pass.set_bind_group(3, &self.deferred.textures_bind, &[]);
+            if blurring {
+                pass.set_pipeline(&self.deferred.blur_pipeline);
+                pass.set_bind_group(3, &self.deferred.shaded_bind, &[]);
+            } else {
+                pass.set_pipeline(&self.deferred.light_pipeline);
+                pass.set_bind_group(3, &self.deferred.textures_bind, &[]);
+            }
             pass.draw(0..3, 0..1);
+            pass.set_bind_group(3, &self.deferred.textures_bind, &[]); // the water pass below reads the G-buffer
 
             // translucent water over the lit sea floor
             pass.set_pipeline(&self.deferred.water_pipeline);

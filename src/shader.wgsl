@@ -67,7 +67,7 @@ const CAUSTIC_MAX     = 3.0;                         // brightest caustic, times
 const WATER_DEPTH_RANGE: f32 = 16.0;                   // layers of water depth the G-buffer's albedo alpha spans
 const FOAM_DEPTH      = 2.0;                         // vertical water depth below which foam forms
 const SHADOW_OPACITY  = 0.85;                        // Shadows are not pitch black
-const MOTION_BLUR_SAMPLES    = 6;    // extra G-buffer taps per pixel when global.motion.x > 0
+const MOTION_BLUR_SAMPLES    = 6;    // extra taps of the shaded image per pixel when global.motion.x > 0
 const MOTION_BLUR_MAX_PIXELS = 40.0; // blur radius in pixels at the screen edge, at full strength
 const SRGB_TO_P3 = mat3x3<f32>(                     // linear sRGB -> linear Display P3 (column-major)
     vec3<f32>(0.8225, 0.0332, 0.0171),
@@ -656,9 +656,8 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }
 
-// shades one pixel (G-buffer sample, sky/cloud compositing), without post-processing — factored
-// out of fs_light so radial motion blur can average several taps before the one final
-// post_process() call (tonemapping several already-tonemapped samples would double-compress them).
+// shades one pixel (G-buffer sample, sky/cloud compositing), without post-processing (fs_light, and
+// fs_shade for the motion blur, which post-processes after averaging).
 // Returns premultiplied colour and coverage: terrain is opaque, the sky only as opaque as
 // sky_opacity, so the galaxy backdrop shows through where the atmosphere is thin or dark.
 fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<f32> {
@@ -692,18 +691,36 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
     return vec4<f32>(color, alpha);
 }
 
+// premultiplied all the way out: the lighting pass blends with PREMULTIPLIED_ALPHA_BLENDING, so a
+// sky pixel lands as post(sky * a) + backdrop * (1 - a) — the same post(sky * a) that fog() fades
+// distant terrain toward (sky_over_black). Un-premultiplying before post_process and blending
+// post(sky) * a instead made fogged terrain visibly brighter than the sky next to it whenever the
+// sky was partly transparent (twilight, and the space-fade band seen from altitude).
 @fragment
 fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = vec2<i32>(pos.xy);
-    let cam_pos = global.camera_pos.xyz;
-    let L = normalize(global.sun_dir.xyz);
-    let t = global.screen.w;
+    let color = shade_pixel(vec2<i32>(pos.xy), global.camera_pos.xyz, normalize(global.sun_dir.xyz), global.screen.w);
+    return vec4<f32>(post_process(color.rgb), color.a);
+}
 
-    var color = shade_pixel(p, cam_pos, L, t);
+// --- RADIAL MOTION BLUR (Deferred::shade_pipeline + blur_pipeline, only while it is active) ---
+// Each pixel is shaded once by fs_shade into Deferred::shaded (premultiplied colour + coverage, before
+// post-processing), then fs_motion_blur averages taps of that image along the line to the screen centre
+// and post-processes the average once (tonemapping already-tonemapped samples would double-compress
+// them). Shading every tap again in place, as fs_light once did, cost up to 7 full shades per pixel:
+// ~120 ms a frame at 4K, sky and clouds included.
+@group(3) @binding(6) var shaded: texture_2d<f32>;
 
-    // radial motion blur: strength ramps from the screen center (none) to the edges (full),
-    // scaled by the player's current speed (global.motion.x, set in Renderer::render) — the sides
-    // blur while running/flying fast, the center of view stays sharp.
+@fragment
+fn fs_shade(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return shade_pixel(vec2<i32>(pos.xy), global.camera_pos.xyz, normalize(global.sun_dir.xyz), global.screen.w);
+}
+
+// strength ramps from the screen center (none) to the edges (full), scaled by the player's current
+// speed (global.motion.x, set in Renderer::render): the sides blur while running/flying fast, the
+// center of view stays sharp
+@fragment
+fn fs_motion_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    var color = textureLoad(shaded, vec2<i32>(pos.xy), 0);
     let center = global.screen.xy * 0.5;
     let offset = pos.xy - center;
     let edge_dist = length(offset) / length(center); // 0 at center, 1 at the corners
@@ -717,18 +734,12 @@ fn fs_light(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             let sample_px = vec2<i32>(pos.xy - dir * reach);
             if (sample_px.x >= 0 && sample_px.y >= 0
                 && sample_px.x < i32(global.screen.x) && sample_px.y < i32(global.screen.y)) {
-                sum += shade_pixel(sample_px, cam_pos, L, t);
+                sum += textureLoad(shaded, sample_px, 0);
                 count += 1.0;
             }
         }
         color = sum / count;
     }
-
-    // premultiplied all the way out: the lighting pass blends with PREMULTIPLIED_ALPHA_BLENDING, so a
-    // sky pixel lands as post(sky * a) + backdrop * (1 - a) — the same post(sky * a) that fog() fades
-    // distant terrain toward (sky_over_black). Un-premultiplying before post_process and blending
-    // post(sky) * a instead made fogged terrain visibly brighter than the sky next to it whenever the
-    // sky was partly transparent (twilight, and the space-fade band seen from altitude).
     return vec4<f32>(post_process(color.rgb), color.a);
 }
 
