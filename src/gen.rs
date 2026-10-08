@@ -833,12 +833,12 @@ impl MeshGen {
         let block_center = centre_dir * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
         let water_here = data.water_surface_radius(id.face, id.u, id.v);
 
-        let mut fan = |verts: &mut Vec<Vertex>,
-                       inds: &mut Vec<u32>,
-                       idx: &mut u32,
-                       layer: u32,
-                       colors: &[[f32; 3]],
-                       centre_color: [f32; 3]| {
+        let fan = |verts: &mut Vec<Vertex>,
+                   inds: &mut Vec<u32>,
+                   idx: &mut u32,
+                   layer: u32,
+                   colors: &[[f32; 3]],
+                   centre_color: [f32; 3]| {
             let normal = if layer > id.layer {
                 centre_dir
             } else {

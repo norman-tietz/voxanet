@@ -11,9 +11,6 @@
 // sixths of a column (u6 = 6u, v6 = 6v): every corner of every cell lies on that lattice, so shared
 // corners and the cube-face seams compare exactly.
 
-// face-space sixths per column
-pub const SIXTHS: i64 = 6;
-
 // a row's shift along u, in sixths: odd rows are half a column to the right
 fn shift6(row: i64) -> i64 {
     3 * row.rem_euclid(2)
@@ -103,7 +100,8 @@ pub fn centroid(pts: &[(i64, i64)]) -> (f64, f64) {
     (cx / (3.0 * a) / 6.0, cy / (3.0 * a) / 6.0)
 }
 
-// the area of an outline in columns² (1 for an interior cell)
+// the area of an outline in columns² (1 for an interior cell; tests)
+#[cfg(test)]
 pub fn area(pts: &[(i64, i64)]) -> f64 {
     let twice: i64 = (0..pts.len())
         .map(|i| {
