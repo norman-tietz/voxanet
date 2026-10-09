@@ -100,7 +100,7 @@ impl HwRt {
         });
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HW RT Params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -208,12 +208,15 @@ impl HwRt {
         enc: &mut wgpu::CommandEncoder,
         shadows: &RtBlur,
         sun_dir: glam::Vec3,
+        ao: [f32; 4], // ao.rs AoSettings::uniform: radius, ray count, strength
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         queue.write_buffer(
             &self.params_buf,
             0,
-            bytemuck::cast_slice(&[sun_dir.x, sun_dir.y, sun_dir.z, 0.0]),
+            bytemuck::cast_slice(&[
+                sun_dir.x, sun_dir.y, sun_dir.z, 0.0, ao[0], ao[1], ao[2], ao[3],
+            ]),
         );
         // targets and TLAS can be replaced (resize, capacity), so the bind group is made per frame
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {

@@ -2694,6 +2694,7 @@ impl Renderer {
                     &mut enc,
                     &self.rt_blur,
                     sun_dir,
+                    crate::ao::AoSettings::default().uniform(),
                     compute_writes,
                 ),
                 None => self
@@ -3718,6 +3719,24 @@ pub(crate) mod tests {
     #[test]
     fn scene_shader_is_valid_wgsl() {
         assert_valid_wgsl(SCENE_SHADER);
+    }
+
+    // the hardware shadow + AO compute shader (hw_rt.rs), with its ray queries
+    #[test]
+    fn hw_rt_shader_is_valid_wgsl() {
+        assert_valid_wgsl(include_str!("rt_hw.wgsl"));
+        // the AO rays are part of it
+        let src = include_str!("rt_hw.wgsl");
+        let ao = &src[src.find("fn ambient_occlusion").expect("AO rays")..];
+        // its ray query is declared before the ray loop: declared inside, Mesa's Intel driver lost the
+        // device compiling the module (valid WGSL, so naga can't catch it)
+        let decl = ao.find("var rq: ray_query;").expect("ray query variable");
+        assert!(decl < ao.find("for (").expect("ray loop"));
+    }
+
+    #[test]
+    fn blur_shader_is_valid_wgsl() {
+        assert_valid_wgsl(include_str!("blur.wgsl"));
     }
 
     // landing messages (F) must be seen without opening the console: a short HUD status line

@@ -381,27 +381,29 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
 // The shadow targets can be smaller than the screen (rt_blur.rs MAX_RT_PIXELS): upsample from the
 // four nearest texels, weighted bilinearly and by how well their camera distance matches this pixel's,
 // so shadows don't bleed across silhouettes. At full resolution this is a single exact tap.
-fn shadow_at(frag_xy: vec2<f32>, world_pos: vec3<f32>) -> f32 {
-    if (rt.enabled != 1u) { return 1.0; }
+// the shadow term and the ray-traced ambient occlusion (rt_hw.wgsl; 1 on the ray-march path, which
+// keeps vertex AO) at a screen pixel: (shadow, ao)
+fn shadow_ao_at(frag_xy: vec2<f32>, world_pos: vec3<f32>) -> vec2<f32> {
+    if (rt.enabled != 1u) { return vec2<f32>(1.0); }
     let dims = vec2<i32>(textureDimensions(rt_blurred));
     let p = frag_xy * vec2<f32>(dims) / global.screen.xy - 0.5;
     let base = vec2<i32>(floor(p));
     let f = fract(p);
     let dist = distance(global.camera_pos.xyz, world_pos);
 
-    var sum = 0.0;
+    var sum = vec2<f32>(0.0);
     var wsum = 0.0;
-    var closest = 1.0;
+    var closest = vec2<f32>(1.0);
     var closest_err = 1e9;
     for (var i = 0; i < 4; i++) {
         let o = vec2<i32>(i & 1, i >> 1u);
         let t = textureLoad(rt_blurred, clamp(base + o, vec2<i32>(0), dims - 1), 0);
         if (t.g <= 0.0) { continue; } // sky
         let err = abs(t.g - dist) / dist;
-        if (err < closest_err) { closest_err = err; closest = t.r; }
+        if (err < closest_err) { closest_err = err; closest = t.rb; }
         let bilinear = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
         let w = bilinear / (1.0 + (err / 0.02) * (err / 0.02));
-        sum += t.r * w;
+        sum += t.rb * w;
         wsum += w;
     }
     if (wsum < 1e-3) { return closest; }
@@ -427,7 +429,7 @@ fn cs_march(@builtin(global_invocation_id) id: vec3<u32>) {
     let L = normalize(global.sun_dir.xyz);
     var s = 0.0; // faces turned away from the sun are in their own shadow
     if (dot(N, L) > 0.0) { s = rt_shadow(g.xyz, N, L); }
-    textureStore(shadow_out, p, vec4<f32>(s, g.w, 0.0, 1.0));
+    textureStore(shadow_out, p, vec4<f32>(s, g.w, 1.0, 1.0)); // ao = 1: vertex AO on this path
 }
 
 // --- UTILS ---
@@ -525,7 +527,9 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let NdotL = max(dot(N, L), 0.0);
     
     // Shadow (ray-traced, see rt_blur.rs); faces turned away from the sun are in their own shadow
-    let shadow_raw = select(shadow_at(frag_xy, world_pos), 0.0, NdotL <= 0.0);
+    // `sa`, not `rt`: the ray-march params are bound as the global `rt` (rt.enabled)
+    let sa = shadow_ao_at(frag_xy, world_pos);
+    let shadow_raw = select(sa.x, 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
 
@@ -545,12 +549,13 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let hemi_factor = up_dot * 0.5 + 0.5;
     // dims to moonlight on the night side, like the sky itself
     let sky_light = atmo_ambient_daylight(world_pos, L);
-    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor) * sky_light;
+    // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
+    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor) * sky_light * sa.y;
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
     let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-    let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow * sky_light;
+    let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow * sky_light * sa.y;
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
@@ -946,7 +951,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha = 1.0 - exp(-depth * 0.35);
 
     // the sea floor's shadow (no shadow texel belongs to the surface itself), dimmed under cloud cover too
-    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_at(in.clip_pos.xy, in.world_pos)) * cloud_shadow(in.world_pos, L, t);
+    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_ao_at(in.clip_pos.xy, in.world_pos).x) * cloud_shadow(in.world_pos, L, t);
     let NdotL = max(dot(up, L), 0.0);
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
