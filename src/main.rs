@@ -69,6 +69,12 @@ fn parse_biome_arg() -> crate::biome::PlanetType {
     })
 }
 
+// --windowed: a normal window instead of the default borderless fullscreen (reproducible sizes for
+// measurements and screenshots)
+fn windowed(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--windowed")
+}
+
 // --seed <n>: the galaxy seed (default 1): sets the star type and the planets
 fn parse_seed(args: &[String]) -> u64 {
     args.iter()
@@ -1031,7 +1037,14 @@ impl ApplicationHandler for App {
         }
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("voxanet"))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("voxanet")
+                        .with_fullscreen(
+                            (!windowed(&std::env::args().collect::<Vec<_>>()))
+                                .then_some(winit::window::Fullscreen::Borderless(None)),
+                        ),
+                )
                 .unwrap(),
         );
         self.game = Some(Game::new(window, self.initial_biome, self.seed));
@@ -1107,6 +1120,16 @@ mod tests {
         stash_edits(&mut store, None, 2, &mut planet);
         assert!(store.is_empty());
         assert!(!planet.edits.is_empty());
+    }
+
+    // fullscreen unless --windowed
+    #[test]
+    fn windowed_flag_opts_out_of_fullscreen() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!windowed(&args(&["voxanet"])));
+        assert!(!windowed(&args(&["voxanet", "--seed", "3"])));
+        assert!(windowed(&args(&["voxanet", "--windowed"])));
+        assert!(windowed(&args(&["voxanet", "--seed", "3", "--windowed"])));
     }
 
     #[test]
