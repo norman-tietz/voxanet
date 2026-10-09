@@ -810,7 +810,12 @@ impl Game {
                 } => {
                     if key_event.state == ElementState::Pressed {
                         match key_event.physical_key {
-                            PhysicalKey::Code(KeyCode::Backquote) => console.toggle(),
+                            PhysicalKey::Code(KeyCode::Backquote) => {
+                                // the key is a dead key on some layouts (^ on German): reset it, or
+                                // the next key is composed with it and dropped (^ + / composes nothing)
+                                renderer.window.reset_dead_keys();
+                                console.toggle();
+                            }
                             PhysicalKey::Code(KeyCode::Enter) => console.submit(player),
                             PhysicalKey::Code(KeyCode::Backspace) => console.handle_backspace(),
                             PhysicalKey::Code(KeyCode::ArrowUp) => console.history_up(),
@@ -837,6 +842,9 @@ impl Game {
         {
             if key_event.state == ElementState::Pressed {
                 if let PhysicalKey::Code(KeyCode::Backquote) = key_event.physical_key {
+                    // a dead key on some layouts (^ on German): reset it so the first character typed
+                    // into the console isn't composed with it (^ + / is dropped, ^ + a becomes â)
+                    renderer.window.reset_dead_keys();
                     console.toggle();
                     return;
                 }
