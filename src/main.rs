@@ -713,6 +713,16 @@ impl Game {
             console.exec(cmd.trim(), player);
         }
 
+        if let Some(cmd) = console.ao_request.take() {
+            let msg = renderer.ao.apply(cmd);
+            console.log(&msg, [0.0, 1.0, 0.0]);
+            if !renderer.apply_ao_state(planet, player.position) && renderer.ao.enabled {
+                console.log(
+                    "Ray-traced AO needs hardware shadows; using vertex AO.",
+                    [1.0, 0.5, 0.0],
+                );
+            }
+        }
         if let Some(cmd) = console.film_request.take() {
             let msg = renderer.film.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
@@ -738,6 +748,8 @@ impl Game {
                     [0.0, 1.0, 0.0],
                 );
             }
+            // ray-traced AO needs the hardware path; vertex AO otherwise
+            renderer.apply_ao_state(planet, player.position);
         }
         if let Some(style) = console.terrain_style_request.take() {
             crate::lowpoly::set_style(style);

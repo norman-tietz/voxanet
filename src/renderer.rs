@@ -249,6 +249,7 @@ pub struct Renderer {
     flash_buf: wgpu::Buffer,
     flash_bind: wgpu::BindGroup,
     pub film: crate::film::FilmSettings, // grain and vignette (console: /film)
+    pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
     film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
     film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
     film_buf: wgpu::Buffer,
@@ -1034,6 +1035,12 @@ impl Renderer {
         let gpu_timer = GpuTimer::new(&device, &queue);
         let hw_rt = HwRt::supported(&device).then(|| HwRt::new(&device));
         let hw_shadows = hw_rt.is_some();
+        // ray-traced AO replaces the mesher's vertex AO from the first mesh on (ao.rs)
+        crate::gen::set_vertex_ao(crate::ao::vertex_ao_wanted(
+            hw_rt.is_some(),
+            hw_shadows,
+            crate::ao::AoSettings::default().enabled,
+        ));
         println!(
             "Shadows: {}",
             if hw_shadows {
@@ -1070,6 +1077,7 @@ impl Renderer {
             flash_buf,
             flash_bind,
             film: crate::film::FilmSettings::default(),
+            ao: crate::ao::AoSettings::default(),
             film_pipeline,
             film_pipeline_depth,
             film_buf,
@@ -1942,6 +1950,18 @@ impl Renderer {
         self.hw_shadows
     }
 
+    // exactly one kind of AO (ao::vertex_ao_wanted): after /hw_shadows or /ao on|off, switch the mesher's
+    // vertex AO and rebuild the meshes if that changed. Returns whether ray-traced AO is active.
+    pub fn apply_ao_state(&mut self, planet: &PlanetData, player_pos: Vec3) -> bool {
+        let wanted =
+            crate::ao::vertex_ao_wanted(self.hw_rt.is_some(), self.hw_shadows, self.ao.enabled);
+        if wanted != crate::gen::vertex_ao() {
+            crate::gen::set_vertex_ao(wanted);
+            self.force_reload_all(planet, player_pos);
+        }
+        !wanted
+    }
+
     fn update_rt_window(&mut self, player_pos: Vec3, planet: &PlanetData) {
         if self.hw_shadows {
             // the ray-march windows aren't needed while hardware rays are used, but fs_main reads the shadow
@@ -2694,7 +2714,7 @@ impl Renderer {
                     &mut enc,
                     &self.rt_blur,
                     sun_dir,
-                    crate::ao::AoSettings::default().uniform(),
+                    self.ao.uniform(),
                     compute_writes,
                 ),
                 None => self

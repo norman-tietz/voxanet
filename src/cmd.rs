@@ -15,12 +15,13 @@ pub enum GalaxyRequest {
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 7] = [
+const HELP_LINES: [&str; 8] = [
     "Commands (up/down recall earlier ones):",
     "  /debug_mode set true|false     /view set first|third",
     "  /move_speed get|set <value>    /jump_force get|set <value>",
     "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
     "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
+    "  /ao get|on|off|radius <v>|rays <n>|strength <v>",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -74,6 +75,7 @@ pub struct Console {
     pub terrain_style_request: Option<crate::lowpoly::TerrainStyle>, // set by /terrain_style, applied by the game loop (renderer)
     pub bevel_request: Option<crate::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
     pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
+    pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -94,6 +96,7 @@ impl Console {
             terrain_style_request: None,
             bevel_request: None,
             film_request: None,
+            ao_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -262,6 +265,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/ao" => match crate::ao::AoCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.ao_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/film" => match crate::film::FilmCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.film_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
@@ -366,6 +374,15 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    #[test]
+    fn ao_command_sets_a_request() {
+        let c = console_with(&["/ao rays 8"]);
+        assert_eq!(c.ao_request, Some(crate::ao::AoCommand::Rays(8)));
+        let c = console_with(&["/ao rays 99"]);
+        assert_eq!(c.ao_request, None);
+        assert_eq!(c.history.last().unwrap().0, crate::ao::AO_USAGE);
     }
 
     #[test]
