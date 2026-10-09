@@ -534,6 +534,19 @@ fn mix_linear(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     })
 }
 
+// the mesher's per-corner ambient occlusion on cube and hex top faces; off while ray-traced AO
+// (ao.rs, rt_hw.wgsl) replaces it. Read once per chunk build; set only by the renderer
+// (Renderer::apply_ao_state), which rebuilds the meshes when it changes
+static VERTEX_AO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn vertex_ao() -> bool {
+    VERTEX_AO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_vertex_ao(on: bool) {
+    VERTEX_AO.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct MeshGen;
 
 impl MeshGen {
@@ -577,6 +590,15 @@ impl MeshGen {
     }
 
     pub fn build_chunk_cubes(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        Self::build_chunk_cubes_with(key, data, vertex_ao())
+    }
+
+    // vertex_ao: the corner AO on top faces (off while ray-traced AO runs)
+    pub fn build_chunk_cubes_with(
+        key: ChunkKey,
+        data: &PlanetData,
+        vertex_ao: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
         let mut idx = 0u32;
@@ -693,7 +715,7 @@ impl MeshGen {
                 && id.v < v_end
             {
                 if data.exists(id) {
-                    Self::add_voxel(id, data, &mut verts, &mut inds, &mut idx);
+                    Self::add_voxel(id, data, &mut verts, &mut inds, &mut idx, vertex_ao);
                 }
             }
         }
@@ -703,6 +725,15 @@ impl MeshGen {
     // a voxel chunk in hex columns (hex.rs, PlanetData::cells = Hex): build_chunk_cubes' candidate
     // rules over the hex neighbours, each block a hex prism (add_voxel_hex)
     pub fn build_chunk_hex(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
+        Self::build_chunk_hex_with(key, data, vertex_ao())
+    }
+
+    // vertex_ao: the corner AO on top faces (off while ray-traced AO runs)
+    pub fn build_chunk_hex_with(
+        key: ChunkKey,
+        data: &PlanetData,
+        vertex_ao: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let (mut verts, mut inds, mut idx) = (Vec::new(), Vec::new(), 0u32);
         let res = data.resolution;
         let u_start = key.u_idx * CHUNK_SIZE;
@@ -779,7 +810,7 @@ impl MeshGen {
                 && (u_start..u_end).contains(&id.u)
                 && (v_start..v_end).contains(&id.v);
             if mine && data.exists(id) {
-                Self::add_voxel_hex(id, data, &mut verts, &mut inds, &mut idx);
+                Self::add_voxel_hex(id, data, &mut verts, &mut inds, &mut idx, vertex_ao);
             }
         }
         (verts, inds)
@@ -794,6 +825,7 @@ impl MeshGen {
         verts: &mut Vec<Vertex>,
         inds: &mut Vec<u32>,
         idx: &mut u32,
+        vertex_ao: bool, // corner AO on the top face (off while ray-traced AO runs)
     ) {
         let res = data.resolution;
         let solid = |(face, u, v): (u8, u32, u32), layer: i64| {
@@ -882,7 +914,11 @@ impl MeshGen {
                     let (prev, next) = (walls[(i + n - 1) % n].across, walls[i].across);
                     let a = prev.is_some_and(|c| solid(c, l + 1));
                     let b = next != prev && next.is_some_and(|c| solid(c, l + 1));
-                    Self::calculate_ao(a, b, false)
+                    if vertex_ao {
+                        Self::calculate_ao(a, b, false)
+                    } else {
+                        1.0
+                    }
                 })
                 .collect();
             let mean = ao.iter().sum::<f32>() / n as f32;
@@ -1609,8 +1645,18 @@ impl MeshGen {
         verts: &mut Vec<Vertex>,
         inds: &mut Vec<u32>,
         idx: &mut u32,
+        vertex_ao: bool,
     ) {
-        Self::add_voxel_with(id, data, verts, inds, idx, &|b| data.exists(b), false);
+        Self::add_voxel_with(
+            id,
+            data,
+            verts,
+            inds,
+            idx,
+            &|b| data.exists(b),
+            false,
+            vertex_ao,
+        );
     }
 
     pub(crate) fn add_voxel_with(
@@ -1623,6 +1669,7 @@ impl MeshGen {
         // one colour per face (the low-poly mesher's flat shading takes each triangle's first vertex,
         // so the top face's per-corner AO would split it into two shades): the corners' mean
         flat: bool,
+        vertex_ao: bool, // corner AO on the top face (off while ray-traced AO runs)
     ) {
         let res = data.resolution;
 
@@ -1696,10 +1743,17 @@ impl MeshGen {
 
         if !has_top {
             let n = |u, v| check(id.face, 1, u, v);
-            let ao_bl = Self::calculate_ao(n(-1, 0), n(0, -1), n(-1, -1));
-            let ao_br = Self::calculate_ao(n(1, 0), n(0, -1), n(1, -1));
-            let ao_tr = Self::calculate_ao(n(1, 0), n(0, 1), n(1, 1));
-            let ao_tl = Self::calculate_ao(n(-1, 0), n(0, 1), n(-1, 1));
+            let ao = |a, b, c| {
+                if vertex_ao {
+                    Self::calculate_ao(a, b, c)
+                } else {
+                    1.0
+                }
+            };
+            let ao_bl = ao(n(-1, 0), n(0, -1), n(-1, -1));
+            let ao_br = ao(n(1, 0), n(0, -1), n(1, -1));
+            let ao_tr = ao(n(1, 0), n(0, 1), n(1, 1));
+            let ao_tl = ao(n(-1, 0), n(0, 1), n(-1, 1));
             let top_sky = sky(0, 0);
             let apply = |ao: f32| apply(ao * top_sky);
             let (ao_bl, ao_br, ao_tr, ao_tl) = if flat {
@@ -2487,6 +2541,36 @@ mod cube_fingerprint {
     use super::*;
     use crate::common::{ChunkKey, PlanetData};
 
+    // top faces (normal along the radial up) as runs of consecutive vertices sharing one normal (a cube
+    // quad, a hex fan): does any run carry more than one colour (per-corner AO)?
+    pub(crate) fn any_top_face_shaded_unevenly(verts: &[Vertex]) -> bool {
+        let up = |v: &Vertex| {
+            let n = glam::Vec3::from_array(v.normal);
+            n.dot(glam::Vec3::from_array(v.pos).normalize()) > 0.99
+        };
+        verts
+            .chunk_by(|a, b| a.normal == b.normal)
+            .filter(|run| up(&run[0]))
+            .any(|run| run.iter().any(|v| v.color != run[0].color))
+    }
+
+    // the mesher's corner AO is on or off by the flag passed in; with it off every top face is even
+    #[test]
+    fn cube_vertex_ao_follows_the_flag() {
+        let planet = PlanetData::new(32);
+        let key = ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let (with, _) = MeshGen::build_chunk_cubes_with(key, &planet, true);
+        let (without, _) = MeshGen::build_chunk_cubes_with(key, &planet, false);
+        assert!(any_top_face_shaded_unevenly(&with));
+        assert!(!any_top_face_shaded_unevenly(&without));
+        // same geometry either way
+        assert_eq!(with.len(), without.len());
+    }
+
     // every cube block face is bevelled: each vertex lies on two of its face's edges
     #[test]
     fn cube_faces_carry_edge_distances() {
@@ -2635,6 +2719,23 @@ mod hex_mesh_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hex_vertex_ao_follows_the_flag() {
+        let mut planet = PlanetData::new(32);
+        planet.cells = CellShape::Hex;
+        let key = ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let (with, _) = MeshGen::build_chunk_hex_with(key, &planet, true);
+        let (without, _) = MeshGen::build_chunk_hex_with(key, &planet, false);
+        let uneven = super::cube_fingerprint::any_top_face_shaded_unevenly;
+        assert!(uneven(&with));
+        assert!(!uneven(&without));
+        assert_eq!(with.len(), without.len());
     }
 
     fn all_keys(planet: &PlanetData) -> Vec<ChunkKey> {

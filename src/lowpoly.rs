@@ -178,6 +178,7 @@ pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Ve
                 &mut idx,
                 &|b| field.placed(b),
                 true,
+                crate::gen::vertex_ao(),
             );
         }
     }
