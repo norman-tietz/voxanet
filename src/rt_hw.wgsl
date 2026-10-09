@@ -9,7 +9,7 @@ enable wgpu_ray_query;
 
 struct HwParams {
     sun_dir: vec4<f32>,
-    ao: vec4<f32>, // x: radius in world units, y: ray count (0 = no AO, ao = 1), z: strength (ao.rs)
+    ao: vec4<f32>, // x: radius in world units, y: ray count (0 = no AO, ao = 1), z: strength, w: fade end (ao.rs)
 }
 
 @group(0) @binding(0) var g_pos: texture_2d<f32>;      // xyz world position, w camera distance (0 = sky)
@@ -82,6 +82,11 @@ fn cs_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         rayQueryProceed(&rq);
         s = select(1.0, 0.0, rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE);
     }
-    let ao = ambient_occlusion(g.xyz, N, vec2<f32>(id.xy));
+    // AO fades out with camera distance, no rays beyond hw.ao.w (ao.rs FADE_END)
+    var ao = 1.0;
+    if (g.w < hw.ao.w) {
+        let fade = smoothstep(0.375 * hw.ao.w, hw.ao.w, g.w);
+        ao = mix(ambient_occlusion(g.xyz, N, vec2<f32>(id.xy)), 1.0, fade);
+    }
     textureStore(out_tex, p, vec4<f32>(s, g.w, ao, 1.0));
 }

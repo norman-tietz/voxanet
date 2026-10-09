@@ -4,6 +4,10 @@
 pub const DEFAULT_RADIUS: f32 = 3.0; // world units (blocks): gaps, wall feet, steps, narrow gorges
 pub const DEFAULT_RAYS: u32 = 4; // per shadow texel
 pub const DEFAULT_STRENGTH: f32 = 1.0;
+// camera distance (world units) where AO has faded out, from full at 0.375 × that; no AO rays beyond.
+// Out there a 3-block AO is under a shadow texel and the blur no longer smooths its noise, and on
+// large planets the LOD terrain begins, drawn morphed but traced unmorphed (rays would start under it)
+pub const FADE_END: f32 = 400.0;
 pub const AO_USAGE: &str = "Usage: /ao get|on|off|radius <0.5-8>|rays <1-16>|strength <0-1>";
 
 // the AO look, tuned with /ao (cmd.rs); HwParams.ao = uniform()
@@ -27,10 +31,10 @@ impl Default for AoSettings {
 }
 
 impl AoSettings {
-    // rt_hw.wgsl HwParams.ao: radius, ray count (0 while off: no AO rays, ao = 1), strength
+    // rt_hw.wgsl HwParams.ao: radius, ray count (0 while off: no AO rays, ao = 1), strength, fade end
     pub fn uniform(&self) -> [f32; 4] {
         let rays = if self.enabled { self.rays as f32 } else { 0.0 };
-        [self.radius, rays, self.strength, 0.0]
+        [self.radius, rays, self.strength, FADE_END]
     }
 
     // applies an /ao command; returns the line to log
@@ -119,7 +123,16 @@ mod tests {
             (DEFAULT_RADIUS, DEFAULT_RAYS, DEFAULT_STRENGTH),
             (3.0, 4, 1.0)
         );
-        assert_eq!(s.uniform(), [3.0, 4.0, 1.0, 0.0]);
+        assert_eq!(s.uniform(), [3.0, 4.0, 1.0, FADE_END]);
+    }
+
+    // AO fades out with distance and no AO rays are cast beyond FADE_END: there it's under a shadow
+    // texel, unblurred noise, and on large planets the start of the morphed LOD terrain (whose ray
+    // geometry is unmorphed)
+    #[test]
+    fn ao_fades_out_with_distance() {
+        assert_eq!(FADE_END, 400.0);
+        assert_eq!(AoSettings::default().uniform()[3], FADE_END);
     }
 
     #[test]
@@ -161,7 +174,7 @@ mod tests {
         assert_eq!(s.uniform()[1], 0.0);
         assert!(!s.enabled);
         s.apply(AoCommand::On);
-        assert_eq!(s.uniform(), [3.0, 8.0, 1.0, 0.0]);
+        assert_eq!(s.uniform(), [3.0, 8.0, 1.0, FADE_END]);
         s.apply(AoCommand::Off);
         s.apply(AoCommand::Radius(1.5));
         assert!(s.enabled);
