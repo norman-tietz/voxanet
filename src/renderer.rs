@@ -58,6 +58,7 @@ pub struct GlobalUniform {
     pub screen: [f32; 4], // width, height in pixels, sea surface radius, time in seconds (water animation)
     pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed; y: radians per screen pixel (cloud map level of detail)
     pub bevel: [f32; 4], // x: block bevel width in world units (0 = off), y: cavity darkening (bevel.rs, fs_geom)
+    pub plastic: [f32; 4], // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
 }
 
 #[repr(C)]
@@ -246,6 +247,7 @@ pub struct Renderer {
     flash_bind: wgpu::BindGroup,
     pub film: crate::film::FilmSettings, // grain and vignette (console: /film)
     pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
+    pub plastic: crate::plastic::PlasticSettings, // specular plastic look (console: /plastic)
     ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
     mesh_epoch: u64,                     // bumped on every chunk/LOD mesh change: resets the AO
     film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
@@ -982,7 +984,8 @@ impl Renderer {
             screen: [config.width as f32, config.height as f32, 0.0, 0.0],
             sun_dir: [0.0, 1.0, 0.0, p3_flag],
             motion: [0.0, 0.0, 0.0, 0.0],
-            bevel: [0.0; 4], // overlays aren't bevelled
+            bevel: [0.0; 4],   // overlays aren't bevelled
+            plastic: [0.0; 4], // nor glossy
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1064,6 +1067,7 @@ impl Renderer {
             flash_bind,
             film: crate::film::FilmSettings::default(),
             ao: crate::ao::AoSettings::default(),
+            plastic: crate::plastic::PlasticSettings::default(),
             ao_progress: Default::default(),
             mesh_epoch: 0,
             film_pipeline,
@@ -2476,6 +2480,7 @@ impl Renderer {
                 0.0,
             ],
             bevel: self.bevel.uniform(),
+            plastic: self.plastic.uniform(),
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));

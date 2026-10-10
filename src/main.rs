@@ -739,6 +739,10 @@ impl Game {
                 );
             }
         }
+        if let Some(cmd) = console.plastic_request.take() {
+            let msg = renderer.plastic.apply(cmd);
+            console.log(&msg, [0.0, 1.0, 0.0]);
+        }
         if let Some(cmd) = console.film_request.take() {
             let msg = renderer.film.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);

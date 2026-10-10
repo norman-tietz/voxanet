@@ -232,4 +232,12 @@ mod tests {
             assert!(diffuse_weight(1.0, n_v, 0.35) < 1.0);
         }
     }
+    // the WGSL is what renders: same F0, and the shared function exists (atmosphere.wgsl is prepended to
+    // the scene and the galaxy shaders)
+    #[test]
+    fn wgsl_uses_the_same_constants() {
+        let src = include_str!("atmosphere.wgsl");
+        assert!(src.contains(&format!("const PLASTIC_F0: f32 = {PLASTIC_F0};")));
+        assert!(src.contains("fn atmo_plastic("));
+    }
 }

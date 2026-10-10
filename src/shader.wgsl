@@ -9,6 +9,7 @@ struct Global {
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
     motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed; y: radians per screen pixel (clouds.wgsl)
     bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening (fs_geom, bevel.rs)
+    plastic: vec4<f32>, // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -514,7 +515,8 @@ fn sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<
 
 // lighting, fog, tone mapping and output colour space of one surface point (vertex colour `color`,
 // unit normal N); used per pixel by fs_light (deferred) and by the forward-drawn overlays (fs_main)
-fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32>, water_depth: f32) -> vec3<f32> {
+// `roughness`: the plastic's at this point (the G-buffer gloss; the base roughness for the overlays)
+fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32>, water_depth: f32, roughness: f32) -> vec3<f32> {
     let L = normalize(global.sun_dir.xyz);
     let V = normalize(global.camera_pos.xyz - world_pos);
 
@@ -539,7 +541,8 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below a water surface:
     // `water_depth` is how deep the point lies below its own water (a lake's or the sea's, through the
     // G-buffer), 0 when dry — so lake floors get caustics and tunnels sealed off from water don't
-    var direct_light = biome.sun.rgb * NdotL * shadow * cloud_shadow(world_pos, L, global.screen.w);
+    let clouded = cloud_shadow(world_pos, L, global.screen.w);
+    var direct_light = biome.sun.rgb * NdotL * shadow * clouded;
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
     // which doesn't focus light the same way (matches fs_water's reflective-vs-glowing branch)
     if (water_depth > 0.0 && biome.liquid_shallow.w < 0.5 && shadow_raw > 0.0) {
@@ -560,9 +563,14 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
     let rim_light = biome.sky_zenith.rgb * fresnel * 0.2 * shadow * sky_light * sa.y;
 
+    // D. Plastic: GGX sun highlight (in full shadow none: the hard shadow, not the softened one) and the
+    // sky reflection (atmosphere.wgsl), taking their share of the light from the diffuse terms
+    let pl = atmo_plastic(N, V, L, world_pos, biome.sun.rgb * shadow_raw * clouded, ambient_light,
+                          roughness, global.plastic.y, sa.y, engine_atmosphere());
+
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
-    let final_color = albedo * (direct_light + ambient_light + rim_light);
+    let final_color = albedo * (direct_light + ambient_light + rim_light) * pl.diffuse_w + pl.spec;
     return fog(final_color, world_pos);
 }
 
@@ -605,7 +613,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (local.params.x < 1.0 && dither_discard(in.clip_pos, local.params.x, local.params.y > 0.5)) {
         discard;
     }
-    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), 1.0);
+    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0, global.plastic.x)), 1.0);
 }
 
 // block cursor: lit like fs_main, but translucent (renderer.rs draws a depth pre-pass first, so only
@@ -614,7 +622,7 @@ const CURSOR_OPACITY: f32 = 0.55;
 
 @fragment
 fn fs_cursor(in: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0)), CURSOR_OPACITY);
+    return vec4<f32>(post_process(shade(in.color, normalize(in.world_normal), in.world_pos, in.clip_pos.xy, 0.0, global.plastic.x)), CURSOR_OPACITY);
 }
 
 // --- DEFERRED SHADING (deferred.rs) ---
@@ -747,7 +755,7 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
         let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
         let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
         let albedo = textureLoad(d_albedo, px, 0);
-        color = shade(albedo.rgb, N, world_pos, vec2<f32>(px) + 0.5, albedo.a * WATER_DEPTH_RANGE);
+        color = shade(albedo.rgb, N, world_pos, vec2<f32>(px) + 0.5, albedo.a * WATER_DEPTH_RANGE, global.plastic.x);
     }
 
     // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky

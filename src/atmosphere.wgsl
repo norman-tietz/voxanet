@@ -246,3 +246,47 @@ fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec
     let fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r);
     return mix(lit, fog_col, clamp(fog_factor, 0.0, 1.0));
 }
+
+// --- plastic shading (plastic.rs, docs/superpowers/specs/2026-10-10-plastic-shading-design.md) ---
+
+const PLASTIC_F0: f32 = 0.04; // Fresnel reflectance at normal incidence: dielectric plastic (plastic.rs)
+
+struct Plastic {
+    spec: vec3<f32>, // linear radiance: sun highlight + sky reflection
+    diffuse_w: f32,  // weight of the diffuse terms: 1 - strength * F (energy split)
+}
+
+// glossy plastic at a surface point (planet frame): a GGX sun highlight (Trowbridge-Reitz distribution,
+// Schlick Fresnel, Smith-Schlick visibility) lit by `sun` (sun colour x shadow x cloud shadow), and the
+// sky along the reflection (dome x opacity, so dark at night; the ground below the local horizon;
+// blended toward `ambient` with roughness, a cheap stand-in for a pre-filtered environment), times `ao`.
+// strength 0: no specular and diffuse_w 1, the purely diffuse look. Mirrored in plastic.rs.
+fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: vec3<f32>,
+                ambient: vec3<f32>, roughness: f32, strength: f32, ao: f32, a: Atmosphere) -> Plastic {
+    if (strength <= 0.0) {
+        return Plastic(vec3<f32>(0.0), 1.0);
+    }
+    let r = clamp(roughness, 0.05, 1.0);
+    // bevel-tilted or deferred normals can face slightly away from the camera: clamp, no NaN
+    let n_v = max(dot(N, V), 1e-4);
+    let n_l = max(dot(N, L), 0.0);
+    let H = normalize(L + V);
+    let n_h = max(dot(N, H), 0.0);
+    let al = r * r;
+    let a2 = al * al;
+    let dd = n_h * n_h * (a2 - 1.0) + 1.0;
+    let D = a2 / (3.14159265 * dd * dd);
+    let F = PLASTIC_F0 + (1.0 - PLASTIC_F0) * pow(1.0 - max(dot(H, V), 0.0), 5.0);
+    let k = (r + 1.0) * (r + 1.0) / 8.0;
+    let vis = 1.0 / (4.0 * (n_v * (1.0 - k) + k) * (n_l * (1.0 - k) + k));
+    let highlight = sun * (D * F * vis * n_l);
+
+    let R = reflect(-V, N);
+    let up = normalize(pos);
+    let sky = atmo_sky_over_black(R, pos, L, a);
+    let ground = GROUND_COLOR * atmo_ambient_daylight(pos, L);
+    var env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
+    env = mix(env, ambient, r);
+    let F_env = PLASTIC_F0 + (max(1.0 - r, PLASTIC_F0) - PLASTIC_F0) * pow(1.0 - n_v, 5.0);
+    return Plastic(strength * (highlight + F_env * env * ao), 1.0 - strength * F_env);
+}
