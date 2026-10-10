@@ -69,12 +69,15 @@ fn ambient_occlusion(pos: vec3<f32>, N: vec3<f32>, px: vec2<f32>) -> f32 {
     let t = normalize(cross(a, N));
     let b = cross(N, t);
     let rot = ign(px) * TAU;
+    // the elevation stratum's position, jittered like the rotation (px shifts every frame), so the
+    // accumulated samples cover the whole hemisphere, not one fixed ring per ray
+    let jitter = ign(px.yx + vec2<f32>(37.0, 11.0));
     var occ = 0.0;
     // declared once, outside the loop: Mesa's Intel driver lost the device compiling a ray_query
     // variable declared inside it (the whole shader module, even with this function unused)
     var rq: ray_query;
     for (var k = 0u; k < n; k++) {
-        let u = (f32(k) + 0.5) / f32(n);
+        let u = (f32(k) + jitter) / f32(n);
         let phi = f32(k) * GOLDEN_ANGLE + rot;
         let r = sqrt(u);
         let dir = t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(1.0 - u);
@@ -167,14 +170,14 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(acc_cur, p, acc);
 }
 
-const FILL_MAX_TAPS: i32 = 12;     // each side
-const FILL_MAX_RADIUS: f32 = 24.0; // texels
-const FILL_WORLD_WIDTH: f32 = 0.3; // world units, like the shadow blur (rt_blur.rs PENUMBRA_WIDTH)
+const FILL_MAX_TAPS: i32 = 8;      // each side: at least FILL_MAX_RADIUS, so the step stays <= 1 texel
+const FILL_MAX_RADIUS: f32 = 8.0;  // texels: bridges the 4x4 sample gaps right after a reset
 
-// the fill's radius at camera distance `dist`: the progressive radius (wide right after a reset, to
-// bridge the gaps between the sparse samples), at least the shadow blur's world-space width
+// the fill's radius: wide right after a reset, to bridge the gaps between the sparse samples, narrow
+// once every texel has its own (ao::fill_radius_texels). No world-space minimum like the shadow blur's:
+// converged AO needs none, and close up it forced the widest fill over the whole screen (~5 ms)
 fn fill_radius(dist: f32) -> f32 {
-    return min(max(aop.fill_radius, FILL_WORLD_WIDTH * aop.focal / dist), FILL_MAX_RADIUS);
+    return min(aop.fill_radius, FILL_MAX_RADIUS);
 }
 
 // taps about one texel apart, so the sparse samples right after a reset (one per 4x4 block) are never

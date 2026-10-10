@@ -3806,6 +3806,27 @@ pub(crate) mod tests {
         ] {
             assert!(src.contains(entry), "{entry}");
         }
+        // the fill never steps over texels: as many taps as the widest radius (fewer skipped every
+        // other texel close up, dropping most of the sparse samples right after a reset)
+        let konst = |name: &str| -> f32 {
+            let line = src
+                .lines()
+                .find(|l| l.starts_with(&format!("const {name}")))
+                .expect(name);
+            line.split('=')
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert!(konst("FILL_MAX_TAPS: i32") >= konst("FILL_MAX_RADIUS: f32"));
+        // accumulated samples cover the whole hemisphere: the elevation stratum is jittered per
+        // sample, not fixed at its centre (fixed, AO converged to one or two rings of directions)
+        assert!(!ao.contains("+ 0.5) / f32(n)"), "fixed elevation strata");
     }
 
     #[test]
