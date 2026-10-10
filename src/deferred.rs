@@ -16,6 +16,7 @@ use crate::rt_blur::RtBlur;
 const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgb10a2Unorm; // normal * 0.5 + 0.5
 const DIST_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float; // camera distance, full precision
+const GLOSS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm; // plastic roughness (plastic.rs)
 
 // the shaded image before post-processing, for the motion blur: premultiplied HDR colour + coverage
 const SHADED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -37,6 +38,7 @@ pub struct Deferred {
     albedo: wgpu::TextureView,
     normal: wgpu::TextureView,
     dist: wgpu::TextureView,
+    gloss: wgpu::TextureView,
     pub depth: wgpu::TextureView,
     pub textures_bind: wgpu::BindGroup,
     shaded_layout: wgpu::BindGroupLayout, // group 3 of fs_motion_blur: `shaded`
@@ -93,6 +95,7 @@ impl Deferred {
                         Some(ALBEDO_FORMAT.into()),
                         Some(NORMAL_FORMAT.into()),
                         Some(DIST_FORMAT.into()),
+                        Some(GLOSS_FORMAT.into()),
                     ],
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -136,7 +139,12 @@ impl Deferred {
         let both = wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
         let textures_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("deferred_textures_layout"),
-            entries: &[tex_entry(3, both), tex_entry(4, both), tex_entry(5, both)],
+            entries: &[
+                tex_entry(3, both),
+                tex_entry(4, both),
+                tex_entry(5, both),
+                tex_entry(7, both), // gloss (6 is the motion blur's shaded image, its own layout)
+            ],
         });
 
         // the lighting pass writes the swapchain and keeps the depth for the overlays drawn after it
@@ -309,7 +317,7 @@ impl Deferred {
             cache: None,
         });
 
-        let (albedo, normal, dist, depth, textures_bind) =
+        let (albedo, normal, dist, gloss, depth, textures_bind) =
             Self::make_targets(device, &textures_layout, width, height);
         let (shaded, shaded_bind) = Self::make_shaded(device, &shaded_layout, width, height);
         Self {
@@ -327,6 +335,7 @@ impl Deferred {
             albedo,
             normal,
             dist,
+            gloss,
             depth,
             textures_bind,
             shaded_layout,
@@ -392,6 +401,7 @@ impl Deferred {
         wgpu::TextureView,
         wgpu::TextureView,
         wgpu::TextureView,
+        wgpu::TextureView,
         wgpu::BindGroup,
     ) {
         let tex = |format, usage| {
@@ -416,6 +426,7 @@ impl Deferred {
         let albedo = tex(ALBEDO_FORMAT, target);
         let normal = tex(NORMAL_FORMAT, target);
         let dist = tex(DIST_FORMAT, target);
+        let gloss = tex(GLOSS_FORMAT, target);
         // also bound as a texture: the lens flare reads it for its occlusion taps (flare.wgsl)
         let depth = tex(DEPTH_FORMAT, target);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -434,9 +445,13 @@ impl Deferred {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&dist),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&gloss),
+                },
             ],
         });
-        (albedo, normal, dist, depth, bind)
+        (albedo, normal, dist, gloss, depth, bind)
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -444,6 +459,7 @@ impl Deferred {
             self.albedo,
             self.normal,
             self.dist,
+            self.gloss,
             self.depth,
             self.textures_bind,
         ) = Self::make_targets(device, &self.textures_layout, width, height);
@@ -457,12 +473,12 @@ impl Deferred {
     }
 
     // colour attachments of the geometry pass, cleared to "sky" (distance 0)
-    pub fn geometry_targets(&self) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 3] {
+    pub fn geometry_targets(&self) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 4] {
         let clear = wgpu::Operations {
             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             store: wgpu::StoreOp::Store,
         };
-        [&self.albedo, &self.normal, &self.dist].map(|view| {
+        [&self.albedo, &self.normal, &self.dist, &self.gloss].map(|view| {
             Some(wgpu::RenderPassColorAttachment {
                 depth_slice: None,
                 view,

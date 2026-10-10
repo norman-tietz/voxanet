@@ -3766,6 +3766,14 @@ pub(crate) mod tests {
         assert_valid_wgsl(SCENE_SHADER);
     }
 
+    // the plastic's roughness per pixel travels through the G-buffer (fs_geom writes it, the lighting reads it)
+    #[test]
+    fn gloss_goes_through_the_g_buffer() {
+        assert!(SCENE_SHADER.contains("@location(3) gloss: f32"));
+        assert!(SCENE_SHADER.contains("textureLoad(d_gloss"));
+        assert!(SCENE_SHADER.contains("fn plastic_roughness("));
+    }
+
     // the hardware shadow + AO compute shader (hw_rt.rs), with its ray queries
     #[test]
     fn hw_rt_shader_is_valid_wgsl() {

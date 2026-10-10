@@ -634,6 +634,7 @@ struct GeomOut {
     @location(0) albedo: vec4<f32>,   // vertex colour (with baked AO)
     @location(1) normal: vec4<f32>,   // world normal * 0.5 + 0.5
     @location(2) dist: f32,           // camera distance, 0 = sky
+    @location(3) gloss: f32,          // the plastic's roughness here (plastic_roughness)
 }
 
 // block bevels (bevel.rs): edge0/edge1 hold the fragment's distances to up to eight edges of its face
@@ -682,6 +683,54 @@ fn bevel_normal(N: vec3<f32>, edge0: vec4<f32>, edge1: vec4<f32>, ex0: vec4<f32>
     return vec4<f32>(normalize(N + tilt), albedo);
 }
 
+// --- plastic imperfections (plastic.rs): smudges and scratches vary the roughness per pixel ---
+
+fn hash_u3(p: vec3<i32>) -> u32 {
+    return pcg_hash(bitcast<u32>(p.x) ^ pcg_hash(bitcast<u32>(p.y) ^ pcg_hash(bitcast<u32>(p.z))));
+}
+
+const SCRATCH_CELL: f32 = 1.0;      // face-coordinate cells (blocks) that may each carry one scratch
+const SCRATCH_SHARE: f32 = 0.5;     // of the cells
+const SCRATCH_HALF_LEN: f32 = 0.3;  // blocks; the centre keeps this far from the cell's edges, so a
+                                    // scratch is never cut off by the cell it's evaluated in
+const SCRATCH_WIDTH: f32 = 0.006;   // blocks: hairline
+
+// the plastic's roughness at a G-buffer pixel: the base (global.plastic.x), duller in low-frequency
+// smudges over the world position (all geometry), and along fine scratches in face coordinates from
+// the bevel edge distances (cube and hex faces; low-poly facets, LOD and water carry none). Scratches
+// fade out where they'd be thinner than about a pixel, so they don't shimmer. ex0/ey0: the screen
+// derivatives of edge0, taken by fs_geom before its dither discard.
+fn plastic_roughness(world_pos: vec3<f32>, N: vec3<f32>, edge0: vec4<f32>, ex0: vec4<f32>, ey0: vec4<f32>) -> f32 {
+    var r = global.plastic.x;
+    let n = 0.65 * value_noise3(world_pos * 0.33) + 0.35 * value_noise3(world_pos * 0.71);
+    r += global.plastic.z * smoothstep(0.45, 0.8, n);
+    // face coordinates: distances to two neighbouring edges (a square's slots 3 and 0; a hex fan's
+    // sides 0 and 1, whose slot 3 may be unused)
+    if (global.plastic.w > 0.0 && edge0.x < 1e3 && min(edge0.y, edge0.w) < 1e3) {
+        let use_w = edge0.w < 1e3;
+        let uv = vec2<f32>(select(edge0.y, edge0.w, use_w), edge0.x);
+        let duv_x = vec2<f32>(select(ex0.y, ex0.w, use_w), ex0.x);
+        let duv_y = vec2<f32>(select(ey0.y, ey0.w, use_w), ey0.x);
+        let px = max(length(abs(duv_x) + abs(duv_y)), 1e-6); // face units per pixel
+        let cell = floor(uv / SCRATCH_CELL);
+        // per region: the world-space block under the face, so neighbouring faces differ
+        let seed = hash_u3(vec3<i32>(floor(world_pos - N * 0.25)) * 7 + vec3<i32>(i32(cell.x), i32(cell.y), 0));
+        if (f32(seed & 0xffffu) / 65535.0 < SCRATCH_SHARE) {
+            let a = f32((seed >> 16u) & 0xffu) / 255.0 * 6.2831853;
+            let jitter = vec2<f32>(f32((seed >> 8u) & 0xffu), f32(seed >> 24u)) / 255.0;
+            let margin = SCRATCH_HALF_LEN / SCRATCH_CELL;
+            let centre = (cell + margin + jitter * (1.0 - 2.0 * margin)) * SCRATCH_CELL;
+            let along = vec2<f32>(cos(a), sin(a));
+            let d = uv - centre;
+            let across = abs(dot(d, vec2<f32>(-along.y, along.x)));
+            let inside = 1.0 - smoothstep(SCRATCH_HALF_LEN - px, SCRATCH_HALF_LEN, abs(dot(d, along)));
+            let line = (1.0 - smoothstep(SCRATCH_WIDTH, SCRATCH_WIDTH + px, across)) * inside;
+            r += global.plastic.w * line * smoothstep(0.5, 1.5, SCRATCH_WIDTH / px);
+        }
+    }
+    return clamp(r, 0.05, 1.0);
+}
+
 @fragment
 fn fs_geom(in: VertexOut) -> GeomOut {
     // derivatives first, while every fragment of the quad still runs (the dither discard below)
@@ -716,12 +765,14 @@ fn fs_geom(in: VertexOut) -> GeomOut {
     out.albedo = vec4<f32>(color, water_depth);
     out.normal = vec4<f32>(normal * 0.5 + 0.5, 0.0);
     out.dist = distance(global.camera_pos.xyz, in.world_pos);
+    out.gloss = plastic_roughness(in.world_pos, normal, in.edge0, ex0, ey0);
     return out;
 }
 
 @group(3) @binding(3) var d_albedo: texture_2d<f32>;
 @group(3) @binding(4) var d_normal: texture_2d<f32>;
 @group(3) @binding(5) var d_dist: texture_2d<f32>;
+@group(3) @binding(7) var d_gloss: texture_2d<f32>;
 
 // world position of the surface `dist` units from the camera behind screen pixel `frag_xy`
 fn world_from_pixel(frag_xy: vec2<f32>, dist: f32) -> vec3<f32> {
@@ -756,7 +807,8 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
         let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
         let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
         let albedo = textureLoad(d_albedo, px, 0);
-        color = shade(albedo.rgb, N, world_pos, vec2<f32>(px) + 0.5, albedo.a * WATER_DEPTH_RANGE, global.plastic.x);
+        let gloss = textureLoad(d_gloss, px, 0).r;
+        color = shade(albedo.rgb, N, world_pos, vec2<f32>(px) + 0.5, albedo.a * WATER_DEPTH_RANGE, gloss);
     }
 
     // clouds, wherever the view ray crosses the shell before it reaches any terrain (always, for sky
