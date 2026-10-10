@@ -20,8 +20,18 @@ fn star_limb(mu: f32) -> f32 {
     return 1.0 - STAR_LIMB_DARKENING * (1.0 - clamp(mu, 0.0, 1.0));
 }
 
+// PCG (as shader.wgsl's pcg_hash; this file is also prepended where that one isn't)
+fn star_pcg(v: u32) -> u32 {
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+// a lattice point's value in [0, 1]. Integer hashing on purpose: the classic fract(sin(dot(p, k)) * big)
+// loses its randomness once the dot product is large (GPU f32 sin, see galaxy.wgsl's star_hash)
 fn sun_hash(p: vec3<f32>) -> f32 {
-    return fract(sin(dot(p, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453);
+    let c = bitcast<vec3<u32>>(vec3<i32>(p));
+    return f32(star_pcg(c.x ^ star_pcg(c.y ^ star_pcg(c.z)))) / 4294967295.0;
 }
 
 fn star_noise(p: vec3<f32>) -> f32 {

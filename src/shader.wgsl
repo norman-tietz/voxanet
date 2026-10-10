@@ -456,10 +456,12 @@ fn triplanar_detail(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     let w = pow(n, vec3<f32>(16.0)); 
     let weights = w / (w.x + w.y + w.z);
     
-    // Fast hash noise
-    let hx = fract(sin(dot(p.yz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-    let hy = fract(sin(dot(p.zx, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-    let hz = fract(sin(dot(p.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // white noise per position: a PCG hash of the coordinates' bits (a sin-based hash ran out of f32
+    // precision at world coordinates of a few hundred and turned into patterns)
+    let b = bitcast<vec3<u32>>(p);
+    let hx = f32(pcg_hash(b.y ^ pcg_hash(b.z))) / 4294967295.0;
+    let hy = f32(pcg_hash(b.z ^ pcg_hash(b.x))) / 4294967295.0;
+    let hz = f32(pcg_hash(b.x ^ pcg_hash(b.y))) / 4294967295.0;
 
     return (hx * weights.x + hy * weights.y + hz * weights.z) * 2.0 - 1.0;
 }
