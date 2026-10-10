@@ -285,11 +285,15 @@ fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: v
 
     let R = reflect(-V, N);
     let up = normalize(pos);
-    let sky = atmo_sky_over_black(R, pos, L, a);
+    // the dome without the sun disc (the sun is the GGX highlight, which knows the shadow)
+    let sky = atmo_sky_dome(R, pos, L, a) * atmo_sky_opacity(R, pos, L, a.planet_r);
     let ground = GROUND_COLOR * atmo_ambient_daylight(pos, L);
     var env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
     env = mix(env, ambient, r);
     let F_env = PLASTIC_F0 + (max(1.0 - r, PLASTIC_F0) - PLASTIC_F0) * pow(1.0 - n_v, 5.0);
     let F_refl = F_env * reflection;
-    return Plastic(strength * (highlight + F_refl * env * ao), 1.0 - strength * F_refl);
+    // capped: at the lowest roughness the GGX peak overflowed half-float targets (motion blur's
+    // shaded image) into Inf, and ACES turned that into black NaN pixels
+    let spec = min(strength * (highlight + F_refl * env * ao), vec3<f32>(64.0));
+    return Plastic(spec, 1.0 - strength * F_refl);
 }

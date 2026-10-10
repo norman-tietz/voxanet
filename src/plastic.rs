@@ -115,6 +115,30 @@ impl PlasticCommand {
     }
 }
 
+// --- mirror of shader.wgsl plastic_roughness's face-coordinate choice ---
+
+#[cfg_attr(not(test), allow(dead_code))]
+const NO_EDGE_F: f32 = crate::bevel::NO_EDGE;
+
+// the two edge slots (Vertex::edge, bevel.rs) whose distances serve as a face's scratch coordinates:
+// two neighbouring edges. Fans of five or more sides (slot 4 used: hex cells) take sides 0 and 1; a
+// square takes 0 and 3 (its slot 1 is parallel to 3), or 1 where 3 is masked (a hex wall piece's joint).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn scratch_slots(edge: [f32; 8]) -> Option<(usize, usize)> {
+    let real = |d: f32| d < 1e3;
+    if !real(edge[0]) {
+        None
+    } else if real(edge[4]) {
+        Some((0, 1))
+    } else if real(edge[3]) {
+        Some((0, 3))
+    } else if real(edge[1]) {
+        Some((0, 1))
+    } else {
+        None
+    }
+}
+
 // --- mirror of atmosphere.wgsl atmo_plastic's closed-form terms ---
 
 // GGX (Trowbridge-Reitz) normal distribution at cos(theta_h) = n_dot_h, roughness r (alpha = r²)
@@ -293,5 +317,40 @@ mod tests {
         );
         s.apply(PlasticCommand::Off);
         assert_eq!(s.impostor_uniform()[1], 0.0);
+    }
+    // scratches need two neighbouring edges as face coordinates: a square's slots 0 and 3 (1 is
+    // parallel to 3), a hex fan's sides 0 and 1 (3 is opposite 0), a wall piece whose slot 3 is a
+    // joint (masked) its slot 1; none without slot 0
+    #[test]
+    fn scratch_axes_are_neighbouring_edges() {
+        let n = NO_EDGE_F;
+        assert_eq!(
+            scratch_slots([0.2, 0.5, 0.8, 0.3, n, n, n, n]),
+            Some((0, 3))
+        ); // square
+        assert_eq!(
+            scratch_slots([0.2, 0.5, 0.8, 0.9, 0.7, 0.4, n, n]),
+            Some((0, 1))
+        ); // hexagon
+        assert_eq!(scratch_slots([0.2, 0.5, 0.8, n, n, n, n, n]), Some((0, 1))); // wall piece, joint at a
+        assert_eq!(scratch_slots([0.2, n, 0.8, n, n, n, n, n]), None); // both ends joints
+        assert_eq!(scratch_slots([n; 8]), None); // low-poly facet, LOD, water
+    }
+
+    // the WGSL implements the same choice and the other review fixes
+    #[test]
+    fn wgsl_plastic_follows_the_review_fixes() {
+        let atmo = include_str!("atmosphere.wgsl");
+        let f = &atmo[atmo.find("fn atmo_plastic(").unwrap()..];
+        // the reflected sky without the sun disc (the sun is the GGX highlight)
+        assert!(
+            !f.contains("atmo_sky_over_black"),
+            "sun disc in the reflection"
+        );
+        assert!(f.contains("atmo_sky_dome(R"));
+        let shader = include_str!("shader.wgsl");
+        let r = &shader[shader.find("fn plastic_roughness(").unwrap()..];
+        assert!(r.contains("edge1"), "polygons pick sides 0 and 1");
+        assert!(!r.contains("floor(world_pos"), "seed from the world grid");
     }
 }

@@ -695,38 +695,72 @@ const SCRATCH_HALF_LEN: f32 = 0.3;  // blocks; the centre keeps this far from th
                                     // scratch is never cut off by the cell it's evaluated in
 const SCRATCH_WIDTH: f32 = 0.006;   // blocks: hairline
 
+// the in-plane world gradient of a distance that is affine on the face, from its screen derivatives
+// dx, dy and world_pos's px, py (bevel_normal solves the same 2x2 system); 0 for an edge-on triangle
+fn face_gradient(dx: f32, dy: f32, px: vec3<f32>, py: vec3<f32>) -> vec3<f32> {
+    let gxx = dot(px, px);
+    let gxy = dot(px, py);
+    let gyy = dot(py, py);
+    let det = gxx * gyy - gxy * gxy;
+    if (det <= 1e-6 * gxx * gyy) { return vec3<f32>(0.0); }
+    return ((gyy * dx - gxy * dy) * px + (gxx * dy - gxy * dx) * py) / det;
+}
+
 // the plastic's roughness at a G-buffer pixel: the base (global.plastic.x), duller in low-frequency
-// smudges over the world position (all geometry), and along fine scratches in face coordinates from
-// the bevel edge distances (cube and hex faces; low-poly facets, LOD and water carry none). Scratches
-// fade out where they'd be thinner than about a pixel, so they don't shimmer. ex0/ey0: the screen
-// derivatives of edge0, taken by fs_geom before its dither discard.
-fn plastic_roughness(world_pos: vec3<f32>, N: vec3<f32>, edge0: vec4<f32>, ex0: vec4<f32>, ey0: vec4<f32>) -> f32 {
+// smudges over the world position (all geometry), and along a sparse hairline scratch per block face
+// (cube and hex faces; low-poly facets, LOD and water carry no edge distances). Face coordinates come
+// from two neighbouring edges' distances (plastic.rs scratch_slots: a square's 0 and 3, a hex cell's
+// sides 0 and 1, a wall piece's 1 where its end 3 is a joint); the face's seed from the point where
+// those two edge lines meet plus its geometric normal, so it is one per face. Scratches fade out where
+// they'd be thinner than about a pixel. ex0/ey0, px/py: screen derivatives fs_geom took before its
+// dither discard.
+fn plastic_roughness(world_pos: vec3<f32>, edge0: vec4<f32>, edge1: vec4<f32>, ex0: vec4<f32>,
+                     ey0: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> f32 {
     var r = global.plastic.x;
     let n = 0.65 * value_noise3(world_pos * 0.33) + 0.35 * value_noise3(world_pos * 0.71);
     r += global.plastic.z * smoothstep(0.45, 0.8, n);
-    // face coordinates: distances to two neighbouring edges (a square's slots 3 and 0; a hex fan's
-    // sides 0 and 1, whose slot 3 may be unused)
-    if (global.plastic.w > 0.0 && edge0.x < 1e3 && min(edge0.y, edge0.w) < 1e3) {
-        let use_w = edge0.w < 1e3;
-        let uv = vec2<f32>(select(edge0.y, edge0.w, use_w), edge0.x);
-        let duv_x = vec2<f32>(select(ex0.y, ex0.w, use_w), ex0.x);
-        let duv_y = vec2<f32>(select(ey0.y, ey0.w, use_w), ey0.x);
-        let px = max(length(abs(duv_x) + abs(duv_y)), 1e-6); // face units per pixel
-        let cell = floor(uv / SCRATCH_CELL);
-        // per region: the world-space block under the face, so neighbouring faces differ
-        let seed = hash_u3(vec3<i32>(floor(world_pos - N * 0.25)) * 7 + vec3<i32>(i32(cell.x), i32(cell.y), 0));
-        if (f32(seed & 0xffffu) / 65535.0 < SCRATCH_SHARE) {
-            let a = f32((seed >> 16u) & 0xffu) / 255.0 * 6.2831853;
-            let jitter = vec2<f32>(f32((seed >> 8u) & 0xffu), f32(seed >> 24u)) / 255.0;
-            let margin = SCRATCH_HALF_LEN / SCRATCH_CELL;
-            let centre = (cell + margin + jitter * (1.0 - 2.0 * margin)) * SCRATCH_CELL;
-            let along = vec2<f32>(cos(a), sin(a));
-            let d = uv - centre;
-            let across = abs(dot(d, vec2<f32>(-along.y, along.x)));
-            let inside = 1.0 - smoothstep(SCRATCH_HALF_LEN - px, SCRATCH_HALF_LEN, abs(dot(d, along)));
-            let line = (1.0 - smoothstep(SCRATCH_WIDTH, SCRATCH_WIDTH + px, across)) * inside;
-            r += global.plastic.w * line * smoothstep(0.5, 1.5, SCRATCH_WIDTH / px);
-        }
+    if (global.plastic.w <= 0.0 || edge0.x >= 1e3) {
+        return clamp(r, 0.05, 1.0);
+    }
+    // the second axis (scratch_slots): 3 for squares, 1 for polygons and masked wall ends
+    var second = 0u;
+    if (edge1.x < 1e3) { second = 1u; } else if (edge0.w < 1e3) { second = 3u; } else if (edge0.y < 1e3) { second = 1u; }
+    if (second == 0u) {
+        return clamp(r, 0.05, 1.0);
+    }
+    let three = second == 3u;
+    let d1 = select(edge0.y, edge0.w, three);
+    let g0 = face_gradient(ex0.x, ey0.x, px, py);
+    let g1 = face_gradient(select(ex0.y, ex0.w, three), select(ey0.y, ey0.w, three), px, py);
+    // offset x from the corner where the two edge lines meet: g0·x = d0, g1·x = d1
+    let a00 = dot(g0, g0);
+    let a01 = dot(g0, g1);
+    let a11 = dot(g1, g1);
+    let det = a00 * a11 - a01 * a01;
+    if (det <= 1e-4 * a00 * a11) {
+        return clamp(r, 0.05, 1.0);
+    }
+    let x = ((a11 * edge0.x - a01 * d1) * g0 + (a00 * d1 - a01 * edge0.x) * g1) / det;
+    let corner = world_pos - x;
+    // orthonormal face coordinates from that corner (for squares just the two distances)
+    let e1 = g0 / sqrt(a00);
+    let e2 = normalize(g1 - dot(g1, e1) * e1);
+    let uv = vec2<f32>(dot(x, e1), dot(x, e2));
+    let px_face = max(length(px) + length(py), 1e-6) * 0.5; // world (= face) units per pixel
+    let cell = floor(uv / SCRATCH_CELL);
+    let facing = vec3<i32>(round(normalize(cross(px, py)) * 4.0));
+    let seed = hash_u3(vec3<i32>(round(corner * 8.0)) + facing * 101 + vec3<i32>(i32(cell.x), i32(cell.y), 0) * 7);
+    if (f32(seed & 0xffffu) / 65535.0 < SCRATCH_SHARE) {
+        let a = f32((seed >> 16u) & 0xffu) / 255.0 * 6.2831853;
+        let jitter = vec2<f32>(f32((seed >> 8u) & 0xffu), f32(seed >> 24u)) / 255.0;
+        let margin = SCRATCH_HALF_LEN / SCRATCH_CELL;
+        let centre = (cell + margin + jitter * (1.0 - 2.0 * margin)) * SCRATCH_CELL;
+        let along = vec2<f32>(cos(a), sin(a));
+        let d = uv - centre;
+        let across = abs(dot(d, vec2<f32>(-along.y, along.x)));
+        let inside = 1.0 - smoothstep(SCRATCH_HALF_LEN - px_face, SCRATCH_HALF_LEN, abs(dot(d, along)));
+        let line = (1.0 - smoothstep(SCRATCH_WIDTH, SCRATCH_WIDTH + px_face, across)) * inside;
+        r += global.plastic.w * line * smoothstep(0.5, 1.5, SCRATCH_WIDTH / px_face);
     }
     return clamp(r, 0.05, 1.0);
 }
@@ -765,7 +799,7 @@ fn fs_geom(in: VertexOut) -> GeomOut {
     out.albedo = vec4<f32>(color, water_depth);
     out.normal = vec4<f32>(normal * 0.5 + 0.5, 0.0);
     out.dist = distance(global.camera_pos.xyz, in.world_pos);
-    out.gloss = plastic_roughness(in.world_pos, normal, in.edge0, ex0, ey0);
+    out.gloss = plastic_roughness(in.world_pos, in.edge0, in.edge1, ex0, ey0, px, py);
     return out;
 }
 
