@@ -44,6 +44,13 @@ impl PlasticSettings {
         [self.roughness, specular, self.smudge, self.scratch]
     }
 
+    // galaxy.wgsl PlanetUniform.plastic for the impostors: base roughness, specular strength (0 while
+    // off), reflection weight; no imperfections
+    pub fn impostor_uniform(&self) -> [f32; 4] {
+        let u = self.uniform();
+        [u[0], u[1], self.reflection, 0.0]
+    }
+
     // shader.wgsl Global.plastic_ext: x = sky reflection weight
     pub fn uniform_ext(&self) -> [f32; 4] {
         [self.reflection, 0.0, 0.0, 0.0]
@@ -274,5 +281,17 @@ mod tests {
         assert!(s.enabled);
         assert_eq!(s.uniform_ext()[0], 0.5);
         assert!(s.apply(PlasticCommand::Get).contains("reflection 0.50"));
+    }
+    // the galaxy impostors get the base roughness, the strength and the reflection weight (no
+    // imperfections), so the landing handover doesn't jump in brightness
+    #[test]
+    fn impostors_get_the_base_look() {
+        let mut s = PlasticSettings::default();
+        assert_eq!(
+            s.impostor_uniform(),
+            [DEFAULT_ROUGHNESS, DEFAULT_SPECULAR, DEFAULT_REFLECTION, 0.0]
+        );
+        s.apply(PlasticCommand::Off);
+        assert_eq!(s.impostor_uniform()[1], 0.0);
     }
 }

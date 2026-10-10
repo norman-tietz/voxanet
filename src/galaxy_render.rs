@@ -106,6 +106,7 @@ struct GalaxyPlanetUniform {
     sun_color: [f32; 4],     // the galaxy star type's sunlight (rgb)
     glow: [f32; 4],          // the planet type's glowing liquid colour (rgb), w = 1 if it has one
     glow_emission: [f32; 4], // what it emits (rgb): lava_emission
+    plastic: [f32; 4], // base roughness, specular strength, reflection weight (plastic.rs impostor_uniform)
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
@@ -240,6 +241,7 @@ pub struct Backdrop<'a> {
 }
 
 pub struct GalaxyRenderer {
+    pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     star_buf: wgpu::Buffer,
@@ -696,6 +698,7 @@ impl GalaxyRenderer {
         });
 
         Self {
+            plastic: crate::plastic::PlasticSettings::default().impostor_uniform(),
             camera_buf,
             camera_bind,
             star_buf,
@@ -763,7 +766,7 @@ impl GalaxyRenderer {
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 self.ensure_planet_mesh(device, i, p, subdivision);
             }
-            planet_uniforms.push(Self::planet_uniform(galaxy, i, camera, t));
+            planet_uniforms.push(Self::planet_uniform(galaxy, i, camera, t, self.plastic));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
         for (i, u) in planet_uniforms.iter().enumerate() {
@@ -900,6 +903,7 @@ impl GalaxyRenderer {
         i: usize,
         camera: &GalaxyCamera,
         t: f64,
+        plastic: [f32; 4],
     ) -> GalaxyPlanetUniform {
         let p = &galaxy.planets[i];
         let body_pos = p.position_at(t);
@@ -933,6 +937,7 @@ impl GalaxyRenderer {
                 Some(l) => v4(lava_emission(&l)),
                 None => [0.0; 4],
             },
+            plastic,
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -968,7 +973,7 @@ impl GalaxyRenderer {
         queue.write_buffer(
             &self.planet_uniform_buf,
             slot,
-            bytemuck::cast_slice(&[Self::planet_uniform(galaxy, index, camera, t)]),
+            bytemuck::cast_slice(&[Self::planet_uniform(galaxy, index, camera, t, self.plastic)]),
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Handover Overlay Pass"),
@@ -1099,12 +1104,18 @@ mod tests {
     // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 10 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 11 * 16 + 3 * 16);
+        // + plastic
     }
 
     #[test]
     fn galaxy_shader_is_valid_wgsl() {
         crate::renderer::tests::assert_valid_wgsl(GALAXY_SHADER);
+        // the impostors are plastic like the voxel terrain (atmosphere.wgsl atmo_plastic)
+        assert!(
+            GALAXY_SHADER.matches("atmo_plastic(").count() >= 2,
+            "defined and called"
+        );
     }
 
     // the landing handover switches from galaxy mode's camera to the first-person planet camera:

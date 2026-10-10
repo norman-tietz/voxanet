@@ -2356,6 +2356,8 @@ impl Renderer {
         sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs galaxy planet)
         backdrop: &crate::galaxy_render::Backdrop, // the galaxy behind the voxel world, drawn first
     ) {
+        // the impostors share the voxel terrain's plastic look (plastic.rs)
+        self.galaxy.plastic = self.plastic.impostor_uniform();
         self.update_console_mesh(console.height_fraction);
 
         if controller.show_collisions {
@@ -3178,6 +3180,8 @@ impl Renderer {
         t: f64,
         console: &Console,
     ) {
+        // the impostors share the voxel terrain's plastic look (plastic.rs)
+        self.galaxy.plastic = self.plastic.impostor_uniform();
         self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
