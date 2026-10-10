@@ -1,0 +1,235 @@
+// Plastic shading (docs/superpowers/specs/2026-10-10-plastic-shading-design.md): the settings and the
+// /plastic console command, and a Rust mirror of atmosphere.wgsl's closed-form BRDF terms (atmo_plastic)
+// for tests; the WGSL is what renders.
+
+pub const PLASTIC_F0: f32 = 0.04; // Fresnel reflectance at normal incidence: dielectric plastic (atmosphere.wgsl)
+pub const DEFAULT_ROUGHNESS: f32 = 0.35; // satin plastic
+pub const DEFAULT_SPECULAR: f32 = 1.0; // scales highlight and reflection; 0 = the old diffuse look
+pub const DEFAULT_SMUDGE: f32 = 0.3; // roughness added in smudged patches
+pub const DEFAULT_SCRATCH: f32 = 0.2; // roughness added along scratches
+pub const PLASTIC_USAGE: &str =
+    "Usage: /plastic get|on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>";
+
+// the plastic look, tuned with /plastic (cmd.rs); GlobalUniform.plastic = uniform()
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlasticSettings {
+    pub roughness: f32,
+    pub specular: f32,
+    pub smudge: f32,
+    pub scratch: f32,
+    pub enabled: bool, // off: no specular (the old diffuse look), the values kept for /plastic on
+}
+
+impl Default for PlasticSettings {
+    fn default() -> Self {
+        Self {
+            roughness: DEFAULT_ROUGHNESS,
+            specular: DEFAULT_SPECULAR,
+            smudge: DEFAULT_SMUDGE,
+            scratch: DEFAULT_SCRATCH,
+            enabled: true,
+        }
+    }
+}
+
+impl PlasticSettings {
+    // shader.wgsl Global.plastic: base roughness, specular strength (0 while off), smudge, scratch
+    pub fn uniform(&self) -> [f32; 4] {
+        let specular = if self.enabled { self.specular } else { 0.0 };
+        [self.roughness, specular, self.smudge, self.scratch]
+    }
+
+    // applies a /plastic command; returns the line to log
+    pub fn apply(&mut self, cmd: PlasticCommand) -> String {
+        match cmd {
+            PlasticCommand::Get => {}
+            PlasticCommand::On => self.enabled = true,
+            PlasticCommand::Off => self.enabled = false,
+            PlasticCommand::Roughness(v) => (self.roughness, self.enabled) = (v, true),
+            PlasticCommand::Specular(v) => (self.specular, self.enabled) = (v, true),
+            PlasticCommand::Smudge(v) => (self.smudge, self.enabled) = (v, true),
+            PlasticCommand::Scratch(v) => (self.scratch, self.enabled) = (v, true),
+        }
+        format!(
+            "Plastic: {}, roughness {:.2}, specular {:.2}, smudge {:.2}, scratch {:.2}",
+            if self.enabled { "on" } else { "off" },
+            self.roughness,
+            self.specular,
+            self.smudge,
+            self.scratch
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlasticCommand {
+    Get,
+    On,
+    Off,
+    Roughness(f32),
+    Specular(f32),
+    Smudge(f32),
+    Scratch(f32),
+}
+
+impl PlasticCommand {
+    // the words after /plastic
+    pub fn parse(args: &[&str]) -> Result<PlasticCommand, &'static str> {
+        let value = |s: &str, lo: f32, hi: f32| {
+            s.parse::<f32>()
+                .ok()
+                .filter(|v| (lo..=hi).contains(v))
+                .ok_or(PLASTIC_USAGE)
+        };
+        match args {
+            ["get"] => Ok(PlasticCommand::Get),
+            ["on"] => Ok(PlasticCommand::On),
+            ["off"] => Ok(PlasticCommand::Off),
+            ["roughness", v] => value(v, 0.05, 1.0).map(PlasticCommand::Roughness),
+            ["specular", v] => value(v, 0.0, 2.0).map(PlasticCommand::Specular),
+            ["smudge", v] => value(v, 0.0, 1.0).map(PlasticCommand::Smudge),
+            ["scratch", v] => value(v, 0.0, 1.0).map(PlasticCommand::Scratch),
+            _ => Err(PLASTIC_USAGE),
+        }
+    }
+}
+
+// --- mirror of atmosphere.wgsl atmo_plastic's closed-form terms ---
+
+// GGX (Trowbridge-Reitz) normal distribution at cos(theta_h) = n_dot_h, roughness r (alpha = r²)
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn ggx_d(n_dot_h: f32, r: f32) -> f32 {
+    let a = r * r;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    a2 / (std::f32::consts::PI * d * d)
+}
+
+// Schlick's Fresnel at cos(theta) = `cos`
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fresnel(cos: f32, f0: f32) -> f32 {
+    f0 + (1.0 - f0) * (1.0 - cos).powi(5)
+}
+
+// Schlick's Fresnel with the roughness correction, for the sky reflection
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fresnel_rough(n_dot_v: f32, r: f32, f0: f32) -> f32 {
+    f0 + ((1.0 - r).max(f0) - f0) * (1.0 - n_dot_v).powi(5)
+}
+
+// weight of the diffuse terms: what the reflection doesn't take (1 at strength 0)
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn diffuse_weight(strength: f32, n_dot_v: f32, r: f32) -> f32 {
+    1.0 - strength * fresnel_rough(n_dot_v, r, PLASTIC_F0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_feed_the_uniform() {
+        let s = PlasticSettings::default();
+        assert_eq!(
+            (
+                DEFAULT_ROUGHNESS,
+                DEFAULT_SPECULAR,
+                DEFAULT_SMUDGE,
+                DEFAULT_SCRATCH
+            ),
+            (0.35, 1.0, 0.3, 0.2)
+        );
+        assert_eq!(s.uniform(), [0.35, 1.0, 0.3, 0.2]);
+    }
+
+    #[test]
+    fn plastic_command_parses_and_checks_ranges() {
+        assert_eq!(PlasticCommand::parse(&["get"]), Ok(PlasticCommand::Get));
+        assert_eq!(PlasticCommand::parse(&["on"]), Ok(PlasticCommand::On));
+        assert_eq!(PlasticCommand::parse(&["off"]), Ok(PlasticCommand::Off));
+        assert_eq!(
+            PlasticCommand::parse(&["roughness", "0.5"]),
+            Ok(PlasticCommand::Roughness(0.5))
+        );
+        assert_eq!(
+            PlasticCommand::parse(&["specular", "1.5"]),
+            Ok(PlasticCommand::Specular(1.5))
+        );
+        assert_eq!(
+            PlasticCommand::parse(&["smudge", "0.7"]),
+            Ok(PlasticCommand::Smudge(0.7))
+        );
+        assert_eq!(
+            PlasticCommand::parse(&["scratch", "0"]),
+            Ok(PlasticCommand::Scratch(0.0))
+        );
+        for bad in [
+            &["roughness", "0.01"][..],
+            &["roughness", "1.5"],
+            &["specular", "3"],
+            &["smudge", "-0.1"],
+            &["scratch", "x"],
+            &["roughness"],
+            &[],
+            &["nope"],
+        ] {
+            assert_eq!(PlasticCommand::parse(bad), Err(PLASTIC_USAGE), "{bad:?}");
+        }
+    }
+
+    // off: no specular (strength 0 in the uniform) but the values stay; on and setting a value bring it back
+    #[test]
+    fn off_keeps_the_values_for_on() {
+        let mut s = PlasticSettings::default();
+        s.apply(PlasticCommand::Roughness(0.6));
+        s.apply(PlasticCommand::Off);
+        assert_eq!(s.uniform()[1], 0.0);
+        assert_eq!(s.uniform()[0], 0.6);
+        s.apply(PlasticCommand::On);
+        assert_eq!(s.uniform(), [0.6, 1.0, 0.3, 0.2]);
+        s.apply(PlasticCommand::Off);
+        s.apply(PlasticCommand::Specular(1.5));
+        assert_eq!(s.uniform()[1], 1.5);
+        assert!(s.apply(PlasticCommand::Get).contains("roughness 0.60"));
+    }
+
+    // the GGX distribution is normalised: integrated over the hemisphere, weighted by cos(theta_h), it is 1
+    #[test]
+    fn ggx_distribution_integrates_to_one() {
+        for r in [0.2f32, 0.35, 0.8] {
+            let steps = 4000;
+            let mut sum = 0.0f64;
+            for i in 0..steps {
+                let theta = (i as f64 + 0.5) / steps as f64 * std::f64::consts::FRAC_PI_2;
+                let d = ggx_d(theta.cos() as f32, r) as f64;
+                // dω = 2π sin θ dθ (rotationally symmetric), weighted by cos θ
+                sum += d
+                    * theta.cos()
+                    * 2.0
+                    * std::f64::consts::PI
+                    * theta.sin()
+                    * (std::f64::consts::FRAC_PI_2 / steps as f64);
+            }
+            assert!((sum - 1.0).abs() < 0.02, "roughness {r}: {sum}");
+        }
+    }
+
+    #[test]
+    fn fresnel_goes_from_f0_to_one() {
+        assert!((fresnel(1.0, PLASTIC_F0) - PLASTIC_F0).abs() < 1e-6);
+        assert!((fresnel(0.0, PLASTIC_F0) - 1.0).abs() < 1e-6);
+        for r in [0.05f32, 0.35, 1.0] {
+            assert!((fresnel_rough(1.0, r, PLASTIC_F0) - PLASTIC_F0).abs() < 1e-6);
+            assert!(fresnel_rough(0.0, r, PLASTIC_F0) <= 1.0);
+        }
+    }
+
+    // /plastic off (strength 0) leaves the diffuse light untouched at every angle
+    #[test]
+    fn strength_zero_keeps_the_diffuse_light() {
+        for n_v in [0.0f32, 0.3, 1.0] {
+            assert_eq!(diffuse_weight(0.0, n_v, 0.35), 1.0);
+            assert!(diffuse_weight(1.0, n_v, 0.35) < 1.0);
+        }
+    }
+}

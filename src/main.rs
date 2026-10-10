@@ -26,6 +26,7 @@ mod material;
 mod mc_tables;
 mod noise;
 mod physics;
+mod plastic;
 mod renderer;
 mod rt_blur;
 mod rt_shadow;
