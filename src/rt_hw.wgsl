@@ -50,16 +50,24 @@ const HW_RT_RANGE: f32 = 4000.0; // world units; rays leave the planet long befo
 const GOLDEN_ANGLE: f32 = 2.39996323;
 const TAU: f32 = 6.28318531;
 
-// a per-pixel rotation (interleaved gradient noise); the AO sample shifts it every frame, so samples
-// accumulated at a texel over frames look in different directions
-fn ign(p: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+// PCG hash: independent values for every (texel, frame), so the samples accumulated at a texel look
+// in uncorrelated directions. (Interleaved gradient noise shifted per frame gave texels along its
+// diagonals the same direction sequences, which accumulated into diagonal screen-space stripes.)
+fn pcg(v: u32) -> u32 {
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+fn unit(h: u32) -> f32 {
+    return f32(h >> 8u) / 16777216.0; // [0, 1)
 }
 
 // ambient occlusion at surface point `pos` with normal N: `n` cosine-weighted rays (a Fibonacci spiral
 // over the hemisphere, rotated per pixel), each the closest hit within `radius`, weighted
 // (1 - t / radius)^2 so occlusion fades out toward the radius; returns 1 - strength * mean
-fn ambient_occlusion(pos: vec3<f32>, N: vec3<f32>, px: vec2<f32>) -> f32 {
+// `seed`: this sample's hash of (texel, frame)
+fn ambient_occlusion(pos: vec3<f32>, N: vec3<f32>, seed: u32) -> f32 {
     let n = u32(aop.ao.y);
     if (n == 0u) {
         return 1.0;
@@ -68,10 +76,10 @@ fn ambient_occlusion(pos: vec3<f32>, N: vec3<f32>, px: vec2<f32>) -> f32 {
     let a = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(N.x) > 0.9);
     let t = normalize(cross(a, N));
     let b = cross(N, t);
-    let rot = ign(px) * TAU;
-    // the elevation stratum's position, jittered like the rotation (px shifts every frame), so the
-    // accumulated samples cover the whole hemisphere, not one fixed ring per ray
-    let jitter = ign(px.yx + vec2<f32>(37.0, 11.0));
+    let rot = unit(seed) * TAU;
+    // the elevation stratum's position, jittered like the rotation, so the accumulated samples cover
+    // the whole hemisphere, not one fixed ring per ray
+    let jitter = unit(pcg(seed ^ 0x9e3779b9u));
     var occ = 0.0;
     // declared once, outside the loop: Mesa's Intel driver lost the device compiling a ray_query
     // variable declared inside it (the whole shader module, even with this function unused)
@@ -134,8 +142,8 @@ fn cs_ao_sample(@builtin(global_invocation_id) id: vec3<u32>) {
             if (g.w < aop.ao.w) {
                 let N = normalize(textureLoad(g_nrm, vec2<i32>(px), 0).xyz);
                 let fade = smoothstep(0.375 * aop.ao.w, aop.ao.w, g.w);
-                let rot = vec2<f32>(px) + f32(aop.frame % 251u) * 5.588;
-                r.x = mix(ambient_occlusion(g.xyz, N, rot), 1.0, fade);
+                let seed = pcg(px.x ^ pcg(px.y ^ pcg(aop.frame)));
+                r.x = mix(ambient_occlusion(g.xyz, N, seed), 1.0, fade);
             }
         }
     }

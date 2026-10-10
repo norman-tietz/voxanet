@@ -3789,6 +3789,14 @@ pub(crate) mod tests {
         // device compiling the module (valid WGSL, so naga can't catch it)
         let decl = ao.find("var rq: ray_query;").expect("ray query variable");
         assert!(decl < ao.find("for (").expect("ray loop"));
+        // each AO sample draws its rotation and elevation jitter from a hash of (texel, frame):
+        // interleaved gradient noise gave neighbouring texels the same direction sequences, which
+        // accumulated into diagonal screen-space stripes
+        let body = &ao[..ao.find("\n}\n").unwrap()];
+        assert!(
+            !body.contains("ign("),
+            "AO rays use interleaved gradient noise"
+        );
         // the progressive AO's stages (hw_rt.rs): budgeted samples, accumulation, sparse fill
         for entry in [
             "fn cs_ao_sample",
