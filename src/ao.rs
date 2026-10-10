@@ -209,6 +209,11 @@ impl AoProgress {
     pub fn frame(&self) -> u32 {
         self.frame
     }
+
+    // frames since the last reset (the debug overlay shows it)
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
 }
 
 #[cfg(test)]
@@ -354,6 +359,7 @@ mod tests {
         other.size = (101, 50);
         assert_eq!(a.advance(q, turned, u, 8, other), 0); // targets resized
         assert_eq!(a.advance(q, turned, u, 8, other), 1);
+        assert_eq!(a.frames(), 1);
         // the frame index keeps running across resets (the Bayer rotation)
         let before = a.frame();
         a.advance(p, f, u, 9, key);

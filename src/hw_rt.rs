@@ -4,13 +4,46 @@
 //
 // Per frame, after rt_blur.rs's G-buffer pass, a compute pass (rt_hw.wgsl) casts one ray per texel toward
 // the sun and writes the same (shadow, distance) texel into the rt_blur target as the ray march, so the
-// blur and the upsampling are shared.
+// blur and the upsampling are shared. In the same pass the progressive AO (ao.rs) samples one texel per
+// 4x4 block, accumulates into a ping-pong pair at shadow resolution and fills RtBlur::ao_out.
 // Rays are not cast from the scene fragment shader: ray-query code there made every fragment several
 // times slower, even where no ray was cast. Without the feature the renderer keeps using the ray march.
 
 use crate::common::Vertex;
 use crate::rt_blur::RtBlur;
+use bytemuck::{Pod, Zeroable};
 use std::iter;
+
+// rt_hw.wgsl AoParams: one frame of the progressive AO
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct AoFrameParams {
+    pub ao: [f32; 4], // ao::AoSettings::uniform: radius, rays per sample, strength, fade end
+    pub frame: u32,   // running frame index (ray rotation)
+    pub frames: u32,  // since the last reset (0: start over)
+    pub cap: u32,     // accumulation cap per texel
+    pub block: u32,   // ao::BLOCK
+    pub offset: [u32; 2], // ao::sample_offset(frame)
+    pub fill_radius: f32, // ao::fill_radius_texels(frames)
+    pub focal: f32,   // shadow-target pixels per world unit at distance 1
+}
+
+// the AO stages (rt_hw.wgsl entry point, group 1 bindings: storage writes, texture reads)
+const AO_STAGES: [(&str, &[u32], &[u32]); 4] = [
+    ("cs_ao_sample", &[0], &[]),
+    ("cs_ao_accumulate", &[3], &[1, 2]),
+    ("cs_ao_fill_h", &[5], &[4]),
+    ("cs_ao_fill_v", &[7], &[6]),
+];
+const AO_PARAMS_BINDING: u32 = 8;
+
+// the progressive AO's own textures, at the shadow targets' size
+struct AoTargets {
+    size: (u32, u32),
+    samples: wgpu::TextureView,  // (ao, dist) per block
+    acc: [wgpu::TextureView; 2], // (mean, count, dist) ping-pong
+    fill_tmp: wgpu::TextureView, // (sum, weight, dist)
+}
 
 const IDENTITY: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]; // 3x4 row-major
 
@@ -18,6 +51,10 @@ pub struct HwRt {
     compute_pipeline: wgpu::ComputePipeline,
     compute_layout: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
+    ao_pipelines: Vec<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>, // AO_STAGES order
+    ao_params: wgpu::Buffer,
+    ao: Option<AoTargets>,
+    ao_flip: usize, // acc[ao_flip] is this frame's output, the other one the previous frame's
     tlas: wgpu::Tlas,
     capacity: u32,
     used: usize, // TLAS instance slots filled last frame
@@ -100,7 +137,63 @@ impl HwRt {
         });
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HW RT Params"),
-            size: 32,
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // the AO stages: group 0 shared with the shadow, group 1 each stage's own textures + params
+        let ao_pipelines = AO_STAGES
+            .iter()
+            .map(|&(entry, writes, reads)| {
+                let mut entries: Vec<_> = writes
+                    .iter()
+                    .map(|&binding| wgpu::BindGroupLayoutEntry {
+                        binding,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        count: None,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    })
+                    .collect();
+                entries.extend(reads.iter().map(|&binding| tex_entry(binding)));
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: AO_PARAMS_BINDING,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    count: None,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                });
+                let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(entry),
+                    entries: &entries,
+                });
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(
+                        &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                            label: None,
+                            bind_group_layouts: &[Some(&compute_layout), Some(&layout)],
+                            immediate_size: 0,
+                        }),
+                    ),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                (pipeline, layout)
+            })
+            .collect();
+        let ao_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("AO Params"),
+            size: std::mem::size_of::<AoFrameParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -110,6 +203,10 @@ impl HwRt {
             compute_pipeline,
             compute_layout,
             params_buf,
+            ao_pipelines,
+            ao_params,
+            ao: None,
+            ao_flip: 0,
             tlas: Self::make_tlas(device, capacity),
             capacity,
             used: 0,
@@ -201,24 +298,25 @@ impl HwRt {
     }
 
     // one ray per G-buffer texel of `shadows`; writes (shadow, distance) into its target
+    // the shadow term, and the progressive AO when `ao` is given (it writes RtBlur::ao_out; without it the
+    // caller clears that to 1)
+    #[allow(clippy::too_many_arguments)]
     pub fn trace(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         enc: &mut wgpu::CommandEncoder,
         shadows: &RtBlur,
         sun_dir: glam::Vec3,
-        ao: [f32; 4], // ao.rs AoSettings::uniform: radius, ray count, strength
+        ao: Option<AoFrameParams>,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         queue.write_buffer(
             &self.params_buf,
             0,
-            bytemuck::cast_slice(&[
-                sun_dir.x, sun_dir.y, sun_dir.z, 0.0, ao[0], ao[1], ao[2], ao[3],
-            ]),
+            bytemuck::cast_slice(&[sun_dir.x, sun_dir.y, sun_dir.z, 0.0]),
         );
-        // targets and TLAS can be replaced (resize, capacity), so the bind group is made per frame
+        // targets and TLAS can be replaced (resize, capacity), so the bind groups are made per frame
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rt_hw_bind"),
             layout: &self.compute_layout,
@@ -245,12 +343,107 @@ impl HwRt {
                 },
             ],
         });
+        let ao_binds = ao.map(|params| {
+            queue.write_buffer(&self.ao_params, 0, bytemuck::bytes_of(&params));
+            self.ao_flip ^= 1;
+            self.ensure_ao_targets(device, shadows.size);
+            let t = self.ao.as_ref().unwrap();
+            let (cur, prev) = (&t.acc[self.ao_flip], &t.acc[self.ao_flip ^ 1]);
+            // per stage: the views for its group 1 bindings, in AO_STAGES order (writes, then reads)
+            let views: [&[&wgpu::TextureView]; 4] = [
+                &[&t.samples],
+                &[cur, &t.samples, prev],
+                &[&t.fill_tmp, cur],
+                &[&shadows.ao_out, &t.fill_tmp],
+            ];
+            let binds: Vec<_> = AO_STAGES
+                .iter()
+                .zip(views)
+                .zip(&self.ao_pipelines)
+                .map(|((&(entry, writes, reads), views), (_, layout))| {
+                    let mut entries: Vec<_> = writes
+                        .iter()
+                        .chain(reads)
+                        .zip(views)
+                        .map(|(&binding, view)| wgpu::BindGroupEntry {
+                            binding,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        })
+                        .collect();
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: AO_PARAMS_BINDING,
+                        resource: self.ao_params.as_entire_binding(),
+                    });
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(entry),
+                        layout,
+                        entries: &entries,
+                    })
+                })
+                .collect();
+            (binds, params.block)
+        });
+
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("HW RT Shadow Pass"),
+            label: Some("HW RT Shadow + AO Pass"),
             timestamp_writes,
         });
+        let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
+        let (gx, gy) = groups(shadows.size.0, shadows.size.1);
         pass.set_pipeline(&self.compute_pipeline);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(shadows.size.0.div_ceil(8), shadows.size.1.div_ceil(8), 1);
+        pass.dispatch_workgroups(gx, gy, 1);
+        if let Some((binds, block)) = &ao_binds {
+            // each dispatch is its own usage scope, so a stage reads what the one before wrote
+            for (i, ((pipeline, _), bind1)) in self.ao_pipelines.iter().zip(binds).enumerate() {
+                let (w, h) = if i == 0 {
+                    (
+                        shadows.size.0.div_ceil(*block),
+                        shadows.size.1.div_ceil(*block),
+                    )
+                } else {
+                    shadows.size
+                };
+                let (gx, gy) = groups(w, h);
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(1, bind1, &[]);
+                pass.dispatch_workgroups(gx, gy, 1);
+            }
+        }
+    }
+
+    // the AO textures for shadow targets of `size`, recreated when that changes
+    fn ensure_ao_targets(&mut self, device: &wgpu::Device, size: (u32, u32)) {
+        if self.ao.as_ref().is_none_or(|t| t.size != size) {
+            let tex = |w: u32, h: u32, label: &str| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d {
+                            width: w.max(1),
+                            height: h.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let b = crate::ao::BLOCK;
+            self.ao = Some(AoTargets {
+                size,
+                samples: tex(size.0.div_ceil(b), size.1.div_ceil(b), "AO Samples"),
+                acc: [
+                    tex(size.0, size.1, "AO Acc A"),
+                    tex(size.0, size.1, "AO Acc B"),
+                ],
+                fill_tmp: tex(size.0, size.1, "AO Fill"),
+            });
+        }
     }
 }

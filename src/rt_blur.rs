@@ -5,7 +5,8 @@
 // 2. a compute pass computes the sharp shadow term once per texel into `target`: cs_march (shader.wgsl,
 //    ray marching, `march`) or hw_rt.rs (hardware rays)
 // 3. blur.wgsl blurs `target` horizontally into `tmp` and vertically into `out`; the lighting upsamples
-//    `out` at each screen pixel (group 2, shadow_at in shader.wgsl).
+//    `out` at each screen pixel (group 2, shadow_ao_at in shader.wgsl), together with `ao_out`: the
+//    progressive ray-traced AO hw_rt.rs fills (ao.rs), cleared to 1 while it isn't running.
 //
 // Shadows cost per texel, so these targets are capped at MAX_RT_PIXELS: on large screens the shadow
 // term is computed at a lower resolution and upsampled depth-aware.
@@ -42,6 +43,7 @@ struct BlurParams {
 
 struct Targets {
     target: wgpu::TextureView,
+    ao_out: wgpu::TextureView,
     g_pos: wgpu::TextureView,
     g_nrm: wgpu::TextureView,
     march_bind: wgpu::BindGroup,
@@ -57,13 +59,14 @@ pub struct RtBlur {
     pub target: wgpu::TextureView,
     pub g_pos: wgpu::TextureView, // xyz world position, w camera distance (0 = sky)
     pub g_nrm: wgpu::TextureView, // xyz world normal
+    pub ao_out: wgpu::TextureView, // (ao, camera distance): hw_rt.rs's progressive AO, else cleared to 1
     march_pipeline: wgpu::ComputePipeline,
     march_layout: wgpu::BindGroupLayout,
     march_bind: wgpu::BindGroup, // group 3 of cs_march: G-buffer in, target out
     tmp: wgpu::TextureView,
     out: wgpu::TextureView,
     pub sample_layout: wgpu::BindGroupLayout,
-    pub sample_bind: wgpu::BindGroup, // group 2 of the scene pipelines: `out`
+    pub sample_bind: wgpu::BindGroup, // group 2 of the scene pipelines: `out`, `ao_out`
     blur_layout: wgpu::BindGroupLayout,
     blur_pipeline: wgpu::RenderPipeline,
     params_h: wgpu::Buffer,
@@ -76,8 +79,8 @@ impl RtBlur {
     pub fn sample_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rt_sample_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding, // 0: blurred shadow, 1: ambient occlusion
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -85,7 +88,7 @@ impl RtBlur {
                     multisampled: false,
                 },
                 count: None,
-            }],
+            }),
         })
     }
 
@@ -224,6 +227,7 @@ impl RtBlur {
         Self {
             size,
             target: t.target,
+            ao_out: t.ao_out,
             g_pos: t.g_pos,
             g_nrm: t.g_nrm,
             march_pipeline,
@@ -283,14 +287,22 @@ impl RtBlur {
         let g_nrm = tex(NRM_FORMAT, shadow_gbuf);
         let tmp = tex(FORMAT, color);
         let out = tex(FORMAT, color);
+        // written by hw_rt.rs's AO fill (storage) or cleared to 1 (render attachment), read by the lighting
+        let ao_out = tex(FORMAT, color | wgpu::TextureUsages::STORAGE_BINDING);
 
         let sample_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rt_sample_bind"),
             layout: sample_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&out),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&out),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ao_out),
+                },
+            ],
         });
         let blur_bind = |src: &wgpu::TextureView, params: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -330,6 +342,7 @@ impl RtBlur {
         });
         Targets {
             target,
+            ao_out,
             g_pos,
             g_nrm,
             march_bind,
@@ -354,8 +367,13 @@ impl RtBlur {
             self.size.0,
             self.size.1,
         );
-        (self.target, self.g_pos, self.g_nrm, self.march_bind) =
-            (t.target, t.g_pos, t.g_nrm, t.march_bind);
+        (
+            self.target,
+            self.ao_out,
+            self.g_pos,
+            self.g_nrm,
+            self.march_bind,
+        ) = (t.target, t.ao_out, t.g_pos, t.g_nrm, t.march_bind);
         (
             self.tmp,
             self.out,
@@ -408,6 +426,31 @@ impl RtBlur {
             }),
             store: wgpu::StoreOp::Store,
         }
+    }
+
+    // no ray-traced AO this frame (ray march, /ao off): AO 1 everywhere
+    pub fn clear_ao(&self, enc: &mut wgpu::CommandEncoder) {
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("AO Clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                depth_slice: None,
+                view: &self.ao_out,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
     }
 
     // timer: the horizontal pass writes the blur's begin timestamp, the vertical pass its end

@@ -1,7 +1,7 @@
 // blur.wgsl
 // Separable, depth-aware blur of the ray-marched shadow term (see rt_blur.rs).
-// Input/output texel: r = shadow (1 lit, 0 shadowed), g = distance to the camera (0 = sky),
-// b = ambient occlusion (1 open; rt_hw.wgsl), blurred with the same weights as the shadow.
+// Input/output texel: r = shadow (1 lit, 0 shadowed), g = distance to the camera (0 = sky), b = 1
+// (carried along; the ray-traced AO has its own texture and fill, rt_hw.wgsl).
 
 struct BlurParams {
     dir: vec2<f32>, // (1, 0) horizontal pass, (0, 1) vertical pass

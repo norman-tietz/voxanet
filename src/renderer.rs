@@ -250,6 +250,8 @@ pub struct Renderer {
     flash_bind: wgpu::BindGroup,
     pub film: crate::film::FilmSettings, // grain and vignette (console: /film)
     pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
+    ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
+    mesh_epoch: u64,                     // bumped on every chunk/LOD mesh change: resets the AO
     film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
     film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
     film_buf: wgpu::Buffer,
@@ -1078,6 +1080,8 @@ impl Renderer {
             flash_bind,
             film: crate::film::FilmSettings::default(),
             ao: crate::ao::AoSettings::default(),
+            ao_progress: Default::default(),
+            mesh_epoch: 0,
             film_pipeline,
             film_pipeline_depth,
             film_buf,
@@ -1533,6 +1537,7 @@ impl Renderer {
             if required_lods.contains(&k) || uncovered(k.face, k.x, k.y, k.size) {
                 continue;
             }
+            self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
             if let Some(mesh) = self.lod_chunks.remove(&k) {
                 self.animator.retire(AnyKey::Lod(k), mesh);
             }
@@ -1567,6 +1572,7 @@ impl Renderer {
                     CHUNK_SIZE,
                 )
             {
+                self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
                 if let Some(mesh) = self.chunks.remove(&k) {
                     self.animator.retire(AnyKey::Voxel(k), mesh);
                 }
@@ -1835,6 +1841,7 @@ impl Renderer {
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
 
+        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
         self.lod_chunks.insert(
             key,
             ChunkMesh {
@@ -1904,6 +1911,7 @@ impl Renderer {
 
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
         self.generation += 1; // results still in flight belong to the old planet
+        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
         self.load_queue.clear();
@@ -1932,6 +1940,7 @@ impl Renderer {
             if self.chunks.contains_key(&key) {
                 let (v, i) = MeshGen::build_chunk(key, planet);
                 if v.is_empty() {
+                    self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
                     self.chunks.remove(&key);
                 } else {
                     let (wv, wi) = MeshGen::build_water(key, planet);
@@ -2113,6 +2122,7 @@ impl Renderer {
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
 
+        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
         self.chunks.insert(
             key,
             ChunkMesh {
@@ -2707,19 +2717,49 @@ impl Renderer {
                 .gpu_timer
                 .as_ref()
                 .and_then(|t| t.compute_writes(gpu_timer::RAYS, false, true));
-            match self.hw_rt.as_ref().filter(|_| self.hw_shadows) {
+            // the progressive AO (ao.rs): starts over whenever the camera, the meshes, the settings
+            // or the targets change, and converges while they don't
+            let ao_frame = (self.hw_shadows && self.ao.enabled).then(|| {
+                let (eye, rot) = controller.camera_pose(player);
+                let frames = self.ao_progress.advance(
+                    eye,
+                    rot * Vec3::NEG_Z,
+                    rot * Vec3::Y,
+                    self.mesh_epoch,
+                    crate::ao::AoKey {
+                        settings: self.ao,
+                        size: self.rt_blur.size,
+                    },
+                );
+                let frame = self.ao_progress.frame();
+                let (ox, oy) = crate::ao::sample_offset(frame);
+                crate::hw_rt::AoFrameParams {
+                    ao: self.ao.uniform(),
+                    frame,
+                    frames,
+                    cap: self.ao.samples,
+                    block: crate::ao::BLOCK,
+                    offset: [ox, oy],
+                    fill_radius: crate::ao::fill_radius_texels(frames),
+                    focal: self.rt_blur.size.1 as f32 * 0.5 / (fov.to_radians() * 0.5).tan(),
+                }
+            });
+            match self.hw_rt.as_mut().filter(|_| self.hw_shadows) {
                 Some(hw) => hw.trace(
                     &self.device,
                     &self.queue,
                     &mut enc,
                     &self.rt_blur,
                     sun_dir,
-                    self.ao.uniform(),
+                    ao_frame,
                     compute_writes,
                 ),
                 None => self
                     .rt_blur
                     .march(&mut enc, &self.global_bind, compute_writes),
+            }
+            if ao_frame.is_none() {
+                self.rt_blur.clear_ao(&mut enc);
             }
             self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
         }
@@ -2948,7 +2988,7 @@ impl Renderer {
                     "ACTIVE"
                 };
                 let info = format!(
-                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\nScreen  {}x{}\nShadows {}x{} {}\n{}", 
+                    "Culling: {}\nChunks: {} / {}\nLODs:   {} / {}\nQueue:  {}\n\nScreen  {}x{}\nShadows {}x{} {}\nAO      {}\n{}", 
                     status,
                     rendered_chunks, self.chunks.len(),
                     rendered_lods, self.lod_chunks.len(),
@@ -2956,6 +2996,11 @@ impl Renderer {
                     self.config.width, self.config.height,
                     self.rt_blur.size.0, self.rt_blur.size.1,
                     if self.hw_shadows { "HW" } else { "march" },
+                    if self.hw_shadows && self.ao.enabled {
+                        format!("{} frames still", self.ao_progress.frames())
+                    } else {
+                        "vertex".to_string()
+                    },
                     self.gpu_timer.as_ref().map_or("GPU timing unavailable".to_string(), |t| t.summary())
                 );
 
@@ -3752,6 +3797,15 @@ pub(crate) mod tests {
         // device compiling the module (valid WGSL, so naga can't catch it)
         let decl = ao.find("var rq: ray_query;").expect("ray query variable");
         assert!(decl < ao.find("for (").expect("ray loop"));
+        // the progressive AO's stages (hw_rt.rs): budgeted samples, accumulation, sparse fill
+        for entry in [
+            "fn cs_ao_sample",
+            "fn cs_ao_accumulate",
+            "fn cs_ao_fill_h",
+            "fn cs_ao_fill_v",
+        ] {
+            assert!(src.contains(entry), "{entry}");
+        }
     }
 
     #[test]

@@ -51,6 +51,7 @@ struct Biome {
 @group(0) @binding(3) var<uniform> biome: Biome;
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
 @group(2) @binding(0) var rt_blurred: texture_2d<f32>;
+@group(2) @binding(1) var rt_ao: texture_2d<f32>; // (ao, distance): progressive ray-traced AO (rt_hw.wgsl), else 1
 
 struct Local {
     model: mat4x4<f32>,
@@ -381,8 +382,8 @@ fn rt_shadow(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
 // The shadow targets can be smaller than the screen (rt_blur.rs MAX_RT_PIXELS): upsample from the
 // four nearest texels, weighted bilinearly and by how well their camera distance matches this pixel's,
 // so shadows don't bleed across silhouettes. At full resolution this is a single exact tap.
-// the shadow term and the ray-traced ambient occlusion (rt_hw.wgsl; 1 on the ray-march path, which
-// keeps vertex AO) at a screen pixel: (shadow, ao)
+// the shadow term and the ray-traced ambient occlusion (rt_ao, same resolution; 1 on the ray-march path,
+// which keeps vertex AO) at a screen pixel: (shadow, ao)
 fn shadow_ao_at(frag_xy: vec2<f32>, world_pos: vec3<f32>) -> vec2<f32> {
     if (rt.enabled != 1u) { return vec2<f32>(1.0); }
     let dims = vec2<i32>(textureDimensions(rt_blurred));
@@ -397,13 +398,15 @@ fn shadow_ao_at(frag_xy: vec2<f32>, world_pos: vec3<f32>) -> vec2<f32> {
     var closest_err = 1e9;
     for (var i = 0; i < 4; i++) {
         let o = vec2<i32>(i & 1, i >> 1u);
-        let t = textureLoad(rt_blurred, clamp(base + o, vec2<i32>(0), dims - 1), 0);
+        let q = clamp(base + o, vec2<i32>(0), dims - 1);
+        let t = textureLoad(rt_blurred, q, 0);
         if (t.g <= 0.0) { continue; } // sky
+        let v = vec2<f32>(t.r, textureLoad(rt_ao, q, 0).r);
         let err = abs(t.g - dist) / dist;
-        if (err < closest_err) { closest_err = err; closest = t.rb; }
+        if (err < closest_err) { closest_err = err; closest = v; }
         let bilinear = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
         let w = bilinear / (1.0 + (err / 0.02) * (err / 0.02));
-        sum += t.rb * w;
+        sum += v * w;
         wsum += w;
     }
     if (wsum < 1e-3) { return closest; }
