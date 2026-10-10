@@ -2979,7 +2979,7 @@ impl Renderer {
                     self.rt_blur.size.0, self.rt_blur.size.1,
                     if self.hw_shadows { "HW" } else { "march" },
                     if self.hw_shadows && self.ao.enabled {
-                        format!("{} frames still", self.ao_progress.frames())
+                        format!("{} frames since reset", self.ao_progress.frames())
                     } else {
                         "vertex".to_string()
                     },

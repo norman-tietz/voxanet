@@ -21,7 +21,7 @@ const HELP_LINES: [&str; 9] = [
     "  /move_speed get|set <value>    /jump_force get|set <value>",
     "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
     "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
-    "  /ao get|on|off|radius <v>|rays <n>|strength <v>|samples <n>",
+    "  /ao get|on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>",
     "  /plastic get|on|off|roughness|specular|smudge|scratch|reflection <v>",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
