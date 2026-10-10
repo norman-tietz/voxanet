@@ -221,7 +221,7 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
     if (all(id.xy % aop.block == vec2<u32>(aop.offset_x, aop.offset_y))) {
         let s = textureLoad(ao_new_r, vec2<i32>(id.xy / aop.block), 0);
         if (s.y > 0.0) {
-            count = min(count + 1.0, max(cap, 1.0));
+            count = min(count + 1.0, cap);
             mean = mean + (s.x - mean) / count;
         }
     }
