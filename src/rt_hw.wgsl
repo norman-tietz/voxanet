@@ -23,8 +23,10 @@ struct AoParams {
     block: u32,        // one sample per block x block texels
     offset_x: u32,     // this frame's sample texel inside each block (ao::sample_offset)
     offset_y: u32,
-    fill_radius: f32,  // texels (ao::fill_radius_texels)
-    focal: f32,        // shadow-target pixels per world unit at distance 1
+    slow_cap: f32,     // accumulation caps while the history moves on screen (ao::motion_cap)
+    fast_cap: f32,
+    prev_cam: vec4<f32>,          // xyz: last frame's camera (planet frame)
+    prev_view_proj: mat4x4<f32>,  // last frame's view-projection: the history's reprojection
 }
 
 @group(0) @binding(0) var g_pos: texture_2d<f32>;      // xyz world position, w camera distance (0 = sky)
@@ -150,8 +152,19 @@ fn cs_ao_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(ao_new_w, vec2<i32>(id.xy), r);
 }
 
-// the running mean per texel: (mean, sample count, distance). Starts over when aop.frames is 0; the
-// texel that got this frame's sample adds it, its count capped at aop.cap (a moving average beyond).
+// the accumulation cap for a texel whose history moved `m` texels on screen (mirror: ao::motion_cap):
+// the full cap while still, toward slow_cap up to half a texel, fast_cap from 8 texels on
+fn ao_motion_cap(m: f32) -> f32 {
+    let still_to_slow = mix(f32(aop.cap), aop.slow_cap, smoothstep(0.05, 0.5, m));
+    return mix(still_to_slow, aop.fast_cap, smoothstep(0.5, 8.0, m));
+}
+
+// the running mean per texel: (mean, sample count, distance). The history is read reprojected: this
+// texel's world point through last frame's view-projection (mirror: ao::reproject), bilinear over the
+// four history texels whose stored distance matches the point's distance from last frame's camera
+// (others are other surfaces: silhouettes, disocclusions); its count is capped by how far it moved on
+// screen, so moving views stay responsive and still ones converge. aop.frames 0 (settings, size or a
+// block edit changed): start over. The texel that got this frame's sample adds it.
 @compute @workgroup_size(8, 8)
 fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(acc_cur);
@@ -162,30 +175,58 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(acc_cur, p, vec4<f32>(1.0, 0.0, 0.0, 1.0)); // sky
         return;
     }
-    var acc = vec4<f32>(1.0, 0.0, g.w, 1.0);
+    var mean = 1.0;
+    var count = 0.0;
+    var cap = f32(aop.cap);
     if (aop.frames > 0u) {
-        let prev = textureLoad(acc_prev, p, 0);
-        acc = vec4<f32>(prev.x, prev.y, g.w, 1.0);
+        let clip = aop.prev_view_proj * vec4<f32>(g.xyz, 1.0);
+        if (clip.w > 0.0) {
+            let ndc = clip.xy / clip.w;
+            let q = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * vec2<f32>(size) - 0.5;
+            let expected = distance(aop.prev_cam.xyz, g.xyz);
+            let tol = 0.02 * expected + 0.02;
+            let base = vec2<i32>(floor(q));
+            let f = q - floor(q);
+            var msum = 0.0;
+            var csum = 0.0;
+            var wsum = 0.0;
+            for (var i = 0; i < 4; i++) {
+                let o = vec2<i32>(i & 1, i >> 1u);
+                let t = base + o;
+                if (any(t < vec2<i32>(0)) || any(t >= vec2<i32>(size))) { continue; }
+                let h = textureLoad(acc_prev, t, 0);
+                if (h.y <= 0.0 || abs(h.z - expected) > tol) { continue; }
+                let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+                msum += h.x * w;
+                csum += h.y * w;
+                wsum += w;
+            }
+            if (wsum > 1e-4) {
+                cap = ao_motion_cap(distance(q, vec2<f32>(id.xy)));
+                mean = msum / wsum;
+                count = min(csum / wsum, cap);
+            }
+        }
     }
     if (all(id.xy % aop.block == vec2<u32>(aop.offset_x, aop.offset_y))) {
         let s = textureLoad(ao_new_r, vec2<i32>(id.xy / aop.block), 0);
         if (s.y > 0.0) {
-            let count = min(acc.y + 1.0, f32(aop.cap));
-            acc.x = acc.x + (s.x - acc.x) / count;
-            acc.y = count;
+            count = min(count + 1.0, max(cap, 1.0));
+            mean = mean + (s.x - mean) / count;
         }
     }
-    textureStore(acc_cur, p, acc);
+    textureStore(acc_cur, p, vec4<f32>(mean, count, g.w, 1.0));
 }
 
 const FILL_MAX_TAPS: i32 = 8;      // each side: at least FILL_MAX_RADIUS, so the step stays <= 1 texel
 const FILL_MAX_RADIUS: f32 = 8.0;  // texels: bridges the 4x4 sample gaps right after a reset
 
-// the fill's radius: wide right after a reset, to bridge the gaps between the sparse samples, narrow
-// once every texel has its own (ao::fill_radius_texels). No world-space minimum like the shadow blur's:
-// converged AO needs none, and close up it forced the widest fill over the whole screen (~5 ms)
-fn fill_radius(dist: f32) -> f32 {
-    return min(aop.fill_radius, FILL_MAX_RADIUS);
+// the fill's radius from the centre texel's sample count (mirror: ao::fill_radius_for_count): wide where
+// a surface just appeared, to bridge the gaps between the sparse samples, narrow where the history
+// carries many. No world-space minimum like the shadow blur's: converged AO needs none, and close up it
+// forced the widest fill over the whole screen (~5 ms)
+fn fill_radius(count: f32) -> f32 {
+    return clamp(2.0 * f32(aop.block) / sqrt(count + 1.0), 1.5, FILL_MAX_RADIUS);
 }
 
 // taps about one texel apart, so the sparse samples right after a reset (one per 4x4 block) are never
@@ -207,7 +248,8 @@ fn fill_weight(x: f32, radius: f32) -> f32 {
     return exp(-x * x / (radius * radius));
 }
 
-// horizontal: over the texels that have samples, (sum of weighted means, sum of weights, distance)
+// horizontal: over the texels that have samples, (sum of weighted means, sum of weights, distance,
+// radius); the vertical pass uses the same radius
 @compute @workgroup_size(8, 8)
 fn cs_ao_fill_h(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(fill_tmp_w);
@@ -218,7 +260,7 @@ fn cs_ao_fill_h(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(fill_tmp_w, p, vec4<f32>(0.0, 0.0, 0.0, 1.0));
         return;
     }
-    let radius = fill_radius(c.z);
+    let radius = fill_radius(c.y);
     let taps = fill_taps(radius);
     let step = radius / f32(taps);
     var sum = 0.0;
@@ -232,7 +274,7 @@ fn cs_ao_fill_h(@builtin(global_invocation_id) id: vec3<u32>) {
         sum += s.x * w;
         wsum += w;
     }
-    textureStore(fill_tmp_w, p, vec4<f32>(sum, wsum, c.z, 1.0));
+    textureStore(fill_tmp_w, p, vec4<f32>(sum, wsum, c.z, radius));
 }
 
 // vertical: combines the rows' sums into the AO, (ao, distance); 1 where no sample is in reach
@@ -246,7 +288,7 @@ fn cs_ao_fill_v(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(ao_out_w, p, vec4<f32>(1.0, 0.0, 0.0, 1.0));
         return;
     }
-    let radius = fill_radius(c.z);
+    let radius = c.w;
     let taps = fill_taps(radius);
     let step = radius / f32(taps);
     var sum = 0.0;

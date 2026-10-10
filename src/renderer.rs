@@ -250,8 +250,9 @@ pub struct Renderer {
     pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
     pub plastic: crate::plastic::PlasticSettings, // specular plastic look (console: /plastic)
     ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
-    mesh_epoch: u64,                     // bumped on every chunk/LOD mesh change: resets the AO
-    film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
+    edit_epoch: u64, // bumped by block edits and full reloads: the progressive AO starts over
+    prev_ao_view: Option<(glam::Mat4, Vec3)>, // last frame's view-projection and camera (AO reprojection)
+    film_pipeline: wgpu::RenderPipeline,      // galaxy HUD pass (no depth)
     film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
     film_buf: wgpu::Buffer,
     film_bind: wgpu::BindGroup,
@@ -1071,7 +1072,8 @@ impl Renderer {
             ao: crate::ao::AoSettings::default(),
             plastic: crate::plastic::PlasticSettings::default(),
             ao_progress: Default::default(),
-            mesh_epoch: 0,
+            edit_epoch: 0,
+            prev_ao_view: None,
             film_pipeline,
             film_pipeline_depth,
             film_buf,
@@ -1524,7 +1526,6 @@ impl Renderer {
             if required_lods.contains(&k) || uncovered(k.face, k.x, k.y, k.size) {
                 continue;
             }
-            self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
             if let Some(mesh) = self.lod_chunks.remove(&k) {
                 self.animator.retire(AnyKey::Lod(k), mesh);
             }
@@ -1559,7 +1560,6 @@ impl Renderer {
                     CHUNK_SIZE,
                 )
             {
-                self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
                 if let Some(mesh) = self.chunks.remove(&k) {
                     self.animator.retire(AnyKey::Voxel(k), mesh);
                 }
@@ -1827,8 +1827,6 @@ impl Renderer {
         }
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
-
-        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
         self.lod_chunks.insert(
             key,
             ChunkMesh {
@@ -1898,7 +1896,7 @@ impl Renderer {
 
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
         self.generation += 1; // results still in flight belong to the old planet
-        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
+        self.edit_epoch += 1; // the progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
         self.load_queue.clear();
@@ -1922,12 +1920,13 @@ impl Renderer {
 
     pub fn refresh_neighbors(&mut self, id: BlockId, planet: &PlanetData) {
         self.rt_dirty = true;
+        // an edit changes the AO around it without changing the depth there: start over (ao.rs)
+        self.edit_epoch += 1;
         let keys = chunks_to_refresh(id, planet);
         for key in keys {
             if self.chunks.contains_key(&key) {
                 let (v, i) = MeshGen::build_chunk(key, planet);
                 if v.is_empty() {
-                    self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
                     self.chunks.remove(&key);
                 } else {
                     let (wv, wi) = MeshGen::build_water(key, planet);
@@ -2108,8 +2107,6 @@ impl Renderer {
         }
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
-
-        self.mesh_epoch += 1; // progressive AO starts over (ao.rs)
         self.chunks.insert(
             key,
             ChunkMesh {
@@ -2708,20 +2705,19 @@ impl Renderer {
                 .gpu_timer
                 .as_ref()
                 .and_then(|t| t.compute_writes(gpu_timer::RAYS, false, true));
-            // the progressive AO (ao.rs): starts over whenever the camera, the meshes, the settings
-            // or the targets change, and converges while they don't
+            // the progressive AO (ao.rs): starts over when a block edit, the settings or the targets
+            // change; camera movement and streaming are carried over by reprojection
+            let prev_view = self.prev_ao_view.replace((mvp, cam_pos));
             let ao_frame = (self.hw_shadows && self.ao.enabled).then(|| {
-                let (eye, rot) = controller.camera_pose(player);
                 let frames = self.ao_progress.advance(
-                    eye,
-                    rot * Vec3::NEG_Z,
-                    rot * Vec3::Y,
-                    self.mesh_epoch,
+                    self.edit_epoch,
                     crate::ao::AoKey {
                         settings: self.ao,
                         size: self.rt_blur.size,
                     },
                 );
+                // no previous frame to reproject from: start over
+                let frames = if prev_view.is_some() { frames } else { 0 };
                 let frame = self.ao_progress.frame();
                 let (ox, oy) = crate::ao::sample_offset(frame);
                 crate::hw_rt::AoFrameParams {
@@ -2731,8 +2727,12 @@ impl Renderer {
                     cap: self.ao.samples,
                     block: crate::ao::BLOCK,
                     offset: [ox, oy],
-                    fill_radius: crate::ao::fill_radius_texels(frames),
-                    focal: self.rt_blur.size.1 as f32 * 0.5 / (fov.to_radians() * 0.5).tan(),
+                    slow_cap: self.ao.motion_slow as f32,
+                    fast_cap: self.ao.motion_fast as f32,
+                    prev_cam: prev_view.map_or([0.0; 4], |(_, c)| [c.x, c.y, c.z, 0.0]),
+                    prev_view_proj: prev_view
+                        .map_or(glam::Mat4::IDENTITY, |(m, _)| m)
+                        .to_cols_array(),
                 }
             });
             match self.hw_rt.as_mut().filter(|_| self.hw_shadows) {
@@ -3796,6 +3796,13 @@ pub(crate) mod tests {
         assert!(
             !body.contains("ign("),
             "AO rays use interleaved gradient noise"
+        );
+        // the history is read reprojected, through the previous frame's view-projection
+        let acc = &src[src.find("fn cs_ao_accumulate").expect("accumulate")..];
+        let acc = &acc[..acc.find("\n}\n").unwrap()];
+        assert!(
+            acc.contains("prev_view_proj"),
+            "history read at the same texel"
         );
         // the progressive AO's stages (hw_rt.rs): budgeted samples, accumulation, sparse fill
         for entry in [

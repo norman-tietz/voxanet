@@ -24,8 +24,10 @@ pub struct AoFrameParams {
     pub cap: u32,     // accumulation cap per texel
     pub block: u32,   // ao::BLOCK
     pub offset: [u32; 2], // ao::sample_offset(frame)
-    pub fill_radius: f32, // ao::fill_radius_texels(frames)
-    pub focal: f32,   // shadow-target pixels per world unit at distance 1
+    pub slow_cap: f32, // accumulation caps while the history moves on screen (ao::motion_cap)
+    pub fast_cap: f32,
+    pub prev_cam: [f32; 4],        // xyz: last frame's camera (planet frame)
+    pub prev_view_proj: [f32; 16], // last frame's view-projection (the history's reprojection)
 }
 
 // the AO stages (rt_hw.wgsl entry point, group 1 bindings: storage writes, texture reads)
@@ -445,5 +447,19 @@ impl HwRt {
                 fill_tmp: tex(size.0, size.1, "AO Fill"),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AoFrameParams mirrors rt_hw.wgsl AoParams: 48 bytes of scalars, the previous camera (vec4) at
+    // 48 and the previous view-projection (mat4x4) at 64
+    #[test]
+    fn ao_params_match_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<AoFrameParams>(), 128);
+        assert_eq!(std::mem::offset_of!(AoFrameParams, prev_cam), 48);
+        assert_eq!(std::mem::offset_of!(AoFrameParams, prev_view_proj), 64);
     }
 }

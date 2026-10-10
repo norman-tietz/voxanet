@@ -5,9 +5,12 @@
 
 pub const DEFAULT_RADIUS: f32 = 3.0; // world units (blocks): gaps, wall feet, steps, narrow gorges
 pub const DEFAULT_RAYS: u32 = 2; // per AO sample (one sample per BLOCK x BLOCK texels and frame)
-pub const DEFAULT_SAMPLES: u32 = 64; // accumulation cap per texel; beyond, a moving average
-                                     // AO budget: one sample per BLOCK x BLOCK shadow texels and frame (a ray query costs ~10 ns on the
-                                     // reference GPU, so full resolution was 33 ms per ray in fullscreen)
+pub const DEFAULT_SAMPLES: u32 = 64; // accumulation cap per texel while still; beyond, a moving average
+                                     // caps while the camera moves (motion_cap): fast and slow screen motion
+pub const DEFAULT_MOTION_FAST: u32 = 4;
+pub const DEFAULT_MOTION_SLOW: u32 = 32;
+// AO budget: one sample per BLOCK x BLOCK shadow texels and frame (a ray query costs ~10 ns on the
+// reference GPU, so full resolution was 33 ms per ray in fullscreen)
 pub const BLOCK: u32 = 4;
 pub const DEFAULT_STRENGTH: f32 = 1.0;
 // camera distance (world units) where AO has faded out, from full at 0.375 × that; no AO rays beyond.
@@ -15,7 +18,7 @@ pub const DEFAULT_STRENGTH: f32 = 1.0;
 // large planets the LOD terrain begins, drawn morphed but traced unmorphed (rays would start under it)
 pub const FADE_END: f32 = 400.0;
 pub const AO_USAGE: &str =
-    "Usage: /ao get|on|off|radius <0.5-8>|rays <1-16>|strength <0-1>|samples <1-256>";
+    "Usage: /ao get|on|off|radius <0.5-8>|rays <1-16>|strength <0-1>|samples <1-256>|motion <fast> <slow>";
 
 // the AO look, tuned with /ao (cmd.rs); HwParams.ao = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,8 +26,10 @@ pub struct AoSettings {
     pub radius: f32,
     pub rays: u32,
     pub strength: f32,
-    pub samples: u32,  // accumulation cap per texel
-    pub enabled: bool, // off: no AO rays, the mesher's vertex AO instead (vertex_ao_wanted)
+    pub samples: u32,     // accumulation cap per texel while still
+    pub motion_fast: u32, // ... while the camera moves fast (motion_cap)
+    pub motion_slow: u32, // ... while it moves slowly
+    pub enabled: bool,    // off: no AO rays, the mesher's vertex AO instead (vertex_ao_wanted)
 }
 
 impl Default for AoSettings {
@@ -34,6 +39,8 @@ impl Default for AoSettings {
             rays: DEFAULT_RAYS,
             strength: DEFAULT_STRENGTH,
             samples: DEFAULT_SAMPLES,
+            motion_fast: DEFAULT_MOTION_FAST,
+            motion_slow: DEFAULT_MOTION_SLOW,
             enabled: true,
         }
     }
@@ -68,9 +75,13 @@ impl AoSettings {
                 self.samples = n;
                 self.enabled = true;
             }
+            AoCommand::Motion(fast, slow) => {
+                (self.motion_fast, self.motion_slow) = (fast, slow);
+                self.enabled = true;
+            }
         }
         format!(
-            "AO: {}, radius {:.2}, rays {}, strength {:.2}, samples {}",
+            "AO: {}, radius {:.2}, rays {}, strength {:.2}, samples {}, motion {}/{}",
             if self.enabled {
                 "ray traced"
             } else {
@@ -79,7 +90,9 @@ impl AoSettings {
             self.radius,
             self.rays,
             self.strength,
-            self.samples
+            self.samples,
+            self.motion_fast,
+            self.motion_slow
         )
     }
 }
@@ -93,6 +106,7 @@ pub enum AoCommand {
     Rays(u32),
     Strength(f32),
     Samples(u32),
+    Motion(u32, u32), // fast, slow
 }
 
 impl AoCommand {
@@ -116,6 +130,10 @@ impl AoCommand {
                 .map(AoCommand::Rays)
                 .ok_or(AO_USAGE),
             ["strength", v] => float(v, 0.0, 1.0).map(AoCommand::Strength),
+            ["motion", fast, slow] => match (fast.parse::<u32>(), slow.parse::<u32>()) {
+                (Ok(f), Ok(s)) if 1 <= f && f <= s && s <= 256 => Ok(AoCommand::Motion(f, s)),
+                _ => Err(AO_USAGE),
+            },
             ["samples", v] => v
                 .parse::<u32>()
                 .ok()
@@ -157,50 +175,68 @@ pub fn sample_offset(frame: u32) -> (u32, u32) {
     BAYER[(frame % 16) as usize]
 }
 
-// the AO fill's radius in shadow texels, `frames` after a reset: wide enough to bridge the gaps between
-// the sparse samples right after it, narrow (sharp contact AO) once every texel has its own
-pub fn fill_radius_texels(frames: u32) -> f32 {
-    (2.0 * BLOCK as f32 / (frames as f32 + 1.0).sqrt()).max(1.5)
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
-// what the accumulated AO depends on besides the camera and the meshes
+// mirror of rt_hw.wgsl's AO fill radius, in shadow texels, from the centre texel's sample count: wide
+// enough to bridge the gaps between sparse samples where a surface just appeared, narrow (sharp
+// contact AO) where it has many
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fill_radius_for_count(count: f32) -> f32 {
+    (2.0 * BLOCK as f32 / (count + 1.0).sqrt()).clamp(1.5, 8.0)
+}
+
+// mirror of rt_hw.wgsl's accumulation cap for a texel whose history moved `m` texels on screen since
+// the last frame: the full cap while still, toward `slow` up to half a texel, `fast` from 8 texels on
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn motion_cap(m: f32, samples: f32, slow: f32, fast: f32) -> f32 {
+    let still_to_slow = samples + (slow - samples) * smoothstep(0.05, 0.5, m);
+    still_to_slow + (fast - still_to_slow) * smoothstep(0.5, 8.0, m)
+}
+
+// mirror of rt_hw.wgsl's reprojection: world point p (planet frame) through last frame's view-projection
+// onto the shadow targets (`size`), in texel coordinates with texel centres at integers; None behind the
+// camera
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn reproject(p: glam::Vec3, view_proj: glam::Mat4, size: (u32, u32)) -> Option<glam::Vec2> {
+    let clip = view_proj * p.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate().truncate() / clip.w;
+    let uv = glam::Vec2::new(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    Some(uv * glam::Vec2::new(size.0 as f32, size.1 as f32) - 0.5)
+}
+
+// what the accumulated AO depends on besides block edits (camera movement is reprojected)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AoKey {
     pub settings: AoSettings,
     pub size: (u32, u32), // shadow targets
 }
 
-// frames since the progressive AO was last reset, and the running frame index (sample rotation)
+// frames since the progressive AO was last fully reset, and the running frame index (sample rotation)
 #[derive(Default)]
 pub struct AoProgress {
     frame: u32,
     frames: u32,
-    pose: Option<(glam::Vec3, glam::Vec3, glam::Vec3)>,
-    epoch: u64,
+    epoch: Option<u64>,
     key: Option<AoKey>,
 }
 
 impl AoProgress {
-    // this frame's camera (position, forward, up), the renderer's mesh epoch and the AO key: returns the
-    // frames since the last reset, 0 when anything changed (the accumulation starts over)
-    pub fn advance(
-        &mut self,
-        pos: glam::Vec3,
-        forward: glam::Vec3,
-        up: glam::Vec3,
-        epoch: u64,
-        key: AoKey,
-    ) -> u32 {
-        let still = self.pose.is_some_and(|(p, f, u)| {
-            p.distance(pos) <= 1e-4 && f.dot(forward) > 1.0 - 1e-7 && u.dot(up) > 1.0 - 1e-7
-        });
-        if still && self.epoch == epoch && self.key == Some(key) {
+    // the renderer's edit epoch (bumped by block edits) and the AO key: returns the frames since the
+    // last full reset, 0 when either changed (the accumulation starts over); camera movement and
+    // chunk streaming don't reset, the reprojection carries the accumulation across them
+    pub fn advance(&mut self, edit_epoch: u64, key: AoKey) -> u32 {
+        if self.epoch == Some(edit_epoch) && self.key == Some(key) {
             self.frames = self.frames.saturating_add(1);
         } else {
             self.frames = 0;
         }
-        self.pose = Some((pos, forward, up));
-        self.epoch = epoch;
+        self.epoch = Some(edit_epoch);
         self.key = Some(key);
         self.frame = self.frame.wrapping_add(1);
         self.frames
@@ -325,44 +361,106 @@ mod tests {
         assert_eq!(quads.len(), 4);
     }
 
-    // right after a reset the fill bridges the 4x4 gaps; converged it's narrow
+    // the fill bridges the 4x4 gaps where a texel has no samples yet; with samples it's narrow
     #[test]
-    fn fill_radius_shrinks_as_samples_arrive() {
-        assert_eq!(fill_radius_texels(0), 8.0);
-        assert!(fill_radius_texels(15) <= 2.0);
-        assert_eq!(fill_radius_texels(1000), 1.5);
-        assert!((0..100).all(|n| fill_radius_texels(n + 1) <= fill_radius_texels(n)));
+    fn fill_radius_follows_the_sample_count() {
+        assert_eq!(fill_radius_for_count(0.0), 8.0);
+        assert!(fill_radius_for_count(15.0) <= 2.0);
+        assert_eq!(fill_radius_for_count(1000.0), 1.5);
+        assert!((0..100)
+            .all(|n| fill_radius_for_count(n as f32 + 1.0) <= fill_radius_for_count(n as f32)));
     }
 
-    // frames since the last reset: counts up while nothing changes, back to 0 on any change
+    // still: the full cap; slow: toward `slow`; fast: `fast`
     #[test]
-    fn progress_resets_on_any_change() {
-        use glam::Vec3;
+    fn cap_shrinks_with_screen_motion() {
+        assert_eq!(motion_cap(0.0, 64.0, 32.0, 4.0), 64.0);
+        assert!((motion_cap(0.5, 64.0, 32.0, 4.0) - 32.0).abs() < 1e-4);
+        assert_eq!(motion_cap(8.0, 64.0, 32.0, 4.0), 4.0);
+        assert_eq!(motion_cap(50.0, 64.0, 32.0, 4.0), 4.0);
+        let caps: Vec<f32> = (0..200)
+            .map(|i| motion_cap(i as f32 * 0.05, 64.0, 32.0, 4.0))
+            .collect();
+        assert!(caps.windows(2).all(|w| w[1] <= w[0] + 1e-5));
+    }
+
+    // a world point onto the previous frame's shadow-target texel (centres at integer coordinates)
+    #[test]
+    fn reprojection_lands_on_the_right_texel() {
+        use glam::{Mat4, Vec3};
+        let size = (200u32, 100u32);
+        let proj = Mat4::perspective_rh(1.2, 2.0, 0.1, 1000.0);
+        let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let vp = proj * view;
+        // straight ahead: the centre of the target (texel centres at k + 0.5 → coordinate k)
+        let q = reproject(Vec3::new(0.0, 0.0, -10.0), vp, size).unwrap();
+        assert!(
+            (q.x - 99.5).abs() < 1e-3 && (q.y - 49.5).abs() < 1e-3,
+            "{q}"
+        );
+        // up on screen is a smaller y (rows count down from the top)
+        let up = reproject(Vec3::new(0.0, 1.0, -10.0), vp, size).unwrap();
+        assert!(up.y < q.y);
+        // a camera moved sideways by one texel's width at the point's depth: one texel off
+        let texel_world = 2.0 * 10.0 * (1.2f32 / 2.0).tan() / size.1 as f32;
+        let moved = Mat4::look_at_rh(
+            Vec3::X * texel_world,
+            Vec3::X * texel_world + Vec3::NEG_Z,
+            Vec3::Y,
+        );
+        let q2 = reproject(Vec3::new(0.0, 0.0, -10.0), proj * moved, size).unwrap();
+        assert!((q.x - q2.x - 1.0).abs() < 1e-2, "{q} {q2}");
+        // behind the camera: no history
+        assert!(reproject(Vec3::new(0.0, 0.0, 10.0), vp, size).is_none());
+    }
+
+    // only settings, target size and block edits start the accumulation over; camera movement and
+    // chunk streaming don't (reprojection carries it)
+    #[test]
+    fn progress_resets_on_settings_size_and_edits() {
         let key = AoKey {
             settings: AoSettings::default(),
             size: (100, 50),
         };
-        let (p, f, u) = (Vec3::new(1.0, 2.0, 3.0), Vec3::Z, Vec3::Y);
         let mut a = AoProgress::default();
-        assert_eq!(a.advance(p, f, u, 7, key), 0);
-        assert_eq!(a.advance(p, f, u, 7, key), 1);
-        assert_eq!(a.advance(p + Vec3::splat(1e-6), f, u, 7, key), 2); // below tolerance
-        let q = p + Vec3::X * 0.01;
-        assert_eq!(a.advance(q, f, u, 7, key), 0); // moved
-        assert_eq!(a.advance(q, f, u, 7, key), 1);
-        let turned = (f + Vec3::X * 0.01).normalize();
-        assert_eq!(a.advance(q, turned, u, 7, key), 0); // turned
-        assert_eq!(a.advance(q, turned, u, 8, key), 0); // meshes changed
+        assert_eq!(a.advance(7, key), 0);
+        assert_eq!(a.advance(7, key), 1);
+        assert_eq!(a.advance(7, key), 2);
+        assert_eq!(a.advance(8, key), 0); // a block edit
         let mut other = key;
         other.settings.rays = 4;
-        assert_eq!(a.advance(q, turned, u, 8, other), 0); // settings
+        assert_eq!(a.advance(8, other), 0); // settings
         other.size = (101, 50);
-        assert_eq!(a.advance(q, turned, u, 8, other), 0); // targets resized
-        assert_eq!(a.advance(q, turned, u, 8, other), 1);
+        assert_eq!(a.advance(8, other), 0); // targets resized
+        assert_eq!(a.advance(8, other), 1);
         assert_eq!(a.frames(), 1);
-        // the frame index keeps running across resets (the Bayer rotation)
         let before = a.frame();
-        a.advance(p, f, u, 9, key);
+        a.advance(8, other);
         assert_eq!(a.frame(), before + 1);
+    }
+
+    #[test]
+    fn motion_caps_are_set_and_checked() {
+        let mut s = AoSettings::default();
+        assert_eq!(
+            (s.motion_fast, s.motion_slow),
+            (DEFAULT_MOTION_FAST, DEFAULT_MOTION_SLOW)
+        );
+        assert_eq!((DEFAULT_MOTION_FAST, DEFAULT_MOTION_SLOW), (4, 32));
+        assert_eq!(
+            AoCommand::parse(&["motion", "4", "32"]),
+            Ok(AoCommand::Motion(4, 32))
+        );
+        for bad in [
+            &["motion", "8", "4"][..],
+            &["motion", "0", "4"],
+            &["motion", "4", "300"],
+            &["motion", "4"],
+        ] {
+            assert_eq!(AoCommand::parse(bad), Err(AO_USAGE), "{bad:?}");
+        }
+        s.apply(AoCommand::Motion(2, 16));
+        assert_eq!((s.motion_fast, s.motion_slow), (2, 16));
+        assert!(s.apply(AoCommand::Get).contains("motion 2/16"));
     }
 }
