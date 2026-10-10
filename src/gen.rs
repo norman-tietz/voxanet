@@ -1929,45 +1929,6 @@ impl MeshGen {
         (verts, inds)
     }
 
-    pub fn generate_crosshair() -> (Vec<Vertex>, Vec<u32>) {
-        let s = 0.02; // size relative to screen (2%)
-        let color = [1.0, 1.0, 1.0];
-        let normal = [0.0, 0.0, 1.0];
-
-        let verts = vec![
-            Vertex {
-                pos: [-s, 0.0, 0.0],
-                color,
-                normal,
-                water: 0.0,
-                edge: Vertex::NO_EDGE,
-            },
-            Vertex {
-                pos: [s, 0.0, 0.0],
-                color,
-                normal,
-                water: 0.0,
-                edge: Vertex::NO_EDGE,
-            },
-            Vertex {
-                pos: [0.0, -s, 0.0],
-                color,
-                normal,
-                water: 0.0,
-                edge: Vertex::NO_EDGE,
-            },
-            Vertex {
-                pos: [0.0, s, 0.0],
-                color,
-                normal,
-                water: 0.0,
-                edge: Vertex::NO_EDGE,
-            },
-        ];
-        let inds = vec![0, 1, 2, 3];
-        (verts, inds)
-    }
-
     // the normal is flipped to point away from block_center: the (u, v, layer) basis is left-handed on
     // some cube faces, so the winding alone doesn't tell which side is outside
     fn quad(

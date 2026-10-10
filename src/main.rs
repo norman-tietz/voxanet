@@ -220,6 +220,14 @@ fn install_world(
     renderer.log_memory(planet);
 }
 
+// the block the player targets (selection box, mining, placing, picking): none while flying
+fn cursor_target(
+    flying: bool,
+    hit: Option<crate::common::BlockId>,
+) -> Option<crate::common::BlockId> {
+    hit.filter(|_| !flying)
+}
+
 // the HUD status line for a refused edit; None: the block would overlap the player
 fn edit_refused_message(why: Option<crate::common::EditRefused>) -> &'static str {
     use crate::common::EditRefused;
@@ -418,7 +426,8 @@ impl Game {
                 let width = renderer.config.width as f32;
                 let height = renderer.config.height as f32;
                 let ray_result = controller.raycast(player, planet, width, height, false);
-                controller.cursor_id = ray_result.map(|(id, _)| id);
+                controller.cursor_id =
+                    cursor_target(controller.fly_mode, ray_result.map(|(id, _)| id));
 
                 renderer.update_cursor(planet, controller.cursor_id);
                 renderer.update_view(player.position, planet);
@@ -876,7 +885,10 @@ impl Game {
                     renderer.window.set_cursor_visible(false);
                 } else if matches!(self.mode, GameMode::Planet) {
                     let is_right = button == MouseButton::Right;
-                    if let Some(id) = controller.cursor_id {
+                    if controller.fly_mode && button != MouseButton::Middle {
+                        // no block editing in fly mode (cursor_target): say so instead of ignoring it
+                        renderer.show_status("Land to build.");
+                    } else if let Some(id) = controller.cursor_id {
                         if button == MouseButton::Middle {
                             // pick the targeted block's type for placing (the bedrock core isn't placeable)
                             if let Some(ty) = planet.block_type(id).filter(|ty| {
@@ -1086,6 +1098,20 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // no block targeted (no selection box, no mining, placing or picking) while flying
+    #[test]
+    fn blocks_are_targeted_only_when_not_flying() {
+        let id = crate::common::BlockId {
+            face: 1,
+            layer: 20,
+            u: 3,
+            v: 4,
+        };
+        assert_eq!(cursor_target(false, Some(id)), Some(id));
+        assert_eq!(cursor_target(true, Some(id)), None);
+        assert_eq!(cursor_target(false, None), None);
+    }
 
     fn mined_planet() -> PlanetData {
         let mut planet = PlanetData::new(32);

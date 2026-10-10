@@ -194,10 +194,6 @@ pub struct Renderer {
     player_i_buf: wgpu::Buffer,
     player_inds: u32,
 
-    cross_v_buf: wgpu::Buffer,
-    cross_i_buf: wgpu::Buffer,
-    cross_inds: u32,
-
     cursor_v_buf: wgpu::Buffer,
     cursor_i_buf: wgpu::Buffer,
     cursor_inds: u32,
@@ -890,7 +886,7 @@ impl Renderer {
         });
 
         // film look over the finished frame: "2x multiply" (out = 2 · src · dst), alpha kept. Two variants:
-        // planet mode draws it in the lighting pass (depth attached) under the crosshair and console,
+        // planet mode draws it in the lighting pass (depth attached) under the console,
         // galaxy mode in its HUD pass (no depth)
         let film_pipeline_for = |depth: Option<wgpu::DepthStencilState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -949,18 +945,6 @@ impl Renderer {
         let player_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&pi),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let (cv, ci) = MeshGen::generate_crosshair();
-        let cross_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&cv),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let cross_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&ci),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -1112,9 +1096,6 @@ impl Renderer {
             console_v_buf,
             console_i_buf,
             console_inds: 0,
-            cross_v_buf,
-            cross_i_buf,
-            cross_inds: ci.len() as u32,
             global_bind_identity,
             cursor_v_buf,
             cursor_i_buf,
@@ -2860,17 +2841,8 @@ impl Renderer {
                 pass.draw_indexed(0..self.cursor_inds, 0, 0..1);
             }
 
-            // the camera image ends here: grain and vignette under the crosshair and console
+            // the camera image ends here: grain and vignette under the console
             self.draw_film(&mut pass, film, true);
-
-            if controller.first_person {
-                pass.set_pipeline(&self.pipeline_line);
-                pass.set_bind_group(0, &self.global_bind_identity, &[]);
-                pass.set_bind_group(1, &self.local_bind_identity, &[]);
-                pass.set_vertex_buffer(0, self.cross_v_buf.slice(..));
-                pass.set_index_buffer(self.cross_i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.cross_inds, 0, 0..1);
-            }
 
             if self.console_inds > 0 {
                 pass.set_pipeline(&self.pipeline_ui);

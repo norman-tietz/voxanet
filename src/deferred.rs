@@ -7,7 +7,7 @@
 // 3. lighting pass (fs_light): a full-screen triangle that shades each pixel once (shade() in shader.wgsl)
 // While radial motion blur is active, step 3 is split: fs_shade shades each pixel once into `shaded`, then
 // fs_motion_blur blurs that image onto the swapchain (shader.wgsl explains why).
-// The translucent water surface (fs_water) and the overlays (cursor box, collision lines, crosshair,
+// The translucent water surface (fs_water) and the overlays (cursor box, collision lines,
 // console) are drawn forward after the lighting pass, depth-tested against the G-buffer depth.
 
 use crate::common::{LodMorph, Vertex};
