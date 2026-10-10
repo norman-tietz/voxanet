@@ -7,8 +7,11 @@ pub const DEFAULT_ROUGHNESS: f32 = 0.35; // satin plastic
 pub const DEFAULT_SPECULAR: f32 = 1.0; // scales highlight and reflection; 0 = the old diffuse look
 pub const DEFAULT_SMUDGE: f32 = 0.3; // roughness added in smudged patches
 pub const DEFAULT_SCRATCH: f32 = 0.2; // roughness added along scratches
+                                      // weight of the sky reflection (the sun highlight keeps the full specular strength): physically plastic
+                                      // reflects ~13 % at typical viewing angles, which under a bright bluish sky washed the block colours out
+pub const DEFAULT_REFLECTION: f32 = 0.15;
 pub const PLASTIC_USAGE: &str =
-    "Usage: /plastic get|on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>";
+    "Usage: /plastic get|on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>|reflection <0-1>";
 
 // the plastic look, tuned with /plastic (cmd.rs); GlobalUniform.plastic = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,7 +20,8 @@ pub struct PlasticSettings {
     pub specular: f32,
     pub smudge: f32,
     pub scratch: f32,
-    pub enabled: bool, // off: no specular (the old diffuse look), the values kept for /plastic on
+    pub reflection: f32, // weight of the sky reflection
+    pub enabled: bool,   // off: no specular (the old diffuse look), the values kept for /plastic on
 }
 
 impl Default for PlasticSettings {
@@ -27,6 +31,7 @@ impl Default for PlasticSettings {
             specular: DEFAULT_SPECULAR,
             smudge: DEFAULT_SMUDGE,
             scratch: DEFAULT_SCRATCH,
+            reflection: DEFAULT_REFLECTION,
             enabled: true,
         }
     }
@@ -39,6 +44,11 @@ impl PlasticSettings {
         [self.roughness, specular, self.smudge, self.scratch]
     }
 
+    // shader.wgsl Global.plastic_ext: x = sky reflection weight
+    pub fn uniform_ext(&self) -> [f32; 4] {
+        [self.reflection, 0.0, 0.0, 0.0]
+    }
+
     // applies a /plastic command; returns the line to log
     pub fn apply(&mut self, cmd: PlasticCommand) -> String {
         match cmd {
@@ -49,14 +59,16 @@ impl PlasticSettings {
             PlasticCommand::Specular(v) => (self.specular, self.enabled) = (v, true),
             PlasticCommand::Smudge(v) => (self.smudge, self.enabled) = (v, true),
             PlasticCommand::Scratch(v) => (self.scratch, self.enabled) = (v, true),
+            PlasticCommand::Reflection(v) => (self.reflection, self.enabled) = (v, true),
         }
         format!(
-            "Plastic: {}, roughness {:.2}, specular {:.2}, smudge {:.2}, scratch {:.2}",
+            "Plastic: {}, roughness {:.2}, specular {:.2}, smudge {:.2}, scratch {:.2}, reflection {:.2}",
             if self.enabled { "on" } else { "off" },
             self.roughness,
             self.specular,
             self.smudge,
-            self.scratch
+            self.scratch,
+            self.reflection
         )
     }
 }
@@ -70,6 +82,7 @@ pub enum PlasticCommand {
     Specular(f32),
     Smudge(f32),
     Scratch(f32),
+    Reflection(f32),
 }
 
 impl PlasticCommand {
@@ -89,6 +102,7 @@ impl PlasticCommand {
             ["specular", v] => value(v, 0.0, 2.0).map(PlasticCommand::Specular),
             ["smudge", v] => value(v, 0.0, 1.0).map(PlasticCommand::Smudge),
             ["scratch", v] => value(v, 0.0, 1.0).map(PlasticCommand::Scratch),
+            ["reflection", v] => value(v, 0.0, 1.0).map(PlasticCommand::Reflection),
             _ => Err(PLASTIC_USAGE),
         }
     }
@@ -239,5 +253,26 @@ mod tests {
         let src = include_str!("atmosphere.wgsl");
         assert!(src.contains(&format!("const PLASTIC_F0: f32 = {PLASTIC_F0};")));
         assert!(src.contains("fn atmo_plastic("));
+    }
+    // the sky reflection has its own weight: physically ~13 % at typical angles, which washed the block
+    // colours out under a bright sky; the sun highlight keeps the full strength
+    #[test]
+    fn reflection_has_its_own_weight() {
+        let mut s = PlasticSettings::default();
+        assert_eq!(DEFAULT_REFLECTION, 0.15);
+        assert_eq!(s.uniform_ext(), [DEFAULT_REFLECTION, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            PlasticCommand::parse(&["reflection", "0.5"]),
+            Ok(PlasticCommand::Reflection(0.5))
+        );
+        assert_eq!(
+            PlasticCommand::parse(&["reflection", "1.5"]),
+            Err(PLASTIC_USAGE)
+        );
+        s.apply(PlasticCommand::Off);
+        s.apply(PlasticCommand::Reflection(0.5));
+        assert!(s.enabled);
+        assert_eq!(s.uniform_ext()[0], 0.5);
+        assert!(s.apply(PlasticCommand::Get).contains("reflection 0.50"));
     }
 }

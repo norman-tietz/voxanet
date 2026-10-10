@@ -59,6 +59,7 @@ pub struct GlobalUniform {
     pub motion: [f32; 4], // x: radial motion blur strength 0..1 (fs_light), from the player's current speed; y: radians per screen pixel (cloud map level of detail)
     pub bevel: [f32; 4], // x: block bevel width in world units (0 = off), y: cavity darkening (bevel.rs, fs_geom)
     pub plastic: [f32; 4], // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
+    pub plastic_ext: [f32; 4], // x: sky reflection weight (plastic.rs)
 }
 
 #[repr(C)]
@@ -986,6 +987,7 @@ impl Renderer {
             motion: [0.0, 0.0, 0.0, 0.0],
             bevel: [0.0; 4],   // overlays aren't bevelled
             plastic: [0.0; 4], // nor glossy
+            plastic_ext: [0.0; 4],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2481,6 +2483,7 @@ impl Renderer {
             ],
             bevel: self.bevel.uniform(),
             plastic: self.plastic.uniform(),
+            plastic_ext: self.plastic.uniform_ext(),
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));

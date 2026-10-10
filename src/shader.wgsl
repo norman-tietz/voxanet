@@ -10,6 +10,7 @@ struct Global {
     motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed; y: radians per screen pixel (clouds.wgsl)
     bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening (fs_geom, bevel.rs)
     plastic: vec4<f32>, // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
+    plastic_ext: vec4<f32>, // x: sky reflection weight (plastic.rs)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -566,7 +567,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // D. Plastic: GGX sun highlight (in full shadow none: the hard shadow, not the softened one) and the
     // sky reflection (atmosphere.wgsl), taking their share of the light from the diffuse terms
     let pl = atmo_plastic(N, V, L, world_pos, biome.sun.rgb * shadow_raw * clouded, ambient_light,
-                          roughness, global.plastic.y, sa.y, engine_atmosphere());
+                          roughness, global.plastic.y, global.plastic_ext.x, sa.y, engine_atmosphere());
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)

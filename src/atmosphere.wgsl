@@ -259,10 +259,12 @@ struct Plastic {
 // glossy plastic at a surface point (planet frame): a GGX sun highlight (Trowbridge-Reitz distribution,
 // Schlick Fresnel, Smith-Schlick visibility) lit by `sun` (sun colour x shadow x cloud shadow), and the
 // sky along the reflection (dome x opacity, so dark at night; the ground below the local horizon;
-// blended toward `ambient` with roughness, a cheap stand-in for a pre-filtered environment), times `ao`.
+// blended toward `ambient` with roughness, a cheap stand-in for a pre-filtered environment), times `ao`
+// and `reflection` (its own weight: at the physical ~13 % a bright sky washed block colours out).
 // strength 0: no specular and diffuse_w 1, the purely diffuse look. Mirrored in plastic.rs.
 fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: vec3<f32>,
-                ambient: vec3<f32>, roughness: f32, strength: f32, ao: f32, a: Atmosphere) -> Plastic {
+                ambient: vec3<f32>, roughness: f32, strength: f32, reflection: f32, ao: f32,
+                a: Atmosphere) -> Plastic {
     if (strength <= 0.0) {
         return Plastic(vec3<f32>(0.0), 1.0);
     }
@@ -288,5 +290,6 @@ fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: v
     var env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
     env = mix(env, ambient, r);
     let F_env = PLASTIC_F0 + (max(1.0 - r, PLASTIC_F0) - PLASTIC_F0) * pow(1.0 - n_v, 5.0);
-    return Plastic(strength * (highlight + F_env * env * ao), 1.0 - strength * F_env);
+    let F_refl = F_env * reflection;
+    return Plastic(strength * (highlight + F_refl * env * ao), 1.0 - strength * F_refl);
 }
