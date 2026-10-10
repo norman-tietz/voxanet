@@ -252,7 +252,9 @@ pub struct Renderer {
     ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
     edit_epoch: u64, // bumped by block edits and full reloads: the progressive AO starts over
     prev_ao_view: Option<(glam::Mat4, Vec3)>, // last frame's view-projection and camera (AO reprojection)
-    film_pipeline: wgpu::RenderPipeline,      // galaxy HUD pass (no depth)
+    ao_geometry_epoch: u64, // bumped when a mesh within reach of the AO comes or goes (ao::AoRefresh)
+    ao_refresh: crate::ao::AoRefresh,
+    film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
     film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
     film_buf: wgpu::Buffer,
     film_bind: wgpu::BindGroup,
@@ -1074,6 +1076,8 @@ impl Renderer {
             ao_progress: Default::default(),
             edit_epoch: 0,
             prev_ao_view: None,
+            ao_geometry_epoch: 0,
+            ao_refresh: Default::default(),
             film_pipeline,
             film_pipeline_depth,
             film_buf,
@@ -1527,6 +1531,9 @@ impl Renderer {
                 continue;
             }
             if let Some(mesh) = self.lod_chunks.remove(&k) {
+                if self.near_ao(mesh.center, mesh.radius) {
+                    self.ao_geometry_epoch += 1;
+                }
                 self.animator.retire(AnyKey::Lod(k), mesh);
             }
         }
@@ -1561,6 +1568,9 @@ impl Renderer {
                 )
             {
                 if let Some(mesh) = self.chunks.remove(&k) {
+                    if self.near_ao(mesh.center, mesh.radius) {
+                        self.ao_geometry_epoch += 1;
+                    }
                     self.animator.retire(AnyKey::Voxel(k), mesh);
                 }
             }
@@ -1827,6 +1837,9 @@ impl Renderer {
         }
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
+        if self.near_ao(real_center, real_radius) {
+            self.ao_geometry_epoch += 1;
+        }
         self.lod_chunks.insert(
             key,
             ChunkMesh {
@@ -1846,6 +1859,12 @@ impl Renderer {
             },
         );
         self.animator.start_spawn(AnyKey::Lod(key));
+    }
+    // whether a mesh coming or going can change the AO on screen (ao::AoRefresh); before the first
+    // frame there is no AO to refresh
+    fn near_ao(&self, center: Vec3, radius: f32) -> bool {
+        self.prev_ao_view
+            .is_some_and(|(_, cam)| crate::ao::within_ao_reach(center, radius, cam, self.ao.radius))
     }
     fn process_load_queue(&mut self, _player_pos: Vec3, planet: &PlanetData) {
         let mut upload_budget = 4;
@@ -2107,6 +2126,9 @@ impl Renderer {
         }
         let real_center = (min + max) * 0.5;
         let real_radius = min.distance(max) * 0.5;
+        if self.near_ao(real_center, real_radius) {
+            self.ao_geometry_epoch += 1;
+        }
         self.chunks.insert(
             key,
             ChunkMesh {
@@ -2724,7 +2746,7 @@ impl Renderer {
                     ao: self.ao.uniform(),
                     frame,
                     frames,
-                    cap: self.ao.samples,
+                    cap: self.ao_refresh.still_cap(self.ao_geometry_epoch, &self.ao),
                     block: crate::ao::BLOCK,
                     offset: [ox, oy],
                     slow_cap: self.ao.motion_slow as f32,

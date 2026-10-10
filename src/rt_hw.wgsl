@@ -161,6 +161,21 @@ fn ao_motion_cap(m: f32) -> f32 {
     return mix(still_to_slow, aop.fast_cap, smoothstep(0.5, 8.0, m));
 }
 
+// how much this texel's camera distance changes per texel across its surface: the smaller of the
+// forward and backward differences per axis (the larger one may cross a silhouette), summed over both
+// axes since a bilinear tap lies up to a texel away in each. Grazing surfaces change by several percent
+// per texel, more than the history's plain depth tolerance; capped so slivers don't accept anything.
+fn depth_slope(p: vec2<i32>, size: vec2<u32>, d: f32) -> f32 {
+    let hi = vec2<i32>(size) - 1;
+    let l = textureLoad(g_pos, clamp(p - vec2<i32>(1, 0), vec2<i32>(0), hi), 0).w;
+    let r = textureLoad(g_pos, clamp(p + vec2<i32>(1, 0), vec2<i32>(0), hi), 0).w;
+    let u = textureLoad(g_pos, clamp(p - vec2<i32>(0, 1), vec2<i32>(0), hi), 0).w;
+    let b = textureLoad(g_pos, clamp(p + vec2<i32>(0, 1), vec2<i32>(0), hi), 0).w;
+    let sx = min(abs(l - d), abs(r - d));
+    let sy = min(abs(u - d), abs(b - d));
+    return min(sx + sy, 0.1 * d);
+}
+
 // the running mean per texel: (mean, sample count, distance). The history is read reprojected: this
 // texel's world point through last frame's view-projection (mirror: ao::reproject), bilinear over the
 // four history texels whose stored distance matches the point's distance from last frame's camera
@@ -192,7 +207,8 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
             let offset = (prev.xy / prev.w - cur.xy / cur.w) * texel;
             let q = vec2<f32>(id.xy) + offset;
             let expected = distance(aop.prev_cam.xyz, g.xyz);
-            let tol = 0.02 * expected + 0.02;
+            var tol = 0.02 * expected + 0.02;
+            var widened = false;
             let base = vec2<i32>(floor(q));
             let f = q - floor(q);
             var msum = 0.0;
@@ -206,7 +222,14 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
                 let t = base + o;
                 if (any(t < vec2<i32>(0)) || any(t >= vec2<i32>(size))) { continue; }
                 let h = textureLoad(acc_prev, t, 0);
-                if (h.y <= 0.0 || abs(h.z - expected) > tol) { continue; }
+                if (h.y <= 0.0) { continue; }
+                // off by more than the plain tolerance: maybe a grazing surface (depth_slope, read
+                // only then: most texels never need it)
+                if (abs(h.z - expected) > tol && !widened) {
+                    tol += depth_slope(p, size, g.w);
+                    widened = true;
+                }
+                if (abs(h.z - expected) > tol) { continue; }
                 msum += h.x * w;
                 csum += h.y * w;
                 wsum += w;
@@ -214,7 +237,9 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
             if (wsum > 1e-4) {
                 cap = ao_motion_cap(length(offset));
                 mean = msum / wsum;
-                count = min(csum / wsum, cap);
+                // not renormalised: a history only partly backed by valid taps counts for that share,
+                // so edges and disocclusions fill wider and take new samples faster
+                count = min(csum, cap);
             }
         }
     }

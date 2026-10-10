@@ -266,6 +266,51 @@ impl AoProgress {
     }
 }
 
+// geometry that changes the AO without changing the depth (a chunk or LOD mesh streaming in or out
+// next to converged ground) isn't caught by the reprojection's depth test: for REFRESH_FRAMES after
+// such a change within reach of the AO, the cap while still drops to motion_slow, so the stale part of
+// the running mean fades in ~motion_slow frames instead of ~samples (a full reset would flash)
+pub const REFRESH_FRAMES: u32 = 120;
+
+#[derive(Default)]
+pub struct AoRefresh {
+    epoch: Option<u64>,
+    since: u32,
+}
+
+impl AoRefresh {
+    // the renderer's geometry epoch (bumped by mesh changes within reach of the AO): this frame's cap
+    // while still
+    pub fn still_cap(&mut self, geometry_epoch: u64, s: &AoSettings) -> u32 {
+        if self.epoch == Some(geometry_epoch) {
+            self.since = self.since.saturating_add(1);
+        } else {
+            self.since = if self.epoch.is_some() {
+                0
+            } else {
+                REFRESH_FRAMES
+            };
+        }
+        self.epoch = Some(geometry_epoch);
+        if self.since < REFRESH_FRAMES {
+            s.samples.min(s.motion_slow)
+        } else {
+            s.samples
+        }
+    }
+}
+
+// whether a mesh's bounding sphere reaches the points that get AO (closer than FADE_END) or their AO
+// rays (radius)
+pub fn within_ao_reach(
+    center: glam::Vec3,
+    radius: f32,
+    camera: glam::Vec3,
+    ao_radius: f32,
+) -> bool {
+    center.distance(camera) - radius <= FADE_END + ao_radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +496,46 @@ mod tests {
         let before = a.frame();
         a.advance(8, other);
         assert_eq!(a.frame(), before + 1);
+    }
+
+    // a mesh change within reach of the AO lowers the cap while still to motion_slow for a while;
+    // the first frame (no epoch yet) isn't a change
+    #[test]
+    fn refresh_lowers_the_still_cap_after_geometry_changes() {
+        let s = AoSettings::default();
+        let mut r = AoRefresh::default();
+        assert_eq!(r.still_cap(3, &s), s.samples);
+        assert_eq!(r.still_cap(4, &s), s.motion_slow);
+        for _ in 1..REFRESH_FRAMES {
+            assert_eq!(r.still_cap(4, &s), s.motion_slow);
+        }
+        assert_eq!(r.still_cap(4, &s), s.samples);
+        // never above samples
+        let few = AoSettings { samples: 8, ..s };
+        assert_eq!(r.still_cap(5, &few), 8);
+    }
+
+    #[test]
+    fn ao_reach_covers_the_fade_range_and_the_rays() {
+        let cam = glam::Vec3::ZERO;
+        assert!(within_ao_reach(
+            glam::Vec3::new(410.0, 0.0, 0.0),
+            8.0,
+            cam,
+            3.0
+        ));
+        assert!(!within_ao_reach(
+            glam::Vec3::new(420.0, 0.0, 0.0),
+            8.0,
+            cam,
+            3.0
+        ));
+        assert!(within_ao_reach(
+            glam::Vec3::new(5.0, 0.0, 0.0),
+            1.0,
+            cam,
+            3.0
+        ));
     }
 
     #[test]
