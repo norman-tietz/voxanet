@@ -2733,6 +2733,7 @@ impl Renderer {
                     prev_view_proj: prev_view
                         .map_or(glam::Mat4::IDENTITY, |(m, _)| m)
                         .to_cols_array(),
+                    view_proj: mvp.to_cols_array(),
                 }
             });
             match self.hw_rt.as_mut().filter(|_| self.hw_shadows) {
@@ -3802,7 +3803,12 @@ pub(crate) mod tests {
         let acc = &acc[..acc.find("\n}\n").unwrap()];
         assert!(
             acc.contains("prev_view_proj"),
-            "history read at the same texel"
+            "history must be read reprojected"
+        );
+        // ... as a projection difference (this frame's matrix too), so a still camera reads its own texel
+        assert!(
+            acc.contains("aop.view_proj"),
+            "history offset must be prev minus current projection"
         );
         // the progressive AO's stages (hw_rt.rs): budgeted samples, accumulation, sparse fill
         for entry in [

@@ -3,8 +3,9 @@
 // written each shadow texel's world position, camera distance and normal. cs_shadow casts one ray per
 // texel toward the sun and writes (shadow, distance, 1) like the ray march (cs_march). The progressive AO
 // (ao.rs) runs in four more dispatches: cs_ao_sample casts AO rays for one texel per BLOCK x BLOCK block
-// (Bayer-rotated per frame), cs_ao_accumulate adds them to a running mean per texel (reset when the
-// camera or the meshes change), cs_ao_fill_h/_v fill and blur that sparse accumulation into the AO
+// (Bayer-rotated per frame), cs_ao_accumulate adds them to a running mean per texel (its history
+// reprojected from the last frame; reset on settings, size and block edits), cs_ao_fill_h/_v fill and
+// blur that sparse accumulation into the AO
 // texture the lighting upsamples (RtBlur::ao_out, group 2 binding 1 of the scene).
 // Kept in its own small module: ray-query code in the big scene shader made every fragment much slower.
 
@@ -27,6 +28,7 @@ struct AoParams {
     fast_cap: f32,
     prev_cam: vec4<f32>,          // xyz: last frame's camera (planet frame)
     prev_view_proj: mat4x4<f32>,  // last frame's view-projection: the history's reprojection
+    view_proj: mat4x4<f32>,       // this frame's: the history offset is the projection difference
 }
 
 @group(0) @binding(0) var g_pos: texture_2d<f32>;      // xyz world position, w camera distance (0 = sky)
@@ -42,7 +44,7 @@ struct AoParams {
 @group(1) @binding(2) var acc_prev: texture_2d<f32>;                        // accumulate: (mean, count, dist)
 @group(1) @binding(3) var acc_cur: texture_storage_2d<rgba16float, write>;  // accumulate
 @group(1) @binding(4) var acc_r: texture_2d<f32>;                           // fill_h
-@group(1) @binding(5) var fill_tmp_w: texture_storage_2d<rgba16float, write>; // fill_h: (sum, weight, dist)
+@group(1) @binding(5) var fill_tmp_w: texture_storage_2d<rgba16float, write>; // fill_h: (sum, weight, dist, radius)
 @group(1) @binding(6) var fill_tmp_r: texture_2d<f32>;                      // fill_v
 @group(1) @binding(7) var ao_out_w: texture_storage_2d<rgba16float, write>; // fill_v: (ao, dist)
 @group(1) @binding(8) var<uniform> aop: AoParams;
@@ -179,10 +181,16 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
     var count = 0.0;
     var cap = f32(aop.cap);
     if (aop.frames > 0u) {
-        let clip = aop.prev_view_proj * vec4<f32>(g.xyz, 1.0);
-        if (clip.w > 0.0) {
-            let ndc = clip.xy / clip.w;
-            let q = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * vec2<f32>(size) - 0.5;
+        // where last frame's and this frame's view-projection put this texel's world point (mirror:
+        // ao::history_offset): as a difference of the same formula, a still camera reads exactly its
+        // own texel, also where the shadow targets are smaller than the screen (their world points
+        // lie at screen-pixel centres, which don't reproject onto texel centres)
+        let prev = aop.prev_view_proj * vec4<f32>(g.xyz, 1.0);
+        let cur = aop.view_proj * vec4<f32>(g.xyz, 1.0);
+        if (prev.w > 0.0 && cur.w > 0.0) {
+            let texel = vec2<f32>(0.5, -0.5) * vec2<f32>(size);
+            let offset = (prev.xy / prev.w - cur.xy / cur.w) * texel;
+            let q = vec2<f32>(id.xy) + offset;
             let expected = distance(aop.prev_cam.xyz, g.xyz);
             let tol = 0.02 * expected + 0.02;
             let base = vec2<i32>(floor(q));
@@ -192,17 +200,19 @@ fn cs_ao_accumulate(@builtin(global_invocation_id) id: vec3<u32>) {
             var wsum = 0.0;
             for (var i = 0; i < 4; i++) {
                 let o = vec2<i32>(i & 1, i >> 1u);
+                let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+                // a still camera's offset is exactly 0: three of the taps weigh nothing, skip their loads
+                if (w <= 0.0) { continue; }
                 let t = base + o;
                 if (any(t < vec2<i32>(0)) || any(t >= vec2<i32>(size))) { continue; }
                 let h = textureLoad(acc_prev, t, 0);
                 if (h.y <= 0.0 || abs(h.z - expected) > tol) { continue; }
-                let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
                 msum += h.x * w;
                 csum += h.y * w;
                 wsum += w;
             }
             if (wsum > 1e-4) {
-                cap = ao_motion_cap(distance(q, vec2<f32>(id.xy)));
+                cap = ao_motion_cap(length(offset));
                 mean = msum / wsum;
                 count = min(csum / wsum, cap);
             }

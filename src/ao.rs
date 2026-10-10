@@ -210,6 +210,20 @@ pub fn reproject(p: glam::Vec3, view_proj: glam::Mat4, size: (u32, u32)) -> Opti
     Some(uv * glam::Vec2::new(size.0 as f32, size.1 as f32) - 0.5)
 }
 
+// mirror of rt_hw.wgsl's history offset: where last frame's view-projection put world point p minus
+// where this frame's puts it, in texels; read at the texel plus this. Measured as a difference of the
+// same formula, a still camera gives exactly 0, also where the shadow targets are smaller than the
+// screen (their world points lie at screen-pixel centres, which don't reproject onto texel centres)
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn history_offset(
+    p: glam::Vec3,
+    prev_view_proj: glam::Mat4,
+    view_proj: glam::Mat4,
+    size: (u32, u32),
+) -> Option<glam::Vec2> {
+    Some(reproject(p, prev_view_proj, size)? - reproject(p, view_proj, size)?)
+}
+
 // what the accumulated AO depends on besides block edits (camera movement is reprojected)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AoKey {
@@ -462,5 +476,41 @@ mod tests {
         s.apply(AoCommand::Motion(2, 16));
         assert_eq!((s.motion_fast, s.motion_slow), (2, 16));
         assert!(s.apply(AoCommand::Get).contains("motion 2/16"));
+    }
+    // the history offset is measured as last frame's projection minus this frame's of the same world
+    // point: with a still camera exactly 0, also where the shadow targets are smaller than the screen
+    // (their world points sit at screen-pixel centres, which don't reproject onto texel centres)
+    #[test]
+    fn history_offset_is_zero_for_a_still_camera() {
+        use glam::{Mat4, Vec3};
+        let size = (1549u32, 968u32);
+        let vp = Mat4::perspective_rh(1.4, 1920.0 / 1200.0, 0.1, 1000.0)
+            * Mat4::look_at_rh(
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(0.3, -0.2, -5.0),
+                Vec3::Y,
+            );
+        for p in [
+            Vec3::new(0.7, 0.1, -4.3),
+            Vec3::new(-2.0, 1.5, -9.9),
+            Vec3::new(3.3, -0.4, -2.2),
+        ] {
+            assert_eq!(
+                history_offset(p, vp, vp, size),
+                Some(glam::Vec2::ZERO),
+                "{p}"
+            );
+        }
+        // a camera turned a little: the offset is the projection difference
+        let turned = vp * Mat4::from_rotation_y(0.001);
+        let p = Vec3::new(0.7, 0.1, -4.3);
+        let off = history_offset(p, turned, vp, size).unwrap();
+        let expected = reproject(p, turned, size).unwrap() - reproject(p, vp, size).unwrap();
+        assert!(
+            (off - expected).length() < 1e-6 && off.length() > 0.1,
+            "{off}"
+        );
+        assert!(history_offset(Vec3::new(1.0, 2.0, 30.0), vp, vp, size).is_none());
+        // behind
     }
 }

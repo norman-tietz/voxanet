@@ -28,6 +28,7 @@ pub struct AoFrameParams {
     pub fast_cap: f32,
     pub prev_cam: [f32; 4],        // xyz: last frame's camera (planet frame)
     pub prev_view_proj: [f32; 16], // last frame's view-projection (the history's reprojection)
+    pub view_proj: [f32; 16],      // this frame's: the history offset is the projection difference
 }
 
 // the AO stages (rt_hw.wgsl entry point, group 1 bindings: storage writes, texture reads)
@@ -458,8 +459,9 @@ mod tests {
     // 48 and the previous view-projection (mat4x4) at 64
     #[test]
     fn ao_params_match_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<AoFrameParams>(), 128);
+        assert_eq!(std::mem::size_of::<AoFrameParams>(), 192);
         assert_eq!(std::mem::offset_of!(AoFrameParams, prev_cam), 48);
         assert_eq!(std::mem::offset_of!(AoFrameParams, prev_view_proj), 64);
+        assert_eq!(std::mem::offset_of!(AoFrameParams, view_proj), 128);
     }
 }
