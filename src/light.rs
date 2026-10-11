@@ -8,7 +8,7 @@ pub const DEFAULT_BOUNCE: f32 = 0.5;
 // how far diffuse sunlight wraps past the terminator (atmo_wrap_diffuse); 0 = plain Lambert, crisp
 pub const DEFAULT_WRAP: f32 = 0.0;
 const MAX_WRAP: f32 = 0.5;
-pub const LIGHT_USAGE: &str = "Usage: /light get|bounce <0-1>|wrap <0-0.5>";
+pub const LIGHT_USAGE: &str = "Usage: /light [bounce <0-1>|wrap <0-0.5>]";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightSettings {
@@ -59,7 +59,7 @@ impl LightCommand {
                 .ok_or(LIGHT_USAGE)
         };
         match args {
-            ["get"] => Ok(LightCommand::Get),
+            [] => Ok(LightCommand::Get),
             ["bounce", v] => value(v, 1.0).map(LightCommand::Bounce),
             ["wrap", v] => value(v, MAX_WRAP).map(LightCommand::Wrap),
             _ => Err(LIGHT_USAGE),
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn light_commands_parse_and_apply() {
-        assert_eq!(LightCommand::parse(&["get"]), Ok(LightCommand::Get));
+        assert_eq!(LightCommand::parse(&[]), Ok(LightCommand::Get));
         assert_eq!(
             LightCommand::parse(&["bounce", "0.8"]),
             Ok(LightCommand::Bounce(0.8))

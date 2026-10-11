@@ -11,7 +11,7 @@ pub const DEFAULT_SCRATCH: f32 = 0.2; // roughness added along scratches
                                       // reflects ~13 % at typical viewing angles, which under a bright bluish sky washed the block colours out
 pub const DEFAULT_REFLECTION: f32 = 0.15;
 pub const PLASTIC_USAGE: &str =
-    "Usage: /plastic get|on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>|reflection <0-1>";
+    "Usage: /plastic [on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>|reflection <0-1>]";
 
 // the plastic look, tuned with /plastic (cmd.rs); GlobalUniform.plastic = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,7 +102,7 @@ impl PlasticCommand {
                 .ok_or(PLASTIC_USAGE)
         };
         match args {
-            ["get"] => Ok(PlasticCommand::Get),
+            [] => Ok(PlasticCommand::Get),
             ["on"] => Ok(PlasticCommand::On),
             ["off"] => Ok(PlasticCommand::Off),
             ["roughness", v] => value(v, 0.05, 1.0).map(PlasticCommand::Roughness),
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn plastic_command_parses_and_checks_ranges() {
-        assert_eq!(PlasticCommand::parse(&["get"]), Ok(PlasticCommand::Get));
+        assert_eq!(PlasticCommand::parse(&[]), Ok(PlasticCommand::Get));
         assert_eq!(PlasticCommand::parse(&["on"]), Ok(PlasticCommand::On));
         assert_eq!(PlasticCommand::parse(&["off"]), Ok(PlasticCommand::Off));
         assert_eq!(
@@ -215,7 +215,6 @@ mod tests {
             &["smudge", "-0.1"],
             &["scratch", "x"],
             &["roughness"],
-            &[],
             &["nope"],
         ] {
             assert_eq!(PlasticCommand::parse(bad), Err(PLASTIC_USAGE), "{bad:?}");

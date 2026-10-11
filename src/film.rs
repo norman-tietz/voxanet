@@ -5,7 +5,7 @@
 pub const DEFAULT_GRAIN: f32 = MAX_GRAIN; // ± per-pixel brightness noise, as a fraction (weaker was invisible)
 pub const DEFAULT_VIGNETTE: f32 = 0.25; // how much darker the corners get
 const MAX_GRAIN: f32 = 0.2;
-pub const FILM_USAGE: &str = "Usage: /film get|on|off|grain <0-0.2>|vignette <0-1>";
+pub const FILM_USAGE: &str = "Usage: /film [on|off|grain <0-0.2>|vignette <0-1>]";
 
 // the film look, tuned with /film (cmd.rs); FilmUniform = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,7 +76,7 @@ impl FilmCommand {
                 .ok_or(FILM_USAGE)
         };
         match args {
-            ["get"] => Ok(FilmCommand::Get),
+            [] => Ok(FilmCommand::Get),
             ["on"] => Ok(FilmCommand::On),
             ["off"] => Ok(FilmCommand::Off),
             ["grain", v] => value(v, MAX_GRAIN).map(FilmCommand::Grain),
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn film_command_parses_and_checks_ranges() {
-        assert_eq!(FilmCommand::parse(&["get"]), Ok(FilmCommand::Get));
+        assert_eq!(FilmCommand::parse(&[]), Ok(FilmCommand::Get));
         assert_eq!(FilmCommand::parse(&["on"]), Ok(FilmCommand::On));
         assert_eq!(FilmCommand::parse(&["off"]), Ok(FilmCommand::Off));
         assert_eq!(
@@ -119,7 +119,6 @@ mod tests {
             &["grain", "-0.1"],
             &["grain", "x"],
             &["grain"],
-            &[],
             &["nope"],
         ] {
             assert_eq!(FilmCommand::parse(bad), Err(FILM_USAGE), "{bad:?}");

@@ -18,7 +18,7 @@ pub const DEFAULT_STRENGTH: f32 = 1.0;
 // large planets the LOD terrain begins, drawn morphed but traced unmorphed (rays would start under it)
 pub const FADE_END: f32 = 400.0;
 pub const AO_USAGE: &str =
-    "Usage: /ao get|on|off|radius <0.5-8>|rays <1-16>|strength <0-1>|samples <1-256>|motion <fast> <slow>";
+    "Usage: /ao [on|off|radius <0.5-8>|rays <1-16>|strength <0-1>|samples <1-256>|motion <fast> <slow>]";
 
 // the AO look, tuned with /ao (cmd.rs); HwParams.ao = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,7 +119,7 @@ impl AoCommand {
                 .ok_or(AO_USAGE)
         };
         match args {
-            ["get"] => Ok(AoCommand::Get),
+            [] => Ok(AoCommand::Get),
             ["on"] => Ok(AoCommand::On),
             ["off"] => Ok(AoCommand::Off),
             ["radius", v] => float(v, 0.5, 8.0).map(AoCommand::Radius),
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn ao_command_parses_and_checks_ranges() {
-        assert_eq!(AoCommand::parse(&["get"]), Ok(AoCommand::Get));
+        assert_eq!(AoCommand::parse(&[]), Ok(AoCommand::Get));
         assert_eq!(AoCommand::parse(&["on"]), Ok(AoCommand::On));
         assert_eq!(AoCommand::parse(&["off"]), Ok(AoCommand::Off));
         assert_eq!(
@@ -365,7 +365,6 @@ mod tests {
             &["strength", "1.5"],
             &["strength", "x"],
             &["radius"],
-            &[],
             &["nope"],
         ] {
             assert_eq!(AoCommand::parse(bad), Err(AO_USAGE), "{bad:?}");

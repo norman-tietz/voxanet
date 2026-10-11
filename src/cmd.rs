@@ -15,15 +15,16 @@ pub enum GalaxyRequest {
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 10] = [
+const HELP_LINES: [&str; 11] = [
     "Commands (up/down recall earlier ones):",
-    "  /debug_mode set true|false     /view set first|third",
-    "  /move_speed get|set <value>    /jump_force get|set <value>",
-    "  /hw_shadows set true|false     /style hex|lowpoly|cubes",
-    "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
-    "  /ao get|on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>",
-    "  /plastic get|on|off|roughness|specular|smudge|scratch|reflection <v>",
-    "  /light get|bounce <0-1>|wrap <0-0.5>",
+    "Commands without a value show the current setting:",
+    "  /debug_mode [true|false]       /view [first|third]",
+    "  /move_speed [<value>]          /jump_force [<value>]",
+    "  /hw_shadows [true|false]       /style [hex|lowpoly|cubes]",
+    "  /bevel [on|off|width <v>|cavity <v>]  /film [on|off|grain <v>|vignette <v>]",
+    "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
+    "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>]",
+    "  /light [bounce <0-1>|wrap <0-0.5>]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -70,9 +71,9 @@ pub struct Console {
     pub input_buffer: String,
     pub history: Vec<(String, [f32; 3])>,
     pub height_fraction: f32,
-    pub hw_shadows_request: Option<bool>, // set by /hw_shadows, applied by the game loop (renderer)
+    pub hw_shadows_request: Option<Option<bool>>, // set by /hw_shadows (None inside: show), applied by the game loop (renderer)
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
-    pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
+    pub view_request: Option<Option<bool>>, // set by /view (None inside: show), applied by the game loop (controller); true = first person
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
     pub style_request: Option<crate::lowpoly::TerrainStyle>, // set by /style, applied by the game loop (renderer)
     pub bevel_request: Option<crate::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
@@ -243,27 +244,27 @@ impl Console {
             }
 
             "/debug_mode" => {
-                if parts.len() < 3 || parts[1] != "set" {
-                    self.log("Usage: /debug_mode set [true/false]", [1.0, 0.5, 0.0]);
-                    return;
+                match parts.get(1..) {
+                    Some([]) => {}
+                    Some(["true"]) => player.debug_mode = true,
+                    Some(["false"]) => player.debug_mode = false,
+                    _ => {
+                        self.log("Usage: /debug_mode [true|false]", [1.0, 0.5, 0.0]);
+                        return;
+                    }
                 }
-                match parts[2] {
-                    "true" => {
-                        player.debug_mode = true;
-                        self.log("Debug Mode: ON", [0.0, 1.0, 0.0]);
-                    }
-                    "false" => {
-                        player.debug_mode = false;
-                        self.log("Debug Mode: OFF", [1.0, 0.0, 0.0]);
-                    }
-                    _ => self.log("Value must be true or false", [1.0, 0.0, 0.0]),
+                if player.debug_mode {
+                    self.log("Debug Mode: ON", [0.0, 1.0, 0.0]);
+                } else {
+                    self.log("Debug Mode: OFF", [1.0, 0.0, 0.0]);
                 }
             }
 
-            "/hw_shadows" => match (parts.get(1), parts.get(2)) {
-                (Some(&"set"), Some(&"true")) => self.hw_shadows_request = Some(true),
-                (Some(&"set"), Some(&"false")) => self.hw_shadows_request = Some(false),
-                _ => self.log("Usage: /hw_shadows set [true/false]", [1.0, 0.5, 0.0]),
+            "/hw_shadows" => match parts.get(1..) {
+                Some([]) => self.hw_shadows_request = Some(None),
+                Some(["true"]) => self.hw_shadows_request = Some(Some(true)),
+                Some(["false"]) => self.hw_shadows_request = Some(Some(false)),
+                _ => self.log("Usage: /hw_shadows [true|false]", [1.0, 0.5, 0.0]),
             },
 
             "/bevel" => match crate::bevel::BevelCommand::parse(&parts[1..]) {
@@ -291,19 +292,24 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
-            "/view" => match (parts.get(1), parts.get(2)) {
-                (Some(&"set"), Some(&"first")) => self.view_request = Some(true),
-                (Some(&"set"), Some(&"third")) => self.view_request = Some(false),
-                _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
+            "/view" => match parts.get(1..) {
+                Some([]) => self.view_request = Some(None),
+                Some(["first"]) => self.view_request = Some(Some(true)),
+                Some(["third"]) => self.view_request = Some(Some(false)),
+                _ => self.log("Usage: /view [first|third]", [1.0, 0.5, 0.0]),
             },
 
             "/style" => match parts.get(1) {
+                None => self.log(
+                    &format!("Terrain style: {:?}", crate::lowpoly::style()),
+                    [0.0, 1.0, 0.0],
+                ),
                 Some(&"cubes") => self.style_request = Some(crate::lowpoly::TerrainStyle::Cubes),
                 Some(&"lowpoly") => {
                     self.style_request = Some(crate::lowpoly::TerrainStyle::LowPoly)
                 }
                 Some(&"hex") => self.style_request = Some(crate::lowpoly::TerrainStyle::Hex),
-                _ => self.log("Usage: /style hex|lowpoly|cubes", [1.0, 0.5, 0.0]),
+                _ => self.log("Usage: /style [hex|lowpoly|cubes]", [1.0, 0.5, 0.0]),
             },
 
             "/galaxy" => match parse_galaxy_command(&parts[1..]) {
@@ -326,40 +332,18 @@ impl Console {
         }
     }
 
+    // /move_speed and the like: no value shows it, a value sets it
     fn handle_property_command(&mut self, parts: Vec<&str>, name: &str, property: &mut f32) {
-        if parts.len() < 2 {
-            self.log(&format!("Usage: /{} [set/get]", name), [1.0, 0.5, 0.0]);
-            return;
-        }
-
-        match parts[1] {
-            "get" => {
-                self.log(
-                    &format!("{} is currently: {:.2}", name, property),
-                    [0.0, 1.0, 0.0],
-                );
-            }
-            "set" => {
-                if parts.len() < 3 {
-                    self.log(&format!("Usage: /{} set <value>", name), [1.0, 0.5, 0.0]);
-                    return;
+        match parts.get(1..) {
+            Some([]) => self.log(&format!("{name}: {property:.2}"), [0.0, 1.0, 0.0]),
+            Some([v]) => match v.parse::<f32>() {
+                Ok(val) => {
+                    *property = val;
+                    self.log(&format!("{name} set to {val:.2}"), [0.0, 1.0, 0.0]);
                 }
-                match parts[2].parse::<f32>() {
-                    Ok(val) => {
-                        *property = val;
-                        self.log(&format!("{} set to {:.2}", name, val), [0.0, 1.0, 0.0]);
-                    }
-                    Err(_) => {
-                        self.log("Invalid number format.", [1.0, 0.0, 0.0]);
-                    }
-                }
-            }
-            _ => {
-                self.log(
-                    &format!("Unknown operation '{}'. Use set or get.", parts[1]),
-                    [1.0, 0.5, 0.0],
-                );
-            }
+                Err(_) => self.log("Invalid number format.", [1.0, 0.0, 0.0]),
+            },
+            _ => self.log(&format!("Usage: /{name} [<value>]"), [1.0, 0.5, 0.0]),
         }
     }
 
@@ -386,6 +370,33 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    // no value shows the current setting, a value sets it
+    #[test]
+    fn commands_without_a_value_show_the_setting() {
+        let mut player = Player::new();
+        let mut c = Console::new();
+        c.exec("/move_speed", &mut player);
+        assert!(c.history.last().unwrap().0.starts_with("move_speed: "));
+        c.exec("/move_speed 7", &mut player);
+        assert_eq!(player.move_speed, 7.0);
+        c.exec("/move_speed set 7", &mut player);
+        assert_eq!(c.history.last().unwrap().0, "Usage: /move_speed [<value>]");
+        c.exec("/debug_mode true", &mut player);
+        assert!(player.debug_mode);
+        c.exec("/debug_mode", &mut player);
+        assert_eq!(c.history.last().unwrap().0, "Debug Mode: ON");
+        c.exec("/hw_shadows", &mut player);
+        assert_eq!(c.hw_shadows_request.take(), Some(None));
+        c.exec("/hw_shadows false", &mut player);
+        assert_eq!(c.hw_shadows_request.take(), Some(Some(false)));
+        c.exec("/view", &mut player);
+        assert_eq!(c.view_request.take(), Some(None));
+        c.exec("/plastic", &mut player);
+        assert_eq!(c.plastic_request, Some(crate::plastic::PlasticCommand::Get));
+        c.exec("/light", &mut player);
+        assert_eq!(c.light_request, Some(crate::light::LightCommand::Get));
     }
 
     #[test]
@@ -451,7 +462,7 @@ mod tests {
         c.toggle();
         c.toggle(); // reopened with nothing run in between: not listed again
         assert_eq!(c.history.len(), HELP_LINES.len());
-        c.exec("/view set third", &mut Player::new());
+        c.exec("/view third", &mut Player::new());
         c.toggle();
         c.toggle(); // something else was logged since: listed again, at the bottom
         assert!(c.help_is_last());

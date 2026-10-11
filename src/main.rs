@@ -632,9 +632,17 @@ impl Game {
         if let Some(path) = console.screenshot_request.take() {
             renderer.request_screenshot(path);
         }
-        if let Some(fp) = console.view_request.take() {
-            controller.first_person = fp;
-            controller.cam_dist = if fp { 40.0 } else { 100.0 };
+        if let Some(request) = console.view_request.take() {
+            if let Some(fp) = request {
+                controller.first_person = fp;
+                controller.cam_dist = if fp { 40.0 } else { 100.0 };
+            }
+            let view = if controller.first_person {
+                "first person"
+            } else {
+                "third person"
+            };
+            console.log(&format!("View: {view}"), [0.0, 1.0, 0.0]);
         }
         if let Some(request) = console.galaxy_request.take() {
             use crate::cmd::GalaxyRequest;
@@ -756,8 +764,13 @@ impl Game {
             let msg = renderer.bevel.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
-        if let Some(on) = console.hw_shadows_request.take() {
-            let active = renderer.set_hw_shadows(on);
+        if let Some(request) = console.hw_shadows_request.take() {
+            // no value: only show the current mode
+            let on = request.unwrap_or(renderer.hw_shadows);
+            let active = match request {
+                Some(on) => renderer.set_hw_shadows(on),
+                None => renderer.hw_shadows,
+            };
             if on && !active {
                 console.log(
                     "Hardware ray tracing is not supported on this GPU; using ray marching.",

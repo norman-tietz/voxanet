@@ -116,7 +116,7 @@ impl BevelSettings {
     }
 }
 
-pub const BEVEL_USAGE: &str = "Usage: /bevel get|on|off|width <0-0.25>|cavity <0-1>";
+pub const BEVEL_USAGE: &str = "Usage: /bevel [on|off|width <0-0.25>|cavity <0-1>]";
 const MAX_WIDTH: f32 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,7 +138,7 @@ impl BevelCommand {
                 .ok_or(BEVEL_USAGE)
         };
         match args {
-            ["get"] => Ok(BevelCommand::Get),
+            [] => Ok(BevelCommand::Get),
             ["on"] => Ok(BevelCommand::On),
             ["off"] => Ok(BevelCommand::Off),
             ["width", v] => value(v, MAX_WIDTH).map(BevelCommand::Width),
@@ -329,7 +329,7 @@ mod tests {
     }
     #[test]
     fn bevel_command_parses_and_checks_ranges() {
-        assert_eq!(BevelCommand::parse(&["get"]), Ok(BevelCommand::Get));
+        assert_eq!(BevelCommand::parse(&[]), Ok(BevelCommand::Get));
         assert_eq!(BevelCommand::parse(&["on"]), Ok(BevelCommand::On));
         assert_eq!(BevelCommand::parse(&["off"]), Ok(BevelCommand::Off));
         assert_eq!(
@@ -345,7 +345,6 @@ mod tests {
             &["cavity", "2"],
             &["width", "x"],
             &["width"],
-            &[],
             &["nope"],
         ] {
             assert_eq!(BevelCommand::parse(bad), Err(BEVEL_USAGE), "{bad:?}");

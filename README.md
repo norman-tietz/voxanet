@@ -117,22 +117,23 @@ Your edits stay on a planet while the game runs: fly to another planet and back 
 
 ### Console
 
-Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`; `↑`/`↓` recall earlier commands. The console isn't shown in space flight.
+Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or close the in-game console. While it is open, keyboard input goes to the console and the mouse cursor is released. Type a command and press `Enter`; `↑`/`↓` recall earlier commands. A command without a value shows the current setting; with a value it changes it. The console isn't shown in space flight.
 
 | Command | Description |
 |---------|-------------|
 | `help` | List available commands |
-| `/debug_mode set true\|false` | Enable or disable the debug keys below |
-| `/move_speed get` / `/move_speed set <value>` | Read or change walking speed |
-| `/jump_force get` / `/jump_force set <value>` | Read or change jump strength |
-| `/hw_shadows set true\|false` | Switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
+| `/debug_mode [true\|false]` | Show, enable or disable the debug keys below |
+| `/move_speed [<value>]` | Show or change walking speed |
+| `/jump_force [<value>]` | Show or change jump strength |
+| `/hw_shadows [true\|false]` | Show or switch between hardware ray-traced and ray-marched shadows (hardware is the default where the GPU supports it) |
 | `/screenshot <path>` | Save the current frame as a PNG to a custom path (e.g. `/screenshot captures/shot.png`), instead of the `F2` default location |
-| `/view set first\|third` | Switch camera mode from the console |
+| `/view [first\|third]` | Show or switch camera mode from the console |
+| `/style [hex\|lowpoly\|cubes]` | Show or switch the terrain style (hex is the default) |
 | `/galaxy home` | Return to the start planet, standing at local noon |
 | `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
 | `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`) and radius (20–500) on the next orbit outward (up to 15 planets) |
 
-### Debug Keys (require `/debug_mode set true`)
+### Debug Keys (require `/debug_mode true`)
 
 | Input | Action |
 |-------|--------|
