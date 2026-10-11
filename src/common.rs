@@ -471,17 +471,30 @@ impl PlanetData {
         }
     }
 
-    // the cell containing `pos` (cell_at), with pos's face coordinates (u, v in columns) and its
-    // fractional position within the layer (0..1)
+    // the cell containing `pos` (cell_at), with pos's coordinates (u, v in columns) in the face of the
+    // returned id and its fractional position within the layer (0..1). A hex cell reaching across a ring
+    // seam can lie on the next face: pos's u is then in that owner's extended coordinates
     pub fn cell_local(&self, pos: glam::Vec3) -> Option<(BlockId, f64, f64, f32)> {
         let res = self.resolution;
         let (face, u, v, layer_f) = crate::gen::CoordSystem::face_coords(pos, res)?;
-        let (cu, cv) = match self.cells {
+        let (face, cu, cv, u) = match self.cells {
             CellShape::Square => (
+                face,
                 (u.floor() as u32).min(res - 1),
                 (v.floor() as u32).min(res - 1),
+                u,
             ),
-            CellShape::Hex => crate::hex::cell_at(u, v, res),
+            CellShape::Hex => {
+                // the owning column may lie on the next ring face (its cell reaches across the seam);
+                // u then in its extended coordinates, where its walls are
+                let (f, cu, cv) = crate::hex::cell_at(face, u, v, res);
+                let u = if f == face {
+                    u
+                } else {
+                    crate::hex::ring_extend(f, face, u, res)
+                };
+                (f, cu, cv, u)
+            }
         };
         let layer = layer_f.floor();
         let id = BlockId {
@@ -496,15 +509,16 @@ impl PlanetData {
     // the side walls of hex column (face, u, v), with the column across each. Along the face border the
     // next face's cells don't line up with this face's, so border walls come in pieces one sixth of a
     // column long (every cell boundary of both faces lies on that lattice): both sides of a seam then
-    // have vertices at the same points, and their meshes meet without T-junction cracks
+    // have vertices at the same points, and their meshes meet without T-junction cracks. On the ring seams
+    // the honeycomb continues and the neighbour is exact (hex::edges); only the seams to ±Z come in pieces
     pub fn hex_walls(&self, face: u8, u: u32, v: u32) -> Vec<HexWall> {
-        crate::hex::edges(u, v, self.resolution)
+        crate::hex::edges(face, u, v, self.resolution)
             .into_iter()
             .map(|e| HexWall {
                 a: e.a,
                 b: e.b,
                 across: match e.across {
-                    crate::hex::Across::Cell(cu, cv) => Some((face, cu, cv)),
+                    crate::hex::Across::Cell(cf, cu, cv) => Some((cf, cu, cv)),
                     crate::hex::Across::Border => self.across_border(face, &e),
                 },
             })
@@ -520,16 +534,16 @@ impl PlanetData {
         let (dx, dy) = ((e.b.0 - e.a.0) as f64, (e.b.1 - e.a.1) as f64);
         let len = (dx * dx + dy * dy).sqrt();
         // inward is left of a → b (counter-clockwise outline)
-        let here = CoordSystem::get_direction_f(face, mu, mv, res);
+        let here = CoordSystem::get_direction_hex(face, mu, mv, res);
         let inner =
-            CoordSystem::get_direction_f(face, mu - dy / len * 0.01, mv + dx / len * 0.01, res);
+            CoordSystem::get_direction_hex(face, mu - dy / len * 0.01, mv + dx / len * 0.01, res);
         let out = (here * 2.0 - inner).normalize() * (res as f32 / 2.0);
         let (f, cu, cv, _) = CoordSystem::face_coords(out, res)?;
         if f == face {
             return None;
         }
-        let (hu, hv) = crate::hex::cell_at(cu, cv, res);
-        Some((f, hu, hv))
+        let (hf, hu, hv) = crate::hex::cell_at(f, cu, cv, res);
+        Some((hf, hu, hv))
     }
 
     // the columns sharing a side with (face, u, v), across cube-face edges too: square cells' four, hex
@@ -1505,11 +1519,43 @@ mod hex_tests {
         for face in 0..6u8 {
             for v in 0..res {
                 for u in 0..res {
-                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(u, v, res));
-                    let dir = CoordSystem::get_direction_f(face, cu, cv, res);
+                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(face, u, v, res));
+                    let dir = CoordSystem::get_direction_hex(face, cu, cv, res);
                     let r = CoordSystem::get_layer_radius_f(9.5, res);
                     let id = planet.cell_at(dir * r).unwrap();
                     assert_eq!((id.face, id.u, id.v, id.layer), (face, u, v, 9));
+                }
+            }
+        }
+    }
+
+    // a world point near a ring seam has one owner, whichever face's coordinates it is read in: in the
+    // gap, the neighbouring face's reaching cell
+    #[test]
+    fn hex_reaching_cells_own_the_gap() {
+        for res in [16u32, 15] {
+            let planet = hex_planet(res);
+            let r = res as f64;
+            let radius = CoordSystem::get_layer_radius_f(9.5, res);
+            for face in 0..4u8 {
+                for hi in [false, true] {
+                    for v in (1..res - 1).step_by(2) {
+                        let vc = v as f64 + 0.5;
+                        for d in [1e-6, 0.01, 0.25, 0.49] {
+                            let u = if hi { r - d } else { d }; // inside this face, near the seam
+                            let p = CoordSystem::get_direction_f(face, u, vc, res) * radius;
+                            let id = planet.cell_at(p).unwrap();
+                            let (want_f, want_u, want_v) = crate::hex::cell_at(face, u, vc, res);
+                            assert_eq!((id.face, id.u, id.v), (want_f, want_u, want_v));
+                            // the same point from the owner's extended coordinates
+                            if want_f != face {
+                                let ue = crate::hex::ring_extend(want_f, face, u, res);
+                                let q =
+                                    CoordSystem::get_direction_hex(want_f, ue, vc, res) * radius;
+                                assert!(p.distance(q) < 1e-3, "{face} {hi} {v} {d}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1525,13 +1571,22 @@ mod hex_tests {
                 for v in 0..res {
                     for u in 0..res {
                         let walls = planet.hex_walls(face, u, v);
-                        if u > 0 && u + 1 < res && v > 0 && v + 1 < res {
+                        if (crate::hex::ring(face) || (u > 0 && u + 1 < res))
+                            && v > 0
+                            && v + 1 < res
+                        {
                             assert_eq!(walls.len(), 6);
                         }
                         for w in &walls {
-                            if w.across.is_some_and(|(f, ..)| f != face) {
-                                // seam pieces are a sixth long
-                                assert_eq!((w.b.0 - w.a.0).abs() + (w.b.1 - w.a.1).abs(), 1);
+                            if let Some((f, ..)) = w.across.filter(|&(f, ..)| f != face) {
+                                let len = (w.b.0 - w.a.0).abs() + (w.b.1 - w.a.1).abs();
+                                if crate::hex::ring(f) && crate::hex::ring(face) {
+                                    // the honeycomb continues: whole cell sides, no pieces
+                                    assert!(len > 1, "{face} ({u}, {v}) {w:?}");
+                                } else {
+                                    // seams to ±Z: pieces a sixth long
+                                    assert_eq!(len, 1);
+                                }
                             }
                             let (nf, nu, nv) = w.across.expect("a wall facing nothing");
                             let (a, b) = ends(&planet, face, w);

@@ -353,6 +353,40 @@ mod tests {
         );
     }
 
+    // the half of a reaching cell beyond the seam is solid exactly where its column is (walls measured
+    // in the owner's coordinates)
+    #[test]
+    fn hex_reaching_half_is_solid_like_its_column() {
+        for res in [32u32, 33] {
+            let mut planet = PlanetData::new(res);
+            planet.cells = crate::common::CellShape::Hex;
+            for face in 0..4u8 {
+                // the reaching cell of row 5: at u = res unmirrored, at u = 0 on faces 1 and 2
+                let (u, ue) = if crate::hex::mirrored(face) {
+                    (0, -0.25)
+                } else {
+                    (res - 1, res as f64 + 0.25)
+                };
+                let h = planet.effective_height(face, u, 5);
+                for layer in h.saturating_sub(1)..=h + 2 {
+                    let id = BlockId {
+                        face,
+                        layer,
+                        u,
+                        v: 5,
+                    };
+                    let p = CoordSystem::get_direction_hex(face, ue, 5.5, res)
+                        * CoordSystem::get_layer_radius_f(layer as f32 + 0.5, res);
+                    assert_eq!(
+                        Physics::is_solid(p, &planet),
+                        planet.exists(id),
+                        "res {res} face {face} layer {layer}"
+                    );
+                }
+            }
+        }
+    }
+
     // hex columns: collision follows the hex cells (solid exactly where the cell under the point
     // exists, away from the shaved margins), not the square grid
     #[test]

@@ -3,23 +3,43 @@
 // Column (u, v) of the square grid is hex cell (u, v): rows run along u, every odd row (v odd) shifted
 // by half a column, so the height map, edits and chunks are the same in both styles. Cells are 1 wide,
 // their vertical sides span the middle ⅔ of the row and their points reach ⅙ into the rows above and
-// below (pointy-top hexagons about 13 % flatter than regular ones, area 1). At the face border the
-// honeycomb is cut off straight: the cells of the first and last row are squared off to the border, and
-// in odd rows the first cell also takes the half-cell gap at u = 0 while the last is cut at u = res.
+// below (pointy-top hexagons about 13 % flatter than regular ones, area 1). At the u borders of the four
+// ring faces (around Z, see ring) the honeycomb continues onto the next face: faces 1 and 2 shift their
+// odd rows the other way (mirrored), so at each of those seams one face's odd rows end with a cell
+// reaching half a column across and the other's with a half-column gap, which that cell fills. Elsewhere
+// the honeycomb is cut off straight: the cells of the first and last row are squared off to the border,
+// and on faces 4 and 5 the first cell of an odd row also takes the half-cell gap at u = 0 while the last
+// is cut at u = res.
 //
 // Pure 2D geometry in face space (u, v in 0..=res), no world positions. Corners are exact integers in
 // sixths of a column (u6 = 6u, v6 = 6v): every corner of every cell lies on that lattice, so shared
 // corners and the cube-face seams compare exactly.
 
-// a row's shift along u, in sixths: odd rows are half a column to the right
-fn shift6(row: i64) -> i64 {
+// whether a face's odd rows are shifted left instead of right (faces 1 and 2: their u runs the other way
+// round the ring, and only then do all four ring seams pair a reaching cell with a gap)
+pub fn mirrored(face: u8) -> bool {
+    face == 1 || face == 2
+}
+
+// a row's shift along u, in sixths: odd rows half a column to the right (left on mirrored faces)
+fn shift6(face: u8, row: i64) -> i64 {
+    let s = 3 * row.rem_euclid(2);
+    if mirrored(face) {
+        -s
+    } else {
+        s
+    }
+}
+
+// the row boundaries only need the shift modulo a column (−3 ≡ 3), so they are the same on every face
+fn zig_shift6(row: i64) -> i64 {
     3 * row.rem_euclid(2)
 }
 
 // the boundary between row `row` and the row below it at u6 = x: a zigzag between the bottom points of
 // row's cells (6·row − 1) and the corners between them (6·row + 1)
 fn zig6(row: i64, x: f64) -> f64 {
-    let t = (x - shift6(row) as f64).rem_euclid(6.0);
+    let t = (x - zig_shift6(row) as f64).rem_euclid(6.0);
     let d = (t - 3.0).abs(); // 0 under a cell's centre, 3 between two cells
     (6 * row - 1) as f64 + d * 2.0 / 3.0
 }
@@ -27,7 +47,7 @@ fn zig6(row: i64, x: f64) -> f64 {
 // zig6 at a lattice column (x a multiple of 3), exactly
 fn zig6_at(row: i64, x: i64) -> i64 {
     debug_assert!(x % 3 == 0);
-    let t = (x - shift6(row)).rem_euclid(6);
+    let t = (x - zig_shift6(row)).rem_euclid(6);
     6 * row - 1 + 2 * (t - 3).abs() / 3
 }
 
@@ -74,9 +94,16 @@ pub fn ring_extend(owner: u8, face: u8, u: f64, res: u32) -> f64 {
     a as f64 * (u - b as f64 * res as f64)
 }
 
-// the cell containing face-space point (u, v) (both in columns, the face is [0, res]²; points outside
-// are clamped onto the border cells)
-pub fn cell_at(u: f64, v: f64, res: u32) -> (u32, u32) {
+// the cell containing face-space point (u, v) (columns; the face is [0, res]²) as (face, u, v): on a
+// ring face a point in the half-column gap at a seam belongs to the neighbouring face's reaching cell,
+// and a point beyond the u border is wrapped onto the next face first; other points outside are clamped
+// onto the border cells
+pub fn cell_at(face: u8, u: f64, v: f64, res: u32) -> (u8, u32, u32) {
+    let (n, r) = (res as i64, res as f64);
+    if ring(face) && !(0.0..=r).contains(&u) {
+        let (f, w) = ring_wrap(face, u, res);
+        return cell_at(f, w.clamp(0.0, r), v, res);
+    }
     let (x, y) = (u * 6.0, v * 6.0);
     let r0 = v.floor() as i64;
     let row = if y < zig6(r0, x) {
@@ -86,19 +113,37 @@ pub fn cell_at(u: f64, v: f64, res: u32) -> (u32, u32) {
     } else {
         r0
     };
-    let row = row.clamp(0, res as i64 - 1);
-    let col = ((x - shift6(row) as f64) / 6.0).floor() as i64;
-    (col.clamp(0, res as i64 - 1) as u32, row as u32)
+    let row = row.clamp(0, n - 1);
+    let col = ((x - shift6(face, row) as f64) / 6.0).floor() as i64;
+    if ring(face) && !(0..n).contains(&col) {
+        // the gap: the neighbour's cell reaches into it
+        let (f, ..) = ring_neighbour(face, col >= n);
+        let x = ring_extend(f, face, u, res) * 6.0;
+        let col = ((x - shift6(f, row) as f64) / 6.0).floor() as i64;
+        debug_assert!(
+            (0..n).contains(&col),
+            "gap at {face} ({u}, {v}) not filled by {f}"
+        );
+        return (f, col.clamp(0, n - 1) as u32, row as u32);
+    }
+    (face, col.clamp(0, n - 1) as u32, row as u32)
 }
 
-// cell (u, v)'s polygon, counter-clockwise (v up), in sixths. 6 corners inside the face; border cells
-// have their outer point replaced by the border (and odd rows' end cells are widened / cut there)
-pub fn outline(u: u32, v: u32, res: u32) -> Vec<(i64, i64)> {
+// cell (u, v)'s polygon on `face`, counter-clockwise (v up), in sixths of the face's own (extended)
+// coordinates: 6 corners; first/last rows squared off at the v border; on a ring face an odd row's cell
+// may reach half a column beyond the u border, on faces 4 and 5 the u border clips (widens / cuts) them
+pub fn outline(face: u8, u: u32, v: u32, res: u32) -> Vec<(i64, i64)> {
     let (col, row, n) = (u as i64, v as i64, res as i64);
-    let s = shift6(row);
-    // the face border clamps cell_at's column: the first cell reaches u = 0, the last u = res
-    let lo = if col == 0 { 0 } else { 6 * col + s };
-    let hi = if col == n - 1 { 6 * n } else { 6 * col + 6 + s };
+    let s = shift6(face, row);
+    let (lo, hi) = if ring(face) {
+        (6 * col + s, 6 * col + 6 + s)
+    } else {
+        // the face border clamps cell_at's column: the first cell reaches u = 0, the last u = res
+        (
+            if col == 0 { 0 } else { 6 * col + s },
+            if col == n - 1 { 6 * n } else { 6 * col + 6 + s },
+        )
+    };
     let bottom = |x: i64| if row == 0 { 0 } else { zig6_at(row, x) };
     let top = |x: i64| {
         if row == n - 1 {
@@ -134,8 +179,9 @@ fn drop_collinear(mut pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 // cell. Only the widened first cell of an odd row isn't convex: the neighbouring rows' points poke into
 // it at u = ½, its old left corners. The bevel's distances to a side's line interpolate exactly only
 // over a fan whose vertices all lie on the line's inner side, so the mesher draws each half separately.
-pub fn fan_split(u: u32, v: u32, res: u32) -> Option<i64> {
-    (u == 0 && v % 2 == 1 && res > 1).then_some(3)
+// Only faces 4 and 5 have such cells; on the ring faces every cell is a whole hexagon.
+pub fn fan_split(face: u8, u: u32, v: u32, res: u32) -> Option<i64> {
+    (!ring(face) && u == 0 && v % 2 == 1 && res > 1).then_some(3)
 }
 
 // the centroid of an outline, in columns (the top and bottom faces' fan centre)
@@ -166,8 +212,9 @@ pub fn area(pts: &[(i64, i64)]) -> f64 {
 // what lies across an outline edge
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Across {
-    Cell(u32, u32),
-    // the face border: the next cube face (found in world space, PlanetData::hex_walls)
+    Cell(u8, u32, u32),
+    // the border to a ±Z face (or faces 4/5's u borders): the next cube face, found in world space
+    // (PlanetData::hex_walls)
     Border,
 }
 
@@ -180,12 +227,13 @@ pub struct Edge {
     pub across: Across,
 }
 
-// the edges of cell (u, v), counter-clockwise
-pub fn edges(u: u32, v: u32, res: u32) -> Vec<Edge> {
-    let pts = outline(u, v, res);
+// the edges of cell (u, v) on `face`, counter-clockwise
+pub fn edges(face: u8, u: u32, v: u32, res: u32) -> Vec<Edge> {
+    let pts = outline(face, u, v, res);
     let n6 = 6 * res as i64;
     let on_border = |a: (i64, i64), b: (i64, i64)| {
-        (a.0 == b.0 && (a.0 == 0 || a.0 == n6)) || (a.1 == b.1 && (a.1 == 0 || a.1 == n6))
+        (a.0 == b.0 && (a.0 == 0 || a.0 == n6) && !ring(face))
+            || (a.1 == b.1 && (a.1 == 0 || a.1 == n6))
     };
     let mut out = Vec::with_capacity(pts.len());
     for i in 0..pts.len() {
@@ -206,11 +254,11 @@ pub fn edges(u: u32, v: u32, res: u32) -> Vec<Edge> {
             let (dx, dy) = ((b.0 - a.0) as f64, (b.1 - a.1) as f64);
             let len = (dx * dx + dy * dy).sqrt();
             let (nx, ny) = (dy / len * 1e-3, -dx / len * 1e-3);
-            let (cu, cv) = cell_at(mx + nx, my + ny, res);
+            let (cf, cu, cv) = cell_at(face, mx + nx, my + ny, res);
             out.push(Edge {
                 a,
                 b,
-                across: Across::Cell(cu, cv),
+                across: Across::Cell(cf, cu, cv),
             });
         }
     }
@@ -260,167 +308,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn interior_cell_is_the_squashed_hexagon() {
-        // even row: centre (3.5, 4.5) in columns
-        assert_eq!(
-            outline(3, 4, 16),
-            vec![(18, 25), (21, 23), (24, 25), (24, 29), (21, 31), (18, 29)]
-        );
-        // odd row: shifted half a column right
-        assert_eq!(
-            outline(3, 5, 16),
-            vec![(21, 31), (24, 29), (27, 31), (27, 35), (24, 37), (21, 35)]
-        );
-        assert_eq!(area(&outline(3, 4, 16)), 1.0);
-        assert_eq!(centroid(&outline(3, 4, 16)), (3.5, 4.5));
-    }
-
-    #[test]
-    fn every_point_lies_in_the_outline_of_its_cell() {
-        for res in [8u32, 9, 32] {
-            for (u, v) in points(20_000, res) {
-                let (cu, cv) = cell_at(u, v, res);
-                assert!(cu < res && cv < res);
-                let pts = outline(cu, cv, res);
-                // points on a boundary may go either way; skip those within a hair of one
-                let near_edge = edges(cu, cv, res)
-                    .iter()
-                    .any(|e| distance_to_edge(u, v, e.a, e.b) < 1e-9);
-                assert!(
-                    near_edge || inside(&pts, u, v),
-                    "res {res}: ({u}, {v}) -> ({cu}, {cv}) {pts:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cells_cover_the_face_exactly() {
-        for res in [1u32, 2, 7, 8, 32] {
-            let mut total = 0.0;
-            for v in 0..res {
-                let mut row = 0.0;
-                for u in 0..res {
-                    let a = area(&outline(u, v, res));
-                    assert!(a > 0.0);
-                    if u > 0 && u + 1 < res && v > 0 && v + 1 < res {
-                        assert_eq!(a, 1.0, "interior cell ({u}, {v})");
-                    }
-                    row += a;
-                }
-                assert_eq!(row, res as f64, "row {v} of res {res}");
-                total += row;
-            }
-            assert_eq!(total, (res * res) as f64);
-        }
-    }
-
-    // the fans fan_split cuts are convex, and every other cell is convex as it is
-    #[test]
-    fn fan_parts_are_convex() {
-        let convex = |p: &[(i64, i64)]| {
-            let n = p.len();
-            (0..n).all(|i| {
-                let (a, b, c) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
-                (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0) >= 0
-            })
-        };
-        for res in [7u32, 8] {
-            for v in 0..res {
-                for u in 0..res {
-                    let p = outline(u, v, res);
-                    match fan_split(u, v, res) {
-                        None => assert!(convex(&p), "({u},{v}) {p:?}"),
-                        Some(x) => {
-                            let left: Vec<_> = p.iter().copied().filter(|q| q.0 <= x).collect();
-                            let right: Vec<_> = p.iter().copied().filter(|q| q.0 >= x).collect();
-                            assert!(convex(&left) && convex(&right), "({u},{v}) {p:?}");
-                            assert!(left.len() >= 3 && right.len() >= 3, "({u},{v}) {p:?}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn border_cells_are_cut_off_straight() {
-        let res = 8;
-        // odd row, first cell: widened to u = 0 (8 corners, area 1½)
-        let first = outline(0, 1, res);
-        assert_eq!(area(&first), 1.5);
-        assert_eq!(first.iter().filter(|p| p.0 == 0).count(), 2);
-        // odd row, last cell: cut at u = res (area ½)
-        assert_eq!(area(&outline(res - 1, 1, res)), 0.5);
-        // first row: squared off at v = 0
-        assert!(outline(3, 0, res).iter().filter(|p| p.1 == 0).count() == 2);
-        // the cell centres map to their own cells
-        for v in 0..res {
-            for u in 0..res {
-                let (cx, cy) = centroid(&outline(u, v, res));
-                assert_eq!(cell_at(cx, cy, res), (u, v));
-            }
-        }
-    }
-
-    #[test]
-    fn neighbours_are_symmetric_and_edges_match() {
-        for res in [7u32, 8] {
-            for v in 0..res {
-                for u in 0..res {
-                    let es = edges(u, v, res);
-                    let cells: Vec<_> = es
-                        .iter()
-                        .filter_map(|e| match e.across {
-                            Across::Cell(a, b) => Some((a, b)),
-                            Across::Border => None,
-                        })
-                        .collect();
-                    if u > 0 && u + 1 < res && v > 0 && v + 1 < res {
-                        assert_eq!(cells.len(), 6, "interior cell ({u}, {v})");
-                    }
-                    for e in &es {
-                        if let Across::Cell(nu, nv) = e.across {
-                            assert_ne!((nu, nv), (u, v));
-                            // the neighbour has the same edge, reversed, pointing back here
-                            let back = edges(nu, nv, res);
-                            assert!(
-                                back.iter().any(|f| f.a == e.b
-                                    && f.b == e.a
-                                    && f.across == Across::Cell(u, v)),
-                                "({u}, {v}) edge {e:?} not mirrored by ({nu}, {nv})"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn border_edges_lie_on_the_border_in_sixths() {
-        let res = 8;
-        let n6 = 6 * res as i64;
-        let mut border_len = 0;
-        for v in 0..res {
-            for u in 0..res {
-                for e in edges(u, v, res) {
-                    if e.across == Across::Border {
-                        let len = (e.b.0 - e.a.0).abs() + (e.b.1 - e.a.1).abs();
-                        assert_eq!(len, 1);
-                        assert!(
-                            [e.a.0, e.b.0].iter().all(|&x| x == 0 || x == n6)
-                                || [e.a.1, e.b.1].iter().all(|&y| y == 0 || y == n6)
-                        );
-                        border_len += len;
-                    }
-                }
-            }
-        }
-        assert_eq!(border_len, 4 * n6);
-    }
-
     // the ring table undoes itself: a point beyond a ring border, wrapped to its face and extended back
     #[test]
     fn ring_wrap_and_extend_undo_each_other() {
@@ -446,6 +333,283 @@ mod tests {
                         .any(|&h| ring_neighbour(f, h).0 == face));
                 }
             }
+        }
+    }
+
+    // faces 1 and 2 shift their odd rows the other way (left by half a column)
+    #[test]
+    fn faces_1_and_2_are_mirrored() {
+        for face in 0..6u8 {
+            let (cx, _) = centroid(&outline(face, 3, 5, 16));
+            let want = if face == 1 || face == 2 { 3.0 } else { 4.0 };
+            assert_eq!(cx, want, "face {face}");
+        }
+    }
+
+    // every ring seam pairs a cell reaching half a column across with a half-column gap on the other
+    // side, in every odd row; even rows end exactly at the border
+    #[test]
+    fn ring_seams_pair_a_reaching_cell_with_a_gap() {
+        for res in [8u32, 9] {
+            let n6 = 6 * res as i64;
+            for face in 0..4u8 {
+                for hi in [false, true] {
+                    let (f, ..) = ring_neighbour(face, hi);
+                    let back_hi = ring_neighbour(f, true).0 == face;
+                    let col = |hi: bool| if hi { res - 1 } else { 0 };
+                    let reaches = |face: u8, hi: bool, v: u32| {
+                        let p = outline(face, col(hi), v, res);
+                        if hi {
+                            p.iter().any(|q| q.0 > n6)
+                        } else {
+                            p.iter().any(|q| q.0 < 0)
+                        }
+                    };
+                    for v in 0..res {
+                        let (here, there) = (reaches(face, hi, v), reaches(f, back_hi, v));
+                        if v % 2 == 1 {
+                            assert!(here != there, "res {res} face {face} hi {hi} row {v}");
+                        } else {
+                            assert!(!here && !there, "res {res} face {face} hi {hi} row {v}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ring faces have no half or widened cells: every cell off the first and last row is a whole
+    // hexagon (6 corners, area 1); faces 4 and 5 keep the widened / cut border cells
+    #[test]
+    fn ring_cells_are_whole_hexagons() {
+        for res in [8u32, 9] {
+            for face in 0..4u8 {
+                for v in 1..res - 1 {
+                    for u in 0..res {
+                        let p = outline(face, u, v, res);
+                        assert_eq!((p.len(), area(&p)), (6, 1.0), "face {face} ({u}, {v})");
+                    }
+                }
+            }
+            assert_eq!(area(&outline(4, 0, 1, res)), 1.5);
+            assert_eq!(area(&outline(4, res - 1, 1, res)), 0.5);
+        }
+    }
+
+    #[test]
+    fn interior_cell_is_the_squashed_hexagon() {
+        // even row: centre (3.5, 4.5) in columns
+        assert_eq!(
+            outline(0, 3, 4, 16),
+            vec![(18, 25), (21, 23), (24, 25), (24, 29), (21, 31), (18, 29)]
+        );
+        // odd row: shifted half a column right
+        assert_eq!(
+            outline(0, 3, 5, 16),
+            vec![(21, 31), (24, 29), (27, 31), (27, 35), (24, 37), (21, 35)]
+        );
+        assert_eq!(area(&outline(0, 3, 4, 16)), 1.0);
+        assert_eq!(centroid(&outline(0, 3, 4, 16)), (3.5, 4.5));
+    }
+
+    // a point on `face` in `owner`'s (extended) coordinates
+    fn in_owner(owner: u8, face: u8, u: f64, res: u32) -> f64 {
+        if owner == face {
+            u
+        } else {
+            ring_extend(owner, face, u, res)
+        }
+    }
+
+    #[test]
+    fn every_point_lies_in_the_outline_of_its_cell() {
+        for res in [8u32, 9, 32] {
+            let r = res as f64;
+            // uniform points plus points close to the u borders (the ring seams)
+            let near: Vec<(f64, f64)> = points(4_000, res)
+                .map(|(u, v)| {
+                    (
+                        if u < r / 2.0 {
+                            u * 0.01
+                        } else {
+                            r - (r - u) * 0.01
+                        },
+                        v,
+                    )
+                })
+                .collect();
+            for face in 0..6u8 {
+                for &(u, v) in points(20_000, res).collect::<Vec<_>>().iter().chain(&near) {
+                    let (f, cu, cv) = cell_at(face, u, v, res);
+                    assert!(cu < res && cv < res);
+                    assert!(f == face || (ring(face) && ring(f)), "{face} -> {f}");
+                    let pts = outline(f, cu, cv, res);
+                    let ou = in_owner(f, face, u, res);
+                    // points on a boundary may go either way; skip those within a hair of one
+                    let near_edge = edges(f, cu, cv, res)
+                        .iter()
+                        .any(|e| distance_to_edge(ou, v, e.a, e.b) < 1e-9);
+                    assert!(
+                        near_edge || inside(&pts, ou, v),
+                        "res {res} face {face}: ({u}, {v}) -> ({f}, {cu}, {cv}) {pts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cells_cover_the_face_exactly() {
+        // per face: the cells' areas sum to the face's (a reaching cell counted on its owner, whose
+        // half beyond the seam fills the neighbour's gap)
+        for res in [1u32, 2, 7, 8, 32] {
+            for face in 0..6u8 {
+                let mut total = 0.0;
+                for v in 0..res {
+                    let mut row = 0.0;
+                    for u in 0..res {
+                        let a = area(&outline(face, u, v, res));
+                        assert!(a > 0.0);
+                        if u > 0 && u + 1 < res && v > 0 && v + 1 < res {
+                            assert_eq!(a, 1.0, "interior cell ({u}, {v})");
+                        }
+                        row += a;
+                    }
+                    assert_eq!(row, res as f64, "face {face} row {v} of res {res}");
+                    total += row;
+                }
+                assert_eq!(total, (res * res) as f64);
+            }
+        }
+    }
+
+    // the fans fan_split cuts are convex, and every other cell is convex as it is
+    #[test]
+    fn fan_parts_are_convex() {
+        let convex = |p: &[(i64, i64)]| {
+            let n = p.len();
+            (0..n).all(|i| {
+                let (a, b, c) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
+                (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0) >= 0
+            })
+        };
+        for res in [7u32, 8] {
+            for face in 0..6u8 {
+                for v in 0..res {
+                    for u in 0..res {
+                        let p = outline(face, u, v, res);
+                        match fan_split(face, u, v, res) {
+                            None => assert!(convex(&p), "{face} ({u},{v}) {p:?}"),
+                            Some(x) => {
+                                assert!(!ring(face));
+                                let left: Vec<_> = p.iter().copied().filter(|q| q.0 <= x).collect();
+                                let right: Vec<_> =
+                                    p.iter().copied().filter(|q| q.0 >= x).collect();
+                                assert!(convex(&left) && convex(&right), "({u},{v}) {p:?}");
+                                assert!(left.len() >= 3 && right.len() >= 3, "({u},{v}) {p:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn border_cells_are_cut_off_straight() {
+        let res = 8;
+        // faces 4 and 5, odd row, first cell: widened to u = 0 (8 corners, area 1½)
+        let first = outline(4, 0, 1, res);
+        assert_eq!(area(&first), 1.5);
+        assert_eq!(first.iter().filter(|p| p.0 == 0).count(), 2);
+        // odd row, last cell: cut at u = res (area ½)
+        assert_eq!(area(&outline(4, res - 1, 1, res)), 0.5);
+        // first row: squared off at v = 0, on every face
+        for face in 0..6u8 {
+            assert!(outline(face, 3, 0, res).iter().filter(|p| p.1 == 0).count() == 2);
+        }
+        // the cell centres map to their own cells
+        for face in 0..6u8 {
+            for v in 0..res {
+                for u in 0..res {
+                    let (cx, cy) = centroid(&outline(face, u, v, res));
+                    assert_eq!(cell_at(face, cx, cy, res), (face, u, v), "face {face}");
+                }
+            }
+        }
+    }
+
+    // `p` (sixths on `face`) on neighbouring ring face `f`
+    fn six_on(face: u8, f: u8, p: (i64, i64), res: u32) -> (i64, i64) {
+        if face == f {
+            return p;
+        }
+        let hi = ring_neighbour(face, true).0 == f;
+        let (_, a, b) = ring_neighbour(face, hi);
+        (a * p.0 + b * 6 * res as i64, p.1)
+    }
+
+    #[test]
+    fn neighbours_are_symmetric_and_edges_match() {
+        for res in [7u32, 8] {
+            for face in 0..6u8 {
+                for v in 0..res {
+                    for u in 0..res {
+                        let es = edges(face, u, v, res);
+                        let cells = es.iter().filter(|e| matches!(e.across, Across::Cell(..)));
+                        if (ring(face) || (u > 0 && u + 1 < res)) && v > 0 && v + 1 < res {
+                            assert_eq!(cells.count(), 6, "interior cell {face} ({u}, {v})");
+                        }
+                        for e in &es {
+                            if let Across::Cell(nf, nu, nv) = e.across {
+                                assert_ne!((nf, nu, nv), (face, u, v));
+                                // the neighbour has the same edge pointing back here (reversed on
+                                // the same face; either way round across a seam, where a face's u
+                                // may run the other way)
+                                let (a, b) =
+                                    (six_on(face, nf, e.a, res), six_on(face, nf, e.b, res));
+                                let back = edges(nf, nu, nv, res);
+                                assert!(
+                                    back.iter().any(|g| g.across == Across::Cell(face, u, v)
+                                        && ((g.a == b && g.b == a)
+                                            || (nf != face && g.a == a && g.b == b))),
+                                    "{face} ({u}, {v}) edge {e:?} not mirrored by {nf} ({nu}, {nv})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn border_edges_lie_on_the_border_in_sixths() {
+        let res = 8;
+        let n6 = 6 * res as i64;
+        for face in 0..6u8 {
+            let mut border_len = 0;
+            for v in 0..res {
+                for u in 0..res {
+                    for e in edges(face, u, v, res) {
+                        if e.across == Across::Border {
+                            let len = (e.b.0 - e.a.0).abs() + (e.b.1 - e.a.1).abs();
+                            assert_eq!(len, 1);
+                            let on_u = [e.a.0, e.b.0].iter().all(|&x| x == 0 || x == n6);
+                            let on_v = [e.a.1, e.b.1].iter().all(|&y| y == 0 || y == n6);
+                            // the ring faces' u borders are seams within the honeycomb
+                            assert!(on_v || (on_u && !ring(face)), "{face} {e:?}");
+                            border_len += len;
+                        }
+                    }
+                }
+            }
+            // ring faces: only the two v borders; faces 4 and 5: all four
+            assert_eq!(
+                border_len,
+                if ring(face) { 2 * n6 } else { 4 * n6 },
+                "face {face}"
+            );
         }
     }
 }

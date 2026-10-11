@@ -3504,12 +3504,12 @@ impl Renderer {
 // past both ends so the bars close the corners, like the cube cursor's
 fn hex_cursor(planet: &PlanetData, id: BlockId) -> (Vec<Vertex>, Vec<u32>) {
     let res = planet.resolution;
-    let pts = crate::hex::outline(id.u, id.v, res);
+    let pts = crate::hex::outline(id.face, id.u, id.v, res);
     let at = |p: (i64, i64), l: u32| {
         CoordSystem::get_vertex_pos_six(id.face, p.0, p.1, id.layer + l, res)
     };
     let (cu, cv) = crate::hex::centroid(&pts);
-    let centre = CoordSystem::get_direction_f(id.face, cu, cv, res)
+    let centre = CoordSystem::get_direction_hex(id.face, cu, cv, res)
         * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
     let thickness = 0.025;
     let color = [1.0, 1.0, 0.0];
@@ -3624,7 +3624,7 @@ pub(crate) mod tests {
                     v,
                 };
                 let (verts, inds) = hex_cursor(&planet, id);
-                let corners = crate::hex::outline(u, v, 16).len();
+                let corners = crate::hex::outline(3, u, v, 16).len();
                 assert_eq!(verts.len(), corners * 3 * 6 * 4);
                 assert!(verts.len() <= CURSOR_MAX_VERTS && inds.len() <= CURSOR_MAX_INDS);
             }
@@ -3902,5 +3902,21 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert_eq!(Renderer::camera_water_radius(&planet, peak_dir), 0.0);
+    }
+
+    // an edit to a reaching cell remeshes chunks on both faces of its seam
+    #[test]
+    fn reaching_cell_edits_refresh_both_faces() {
+        let mut planet = PlanetData::new(64);
+        planet.cells = crate::common::CellShape::Hex;
+        let id = BlockId {
+            face: 0,
+            layer: 20,
+            u: 63,
+            v: 5,
+        }; // face 0 reaches across u = res into face 2
+        let keys = chunks_to_refresh(id, &planet);
+        assert!(keys.iter().any(|k| k.face == 0));
+        assert!(keys.iter().any(|k| k.face == 2), "{keys:?}");
     }
 }

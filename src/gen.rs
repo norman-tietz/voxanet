@@ -871,8 +871,8 @@ impl MeshGen {
         let corner = |p: (i64, i64), layer: u32| {
             CoordSystem::get_vertex_pos_six(id.face, p.0, p.1, layer, res)
         };
-        let (cu, cv) = crate::hex::centroid(&crate::hex::outline(id.u, id.v, res));
-        let centre_dir = CoordSystem::get_direction_f(id.face, cu, cv, res);
+        let (cu, cv) = crate::hex::centroid(&crate::hex::outline(id.face, id.u, id.v, res));
+        let centre_dir = CoordSystem::get_direction_hex(id.face, cu, cv, res);
         let block_center = centre_dir * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
         let water_here = data.water_surface_radius(id.face, id.u, id.v);
 
@@ -880,7 +880,7 @@ impl MeshGen {
         // walls closed by the split line); each part's vertices measure only the sides bounding it, so
         // every side's distance interpolates exactly within the part
         let n_walls = walls.len();
-        let parts: Vec<Vec<usize>> = match crate::hex::fan_split(id.u, id.v, res) {
+        let parts: Vec<Vec<usize>> = match crate::hex::fan_split(id.face, id.u, id.v, res) {
             None => vec![(0..n_walls).collect()],
             Some(x) => {
                 let left = |i: usize| walls[i].a.0.max(walls[i].b.0) <= x;
@@ -925,7 +925,7 @@ impl MeshGen {
                 } else {
                     let pts: Vec<_> = corners.iter().map(|c| c.0).collect();
                     let (pu, pv) = crate::hex::centroid(&pts);
-                    CoordSystem::get_direction_f(id.face, pu, pv, res) * radius
+                    CoordSystem::get_direction_hex(id.face, pu, pv, res) * radius
                 };
                 let pieces: Vec<_> = part
                     .iter()
@@ -1175,9 +1175,9 @@ impl MeshGen {
         for layer in clamp(c.layer as i32 - range, res * 2)..=c.layer + range as u32 {
             for v in clamp(c.v as i32 - range, res)..=clamp(c.v as i32 + range, res) {
                 for u in clamp(c.u as i32 - range, res)..=clamp(c.u as i32 + range, res) {
-                    let pts = crate::hex::outline(u, v, res);
+                    let pts = crate::hex::outline(c.face, u, v, res);
                     let (cu, cv) = crate::hex::centroid(&pts);
-                    let centre = CoordSystem::get_direction_f(c.face, cu, cv, res)
+                    let centre = CoordSystem::get_direction_hex(c.face, cu, cv, res)
                         * CoordSystem::get_layer_radius_f(layer as f32 + 0.5, res);
                     if !crate::physics::Physics::is_solid(centre, planet) {
                         continue;
@@ -1291,9 +1291,9 @@ impl MeshGen {
                     // the hex cell's outline (seam pieces included, so neighbouring faces' surfaces
                     // share their border vertices), a fan around its centre
                     let pts: Vec<_> = data.hex_walls(key.face, u, v).iter().map(|w| w.a).collect();
-                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(u, v, res));
+                    let (cu, cv) = crate::hex::centroid(&crate::hex::outline(key.face, u, v, res));
                     let radius = CoordSystem::get_layer_radius(level + 1, res);
-                    push(CoordSystem::get_direction_f(key.face, cu, cv, res) * radius);
+                    push(CoordSystem::get_direction_hex(key.face, cu, cv, res) * radius);
                     for &(u6, v6) in &pts {
                         push(CoordSystem::get_vertex_pos_six(
                             key.face,
