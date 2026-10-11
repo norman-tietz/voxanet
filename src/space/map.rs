@@ -12,6 +12,7 @@ use crate::space::solar_system::SolarSystem;
 
 pub const D_MAX: f32 = 100.0; // map distance of the outermost orbit
 pub const STAR_MAP_RADIUS: f32 = 5.0; // the star's radius on the map
+const ZOOM_MIN: f32 = STAR_MAP_RADIUS * 2.0; // the map camera's closest distance to the star
 pub const MAX_FILL: f32 = 0.35; // the largest planet's share of the smallest orbit gap
 
 pub struct MapLayout {
@@ -116,9 +117,10 @@ impl MapCamera {
         self.pitch = (self.pitch + dy_px * ROTATE_PER_PX).clamp(PITCH_MIN, PITCH_MAX);
     }
 
-    // positive steps zoom in
+    // positive steps zoom in; the camera orbits the star, so the closest it gets keeps the eye
+    // outside the star (ZOOM_MIN)
     pub fn zoom(&mut self, steps: f32) {
-        self.distance = (self.distance * 0.9f32.powf(steps)).clamp(D_MAX * 0.05, D_MAX * 4.0);
+        self.distance = (self.distance * 0.9f32.powf(steps)).clamp(ZOOM_MIN, D_MAX * 4.0);
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // the renderer builds its own; tests check the rays against it
@@ -388,5 +390,15 @@ mod tests {
             pick_planet(&s, &m, &cam, Vec2::new(2.0, 2.0), screen, 0.0),
             None
         );
+    }
+
+    // review minor 3: zooming all the way in keeps the eye well outside the star
+    #[test]
+    fn zoom_stops_outside_the_star() {
+        let mut c = MapCamera::default_view();
+        c.zoom(1000.0);
+        assert!(c.eye().length() >= 2.0 * STAR_MAP_RADIUS - 1e-4);
+        c.zoom(-1000.0);
+        assert!((c.distance - D_MAX * 4.0).abs() < 1e-3);
     }
 }

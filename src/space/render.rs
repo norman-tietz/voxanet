@@ -297,8 +297,15 @@ pub struct RingVertex {
     pub color: [f32; 4],
 }
 
-// the most ring vertices drawn (15 orbits × 128 segments × 2, plus a 256-segment travel line)
-const MAX_RING_VERTS: usize = 15 * 128 * 2 + 256 * 2;
+// the map's line budget: every orbit ring (RING_SEGMENTS each), the travel line (TRAVEL_LINE_POINTS
+// points) and three circles (selection, hover, ship; CIRCLE_SEGMENTS each), two vertices per segment
+pub const RING_SEGMENTS: usize = 128;
+pub const TRAVEL_LINE_POINTS: usize = 65;
+pub const CIRCLE_SEGMENTS: usize = 48;
+const MAX_RING_VERTS: usize = (crate::space::solar_system::MAX_PLANETS * RING_SEGMENTS
+    + (TRAVEL_LINE_POINTS - 1)
+    + 3 * CIRCLE_SEGMENTS)
+    * 2;
 
 // where a camera-relative offset lands on screen (pixels, y down); None behind the camera
 pub fn project(camera: &SpaceCamera, offset: Vec3, screen: (f32, f32)) -> Option<glam::Vec2> {
@@ -864,6 +871,13 @@ impl SpaceRenderer {
         rings: &[RingVertex], // the map's orbit rings and travel line (empty at true scale)
     ) {
         self.write_camera(queue, camera, t, screen, 0.0);
+        debug_assert!(rings.len() <= MAX_RING_VERTS, "map lines over budget");
+        if rings.len() > MAX_RING_VERTS {
+            eprintln!(
+                "map lines over budget: {} of {MAX_RING_VERTS} vertices drawn",
+                rings.len()
+            );
+        }
         let rings = &rings[..rings.len().min(MAX_RING_VERTS)];
         if !rings.is_empty() {
             queue.write_buffer(&self.ring_buf, 0, bytemuck::cast_slice(rings));

@@ -206,8 +206,8 @@ pub struct Renderer {
     precip_gpu: crate::weather::precipitation::PrecipGpu, // and its draw (precip.wgsl)
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
-    perf_message: Option<String>,
-    pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs) // its finished summary, for the console
+    perf_message: Option<String>, // its finished summary, for the console
+    pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs)
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
@@ -3490,10 +3490,6 @@ impl Renderer {
         self.queue.present(out);
     }
 
-    // SolarSystem-mode HUD, drawn over the finished system frame: the same FPS readout as planet mode,
-    // plus a compass strip across the top showing where the star and each planet are relative to
-    // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
-    #[allow(clippy::too_many_arguments)]
     // the solar-system map (space/map.rs): the space renderer in Layout::Map with orbit rings, then the
     // labels, hover and selection rings, "you are here", the info panel and the help line
     #[allow(clippy::too_many_arguments)]
@@ -3565,11 +3561,13 @@ impl Renderer {
         };
         for p in &system.planets {
             let period = std::f64::consts::TAU / p.orbit_speed.abs().max(1e-9);
-            let pts: Vec<Vec3> = (0..128)
-                .map(|k| map.position(p.position_at(t + period * k as f64 / 128.0) - star))
+            let n = crate::space::render::RING_SEGMENTS;
+            let pts: Vec<Vec3> = (0..n)
+                .map(|k| map.position(p.position_at(t + period * k as f64 / n as f64) - star))
                 .collect();
             polyline(&pts, [0.55, 0.6, 0.7, 0.35], true, &mut rings);
         }
+        debug_assert!(travel_line.len() <= crate::space::render::TRAVEL_LINE_POINTS);
         if travel_line.len() > 1 {
             let pts: Vec<Vec3> = travel_line
                 .iter()
@@ -3582,9 +3580,10 @@ impl Renderer {
             let to_eye = (eye - c).normalize();
             let a = to_eye.cross(Vec3::Y).normalize_or(Vec3::X);
             let b = to_eye.cross(a);
-            (0..48)
+            let n = crate::space::render::CIRCLE_SEGMENTS;
+            (0..n)
                 .map(|k| {
-                    let ang = std::f32::consts::TAU * k as f32 / 48.0;
+                    let ang = std::f32::consts::TAU * k as f32 / n as f32;
                     c + (a * ang.cos() + b * ang.sin()) * r
                 })
                 .collect()
@@ -3869,6 +3868,9 @@ impl Renderer {
         self.queue.submit(std::iter::once(enc.finish()));
     }
 
+    // Space-mode HUD, drawn over the finished system frame: the same FPS readout as planet mode,
+    // plus a compass strip across the top showing where the star and each planet are relative to
+    // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
     fn render_space_overlay(
         &mut self,
         view: &wgpu::TextureView,

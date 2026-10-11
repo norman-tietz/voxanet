@@ -99,10 +99,14 @@ enum GameMode {
 }
 
 // Space mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
-// third person (Controller::raw_input gates it on first_person && !mouse_released)
-fn enter_space_controls(controller: &mut Controller) {
+// third person (Controller::raw_input gates it on first_person && !mouse_released). With the map open
+// the cursor stays free for it and the captured state is what closing the map restores.
+fn enter_space_controls(controller: &mut Controller, map: &mut Option<crate::space::map::MapView>) {
     controller.first_person = true;
-    controller.mouse_released = false;
+    match map {
+        Some(m) => m.restore_mouse_released = false,
+        None => controller.mouse_released = false,
+    }
 }
 
 // a planet baked on a background thread: its voxel world plus the near impostor built from it
@@ -267,6 +271,7 @@ struct Game {
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
     travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
+    trip_mouse: TripMouse,  // mouse motion during a trip, toward cancelling it
     visited: std::collections::HashSet<usize>, // planets whose voxel world has been installed this session
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
 }
@@ -278,10 +283,57 @@ enum Travel {
     Cruise(crate::space::travel::Trip),
 }
 
-// while the autopilot flies it owns the flight: no capture or release by the planets it passes, no heat
-// push, no manual flight (the space-mode autopilot arm in Game::tick)
-fn travel_owns_frame(travel: &Option<Travel>) -> bool {
-    travel.is_some()
+// which space-mode arm of Game::tick runs: while the autopilot flies it owns the flight (no capture or
+// release by the planets it passes, no heat push, no manual flight); only the manual arm calls
+// next_flight_frame
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SpaceArm {
+    Autopilot,
+    Manual,
+}
+
+fn space_arm(travel: &Option<Travel>) -> SpaceArm {
+    match travel {
+        Some(_) => SpaceArm::Autopilot,
+        None => SpaceArm::Manual,
+    }
+}
+
+// the mouse turns the view only in first person with the cursor captured, the console and map closed
+fn mouse_turns_view(
+    first_person: bool,
+    released: bool,
+    console_open: bool,
+    map_open: bool,
+) -> bool {
+    first_person && !released && !console_open && !map_open
+}
+
+const TRIP_MOUSE_GRACE: f32 = 0.4; // seconds after a trip starts or the mouse comes back before it counts
+const TRIP_MOUSE_CANCEL: f32 = 40.0; // pixels of turning, summed, that take over a running trip
+
+// the mouse motion that would turn the view during a trip, summed since it last started counting
+struct TripMouse {
+    since: Instant, // counting starts TRIP_MOUSE_GRACE after this
+    sum: f32,
+}
+
+impl TripMouse {
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            sum: 0.0,
+        }
+    }
+
+    // adds a motion; true once the sum exceeds the cancel threshold
+    fn add(&mut self, delta: (f64, f64), now: Instant) -> bool {
+        if now.duration_since(self.since).as_secs_f32() < TRIP_MOUSE_GRACE {
+            return false;
+        }
+        self.sum += delta.0.hypot(delta.1) as f32;
+        self.sum > TRIP_MOUSE_CANCEL
+    }
 }
 
 // 1..9 from the number row or the keypad
@@ -359,6 +411,8 @@ impl Game {
         if let Some(Travel::Cruise(trip)) = self.travel.take() {
             let t = self.clock.now();
             self.space_flight.velocity = crate::space::travel::cancel_velocity(trip.velocity(t));
+            self.space_flight.roll_rate = 0.0;
+            self.space_flight.turn_rate = 0.0;
         }
         self.renderer.travel_hud = None;
         self.renderer.show_status("Travel cancelled.");
@@ -444,6 +498,7 @@ impl Game {
             voxel_ready_announced: false,
             map: None,
             travel: None,
+            trip_mouse: TripMouse::new(Instant::now()),
             visited: std::collections::HashSet::new(),
             landed_at: None,
             clock,
@@ -481,6 +536,7 @@ impl Game {
             map,
             visited,
             travel,
+            trip_mouse,
             clock,
             loaded_world,
             start_planet,
@@ -497,7 +553,7 @@ impl Game {
 
         // cursor locking logic: locked only in first person, and only while the mouse hasn't been
         // explicitly released (Escape) without leaving first person
-        let want_locked = controller.first_person && !controller.mouse_released;
+        let want_locked = controller.first_person && !controller.mouse_released && map.is_none();
         if want_locked != *current_cursor_locked {
             *current_cursor_locked = want_locked;
             if *current_cursor_locked {
@@ -512,12 +568,32 @@ impl Game {
         let mut land_on: Option<usize> = None; // landing handover this tick (planet index)
         let mut lift_off_from: Option<usize> = None; // liftoff handover this tick
 
+        // during a trip the mouse turns nothing: its motion only counts toward cancelling (device_event),
+        // and the count restarts (with its grace period) whenever the mouse can't turn the view
+        if travel.is_some() {
+            controller.mouse_delta = (0.0, 0.0);
+            if !mouse_turns_view(
+                controller.first_person,
+                controller.mouse_released,
+                console.is_open,
+                map.is_some(),
+            ) {
+                *trip_mouse = TripMouse::new(now);
+            }
+        }
+
         // physics & player Update (once per tick: movement and turning speeds are per second)
         match mode {
             GameMode::Planet => {
+                let climbing = matches!(travel, Some(Travel::Climb { .. }));
+                if climbing {
+                    // the climb moves the player itself: update_player mustn't integrate it again
+                    player.velocity = glam::Vec3::ZERO;
+                }
                 controller.update_player(player, planet, dt);
-                // the trip's climb: straight up, faster with altitude, until the liftoff handover below
-                if let Some(Travel::Climb { .. }) = travel {
+                // the trip's climb: straight up, faster with altitude, until the liftoff handover below;
+                // the velocity is set for the handover and the cruise's start direction
+                if climbing {
                     let up = player.position.normalize_or_zero();
                     let altitude = player.position.length() - planet.resolution as f32 / 2.0;
                     let speed = crate::space::travel::climb_speed(altitude);
@@ -541,7 +617,7 @@ impl Game {
                     lift_off_from = Some(*loaded_world);
                 }
             }
-            GameMode::Space if travel_owns_frame(travel) => {
+            GameMode::Space if space_arm(travel) == SpaceArm::Autopilot => {
                 let t = clock.now();
                 // the first space frame of a trip: plan the cruise from here, in space (Free frame), and
                 // bake the target's voxel world meanwhile
@@ -557,6 +633,7 @@ impl Game {
                         target,
                         space_flight.position,
                         dir,
+                        fwd,
                         t,
                     );
                     *travel = Some(Travel::Cruise(trip));
@@ -573,14 +650,14 @@ impl Game {
                     let n = trip.target;
                     let name = system.planets[n].planet_type.def().name;
                     if trip.done(t) {
-                        // in the target's orbit, at rest relative to it, looking at its centre
+                        // in the target's orbit, at rest relative to it (the trip ends co-moving),
+                        // looking at its centre with the roll it flew with: the view turned into the
+                        // planet's frame
+                        let view = trip.view_rotation(system, t, space_flight.rotation);
                         *flight_frame = FlightFrame::Captured(n);
                         space_flight.position = trip.arrival_local;
                         space_flight.velocity = glam::DVec3::ZERO;
-                        space_flight.rotation = glam::Quat::from_rotation_arc(
-                            glam::Vec3::NEG_Z,
-                            -trip.arrival_local.normalize().as_vec3(),
-                        );
+                        space_flight.rotation = system.planets[n].rotation_to_planet_frame(view, t);
                         space_flight.roll_rate = 0.0;
                         space_flight.turn_rate = 0.0;
                         renderer.travel_hud = None;
@@ -589,7 +666,8 @@ impl Game {
                     } else {
                         space_flight.position = trip.position(t);
                         space_flight.velocity = trip.velocity(t);
-                        space_flight.rotation = trip.view_rotation(system, t);
+                        space_flight.rotation =
+                            trip.view_rotation(system, t, space_flight.rotation);
                         renderer.travel_hud = Some(format!(
                             "-> #{} {name}  {:.0} s",
                             n + 1,
@@ -599,6 +677,7 @@ impl Game {
                 }
             }
             GameMode::Space => {
+                debug_assert_eq!(space_arm(travel), SpaceArm::Manual);
                 let (_, jump, down, sprint, mouse_delta) = controller.raw_input();
                 let (input, keys) = controller.space_flight_input();
                 // turning and climbing follow space's +Y in free flight, the local radial up
@@ -736,7 +815,7 @@ impl Game {
             *flight_frame = FlightFrame::Captured(i);
             player.landing = false;
             *mode = GameMode::Space;
-            enter_space_controls(controller);
+            enter_space_controls(controller, map);
             println!("Liftoff into the orbit of #{}", i + 1);
         }
 
@@ -820,9 +899,11 @@ impl Game {
             };
             match request {
                 SystemRequest::Home => {
-                    // a running bake was for wherever the player was flying: drop it
+                    // a running bake was for wherever the player was flying: drop it, and the trip too
                     *bake_rx = None;
                     *baking = None;
+                    *travel = None;
+                    renderer.travel_hud = None;
                     let i = *start_planet;
                     if *loaded_world != i {
                         let baked = bake_planet(system, i, edits_by_planet.remove(&i));
@@ -882,7 +963,9 @@ impl Game {
                             glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
                         *flight_frame = FlightFrame::Captured(n - 1);
                         *mode = GameMode::Space;
-                        enter_space_controls(controller);
+                        *travel = None;
+                        renderer.travel_hud = None;
+                        enter_space_controls(controller, map);
                         say(
                             console,
                             &format!(
@@ -987,6 +1070,7 @@ impl Game {
                     player.taking_off = None;
                 }
                 *travel = Some(Travel::Climb { target: n });
+                *trip_mouse = TripMouse::new(now);
                 let name = system.planets[n].planet_type.def().name;
                 renderer.show_status(&format!("Travelling to #{} {name}...", n + 1));
             }
@@ -1230,12 +1314,15 @@ impl Game {
                 self.map = Some(open_map(controller));
                 return;
             }
-            // a movement key takes over a running trip (the key acts from its next press)
+            // a movement key (or F, which would otherwise start a landing against the climb) takes over a
+            // running trip; the key acts from its next press
             if self.travel.is_some()
                 && key_event.state == ElementState::Pressed
                 && matches!(
                     key_event.physical_key,
-                    PhysicalKey::Code(KeyW | KeyA | KeyS | KeyD | KeyQ | KeyE | Space | ShiftLeft)
+                    PhysicalKey::Code(
+                        KeyW | KeyA | KeyS | KeyD | KeyQ | KeyE | Space | ShiftLeft | KeyF
+                    )
                 )
             {
                 self.cancel_travel();
@@ -1402,9 +1489,14 @@ impl Game {
                     };
                     // a running trip's path, drawn on the map
                     let line: Vec<glam::DVec3> = match &self.travel {
-                        Some(Travel::Cruise(trip)) => (0..=64)
-                            .map(|k| trip.position(trip.t0 + trip.duration * k as f64 / 64.0))
-                            .collect(),
+                        Some(Travel::Cruise(trip)) => {
+                            let n = crate::space::render::TRAVEL_LINE_POINTS - 1;
+                            (0..=n)
+                                .map(|k| {
+                                    trip.position(trip.t0 + trip.duration * k as f64 / n as f64)
+                                })
+                                .collect()
+                        }
                         _ => Vec::new(),
                     };
                     renderer.render_map(
@@ -1512,8 +1604,17 @@ impl ApplicationHandler for App {
         let Some(game) = &mut self.game else { return };
         game.tick();
         if let DeviceEvent::MouseMotion { delta } = event {
-            // turning the view takes over a running trip (not while the map has the mouse)
-            if game.travel.is_some() && game.map.is_none() && delta.0.hypot(delta.1) > 3.0 {
+            // turning the view takes over a running trip: only motion that would turn it, summed past a
+            // threshold after a short grace period (TripMouse; the tick drops the motion meanwhile)
+            if game.travel.is_some()
+                && mouse_turns_view(
+                    game.controller.first_person,
+                    game.controller.mouse_released,
+                    game.console.is_open,
+                    game.map.is_some(),
+                )
+                && game.trip_mouse.add(delta, Instant::now())
+            {
                 game.cancel_travel();
             }
             game.controller.process_mouse_motion(delta);
@@ -1536,24 +1637,44 @@ mod tests {
     use super::*;
 
     // Review Focus 5: the autopilot owns the flight frame while it runs, so the planets it passes can't
-    // capture it mid-trip (the guarded match arm comes before the manual space-mode arm)
+    // capture it mid-trip (next_flight_frame runs only in the manual arm, which asserts it's chosen)
     #[test]
     fn travel_owns_the_flight_frame() {
-        assert!(!travel_owns_frame(&None));
-        assert!(travel_owns_frame(&Some(Travel::Climb { target: 2 })));
-        let src = include_str!("main.rs");
-        let guarded = src
-            .find("GameMode::Space if travel_owns_frame(travel) =>")
-            .unwrap();
-        let manual = src[guarded..].find("next_flight_frame(").unwrap() + guarded;
-        let manual_arm = src[guarded..]
-            .find("            GameMode::Space => {")
-            .unwrap()
-            + guarded;
-        assert!(
-            manual_arm < manual,
-            "next_flight_frame only in the manual arm"
+        assert_eq!(space_arm(&None), SpaceArm::Manual);
+        assert_eq!(
+            space_arm(&Some(Travel::Climb { target: 2 })),
+            SpaceArm::Autopilot
         );
+        let s = crate::space::solar_system::SolarSystem::generate(1);
+        let trip = crate::space::travel::Trip::plan(
+            &s,
+            3,
+            s.planets[0].position_at(0.0),
+            glam::DVec3::Y,
+            glam::DVec3::Y,
+            0.0,
+        );
+        assert_eq!(space_arm(&Some(Travel::Cruise(trip))), SpaceArm::Autopilot);
+    }
+
+    // Important 1: only motion that turns the view counts, after a grace period, summed to a threshold
+    #[test]
+    fn mouse_cancels_a_trip_only_when_it_turns_the_view() {
+        assert!(mouse_turns_view(true, false, false, false));
+        assert!(!mouse_turns_view(false, false, false, false)); // third person
+        assert!(!mouse_turns_view(true, true, false, false)); // cursor freed
+        assert!(!mouse_turns_view(true, false, true, false)); // console open
+        assert!(!mouse_turns_view(true, false, false, true)); // map open
+        let t0 = Instant::now();
+        let at = |s: f32| t0 + std::time::Duration::from_secs_f32(s);
+        let mut m = TripMouse::new(t0);
+        // within the grace period nothing counts, however large
+        assert!(!m.add((500.0, 0.0), at(0.2)));
+        // small drift adds up slowly
+        for k in 0..9 {
+            assert!(!m.add((3.0, 3.0), at(0.5 + k as f32 * 0.01)));
+        }
+        assert!(m.add((30.0, 0.0), at(0.7)));
     }
 
     // no block targeted (no selection box, no mining, placing or picking) while flying

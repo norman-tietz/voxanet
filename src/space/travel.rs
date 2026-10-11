@@ -3,14 +3,16 @@
 // solar-system space — exact arrival point from the analytic orbits, a cubic Bézier bent around the star's
 // heat zone, smootherstep along the arc length — and the cancel speed cap. main.rs runs the stages.
 
-use glam::{DVec3, Quat, Vec3};
+use glam::{DQuat, DVec3, Quat, Vec3};
 
-use crate::space::solar_system::{SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED};
+use crate::space::solar_system::{Planet, SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED};
 
 pub const ORBIT_RADII: f64 = 3.5;
 const LUT: usize = 256;
 const HEAT_MARGIN: f64 = 1.2;
 const LOOK_SHARE: f64 = 0.25; // the last quarter turns the view toward the planet
+const START_SHARE: f64 = 0.15; // the first 15 % turns it from where it looked into the flight direction
+const CHECK_SAMPLES: usize = 256; // samples of the final heat-zone check
 
 pub fn duration(distance: f64) -> f64 {
     (6.0 + 1.5 * (distance / 1000.0).max(1e-9).log10()).clamp(6.0, 12.0)
@@ -45,19 +47,60 @@ pub struct Trip {
     pub t0: f64,
     pub duration: f64,
     pub arrival_local: DVec3, // the orbit point in the target's frame
+    planet: Planet,           // the target's orbit, for the co-moving arrival
+    start_forward: DVec3,     // the view direction when the trip was planned
     ctrl: [DVec3; 4],
     lut: Vec<f64>, // cumulative arc length at u = i / LUT, normalised to 0..1
 }
 
+// cumulative arc length of the Bézier at u = i / LUT, normalised to 0..1
+fn arc_lut(ctrl: &[DVec3; 4]) -> Vec<f64> {
+    let mut lut = vec![0.0; LUT + 1];
+    let mut prev = ctrl[0];
+    for i in 1..=LUT {
+        let q = bezier(ctrl, i as f64 / LUT as f64);
+        lut[i] = lut[i - 1] + (q - prev).length();
+        prev = q;
+    }
+    let total = lut[LUT];
+    if total > 0.0 {
+        lut.iter_mut().for_each(|l| *l /= total);
+    } else {
+        lut.iter_mut()
+            .enumerate()
+            .for_each(|(i, l)| *l = i as f64 / LUT as f64);
+    }
+    lut
+}
+
+// turns direction a toward b by the share f of the angle between them (about the axis `fallback`
+// when they're opposite, so the turn never passes through a zero vector)
+fn turn_toward(a: DVec3, b: DVec3, f: f64, fallback: DVec3) -> DVec3 {
+    let cos = a.dot(b).clamp(-1.0, 1.0);
+    let angle = cos.acos();
+    if angle * f < 1e-9 {
+        return a;
+    }
+    let axis = a
+        .cross(b)
+        .try_normalize()
+        .or_else(|| a.cross(fallback).try_normalize())
+        .or_else(|| a.any_orthogonal_vector().try_normalize())
+        .unwrap_or(DVec3::Y);
+    DQuat::from_axis_angle(axis, angle * f) * a
+}
+
 impl Trip {
+    // start_forward: the view direction now, which the view leaves over the first START_SHARE of the trip
     pub fn plan(
         system: &SolarSystem,
         target: usize,
         start: DVec3,
         start_dir: DVec3,
+        start_forward: DVec3,
         t0: f64,
     ) -> Trip {
-        let p = &system.planets[target];
+        let p = system.planets[target];
         let star = system.star.position();
         // the planet moves during the trip: settle the duration on the distance to where it will be
         let mut dur = duration((p.position_at(t0) - start).length());
@@ -98,29 +141,45 @@ impl Trip {
             ctrl[1] += push;
             ctrl[2] += push;
         }
-        let mut lut = vec![0.0; LUT + 1];
-        let mut prev = ctrl[0];
-        for i in 1..=LUT {
-            let q = bezier(&ctrl, i as f64 / LUT as f64);
-            lut[i] = lut[i - 1] + (q - prev).length();
-            prev = q;
-        }
-        let total = lut[LUT];
-        if total > 0.0 {
-            lut.iter_mut().for_each(|l| *l /= total);
-        } else {
-            lut.iter_mut()
-                .enumerate()
-                .for_each(|(i, l)| *l = i as f64 / LUT as f64);
-        }
-        Trip {
+        let mut trip = Trip {
             target,
             t0,
             duration: dur,
             arrival_local,
+            planet: p,
+            start_forward: start_forward.normalize_or(start_dir.normalize_or(out)),
             ctrl,
-            lut,
+            lut: arc_lut(&ctrl),
+        };
+        // the final check on the path actually flown (the co-moving term included): if it still
+        // touches the zone, swing both inner control points out to one side of the star, wider each
+        // time, until it clears
+        let zone = HEAT_ZONE_RADII * system.star.radius;
+        let mid = (start + arrival) * 0.5 - star;
+        let chord = (arrival - start).normalize_or(DVec3::X);
+        let side = (mid - chord * mid.dot(chord))
+            .try_normalize()
+            .or_else(|| chord.cross(DVec3::Y).try_normalize())
+            .unwrap_or(DVec3::Z);
+        let mut reach = limit.max(start.distance(star)).max(arrival.distance(star)) * 1.5;
+        for _ in 0..16 {
+            if trip.clears(star, (zone * 1.05).min(start.distance(star) * 0.999)) {
+                break;
+            }
+            trip.ctrl[1] = star + side * reach + (start - star) * 0.5;
+            trip.ctrl[2] = star + side * reach + (arrival - star) * 0.5;
+            trip.lut = arc_lut(&trip.ctrl);
+            reach *= 1.5;
         }
+        trip
+    }
+
+    // the flown path stays farther than `limit` from the star
+    fn clears(&self, star: DVec3, limit: f64) -> bool {
+        (0..=CHECK_SAMPLES).all(|i| {
+            let t = self.t0 + self.duration * i as f64 / CHECK_SAMPLES as f64;
+            self.position(t).distance(star) > limit
+        })
     }
 
     // curve parameter u for an arc-length fraction s
@@ -131,9 +190,14 @@ impl Trip {
         ((i - 1) as f64 + f) / LUT as f64
     }
 
+    // along the curve, plus the target's motion blended in (0 at both ends), so the ship arrives
+    // co-moving with the planet instead of at rest in solar-system space
     pub fn position(&self, t: f64) -> DVec3 {
-        let s = smootherstep((t - self.t0) / self.duration);
-        bezier(&self.ctrl, self.u_at(s))
+        let x = (t - self.t0) / self.duration;
+        let s = smootherstep(x);
+        let t1 = self.t0 + self.duration;
+        let follow = self.planet.position_at(t) - self.planet.position_at(t1);
+        bezier(&self.ctrl, self.u_at(s)) + follow * s
     }
 
     pub fn velocity(&self, t: f64) -> DVec3 {
@@ -149,16 +213,34 @@ impl Trip {
         (self.t0 + self.duration - t).max(0.0)
     }
 
-    // along the flight, turning toward the planet over the last quarter (roll: shortest arc from -Z)
-    pub fn view_rotation(&self, system: &SolarSystem, t: f64) -> Quat {
+    // where the view should look at t: from the view direction at plan time toward the flight
+    // direction over the first START_SHARE, toward the planet over the last LOOK_SHARE
+    fn desired_forward(&self, system: &SolarSystem, t: f64) -> DVec3 {
+        let x = (t - self.t0) / self.duration;
         let pos = self.position(t);
         let along = self
             .velocity(t)
-            .normalize_or((self.ctrl[3] - pos).normalize_or(DVec3::NEG_Z));
+            .try_normalize()
+            .unwrap_or_else(|| (self.ctrl[3] - pos).normalize_or(self.start_forward));
         let to_planet = (system.planets[self.target].position_at(t) - pos).normalize_or(along);
-        let f = smootherstep(((t - self.t0) / self.duration - (1.0 - LOOK_SHARE)) / LOOK_SHARE);
-        let dir = along.lerp(to_planet, f).normalize_or(to_planet).as_vec3();
-        Quat::from_rotation_arc(Vec3::NEG_Z, dir)
+        let f_start = smootherstep(x / START_SHARE);
+        let f_end = smootherstep((x - (1.0 - LOOK_SHARE)) / LOOK_SHARE);
+        let fallback = self.start_forward.cross(along).normalize_or(DVec3::Y);
+        let base = turn_toward(self.start_forward, along, f_start, fallback);
+        turn_toward(base, to_planet, f_end, fallback)
+    }
+
+    // the view at t, turned from the current one by the shortest arc to the desired direction: no
+    // fixed reference axis, so the player's roll is kept and no heading is singular
+    pub fn view_rotation(&self, system: &SolarSystem, t: f64, current: Quat) -> Quat {
+        let cur = (current * Vec3::NEG_Z).normalize();
+        let want = self.desired_forward(system, t).as_vec3().normalize_or(cur);
+        if cur.dot(want) < -0.9999 {
+            // exactly opposite: turn about the camera's own up rather than an arbitrary axis
+            let up = current * Vec3::Y;
+            return (Quat::from_axis_angle(up, std::f32::consts::PI) * current).normalize();
+        }
+        (Quat::from_rotation_arc(cur, want) * current).normalize()
     }
 }
 
@@ -184,7 +266,7 @@ mod tests {
     fn trip_ends_at_the_orbit_point_at_arrival() {
         let s = sys();
         let start = s.planets[0].position_at(0.0) + DVec3::new(0.0, 500.0, 0.0);
-        let trip = Trip::plan(&s, 3, start, DVec3::Y, 0.0);
+        let trip = Trip::plan(&s, 3, start, DVec3::Y, DVec3::X, 0.0);
         let t1 = trip.t0 + trip.duration;
         let p = &s.planets[3];
         let expected = p.from_planet_frame(trip.arrival_local, t1);
@@ -200,7 +282,14 @@ mod tests {
     #[test]
     fn speed_is_smooth_and_eases_in_and_out() {
         let s = sys();
-        let trip = Trip::plan(&s, 4, s.planets[0].position_at(0.0), DVec3::X, 0.0);
+        let trip = Trip::plan(
+            &s,
+            4,
+            s.planets[0].position_at(0.0),
+            DVec3::X,
+            DVec3::X,
+            0.0,
+        );
         let n = 200;
         let mut prev = trip.position(0.0);
         let mut speeds = Vec::new();
@@ -228,7 +317,7 @@ mod tests {
         let target = 2;
         let tp = s.planets[target].position_at(0.0) - s.star.position();
         let start = s.star.position() - tp;
-        let trip = Trip::plan(&s, target, start, DVec3::Y, 0.0);
+        let trip = Trip::plan(&s, target, start, DVec3::Y, DVec3::Y, 0.0);
         let limit = HEAT_ZONE_RADII * s.star.radius;
         for i in 0..=400 {
             let t = trip.duration * i as f64 / 400.0;
@@ -252,7 +341,7 @@ mod tests {
                 * p.radius as f64,
             t1_guess,
         );
-        let trip = Trip::plan(&s, 1, start, DVec3::Z, 0.0);
+        let trip = Trip::plan(&s, 1, start, DVec3::Z, DVec3::Z, 0.0);
         assert_eq!(trip.duration, 6.0);
         for i in 0..=20 {
             let t = trip.duration * i as f64 / 20.0;
@@ -272,14 +361,142 @@ mod tests {
         assert!(climb_speed(0.0) >= 15.0);
     }
 
+    // flies a whole trip at 60 Hz the way main.rs does, returning the view at every frame
+    fn fly(s: &SolarSystem, trip: &Trip, start: Quat) -> Vec<(f64, Quat)> {
+        let mut q = start;
+        let mut out = vec![(trip.t0, q)];
+        let frames = (trip.duration * 60.0).ceil() as usize;
+        for k in 1..frames {
+            let t = trip.t0 + k as f64 / 60.0;
+            q = trip.view_rotation(s, t, q);
+            out.push((t, q));
+        }
+        out
+    }
+
     #[test]
     fn view_turns_toward_the_planet_at_the_end() {
         let s = sys();
-        let trip = Trip::plan(&s, 5, s.planets[0].position_at(0.0), DVec3::X, 0.0);
-        let t1 = trip.t0 + trip.duration - 1e-3;
-        let fwd = (trip.view_rotation(&s, t1) * glam::Vec3::NEG_Z).as_dvec3();
-        let to_planet = (s.planets[5].position_at(t1) - trip.position(t1)).normalize();
+        let trip = Trip::plan(
+            &s,
+            5,
+            s.planets[0].position_at(0.0),
+            DVec3::X,
+            DVec3::NEG_Z,
+            0.0,
+        );
+        let views = fly(&s, &trip, Quat::IDENTITY);
+        let (t, q) = *views.last().unwrap();
+        let fwd = (q * Vec3::NEG_Z).as_dvec3();
+        let to_planet = (s.planets[5].position_at(t) - trip.position(t)).normalize();
         assert!(fwd.dot(to_planet) > 0.99);
-        assert!(trip.remaining(trip.t0) > trip.remaining(t1));
+        assert!(trip.remaining(trip.t0) > trip.remaining(t));
+    }
+
+    // Important 2: the view starts where the player looked, with the player's roll, and turns only by
+    // shortest arcs: no twist about the view axis, no snaps, no singular heading
+    #[test]
+    fn view_keeps_the_roll_and_never_jumps() {
+        let s = sys();
+        let rolled = Quat::from_rotation_z(0.7) * Quat::from_rotation_x(0.2);
+        let start_fwd = (rolled * Vec3::NEG_Z).as_dvec3();
+        let trip = Trip::plan(
+            &s,
+            4,
+            s.planets[0].position_at(0.0),
+            DVec3::Y,
+            start_fwd,
+            0.0,
+        );
+        let views = fly(&s, &trip, rolled);
+        // the first frame is the player's own view, roll included
+        assert!(views[1].1.angle_between(rolled) < 1e-3);
+        let mut twist = 0.0f32;
+        for w in views.windows(2) {
+            let (a, b) = (w[0].1, w[1].1);
+            assert!(
+                a.angle_between(b) < 10f32.to_radians(),
+                "a jump at {}",
+                w[1].0
+            );
+            // the turn's component about the view axis (shortest arcs have none to first order)
+            let (axis, angle) = (b * a.inverse()).to_axis_angle();
+            twist += axis.dot(b * Vec3::NEG_Z) * angle;
+        }
+        assert!(twist.abs() < 2f32.to_radians(), "twisted by {twist}");
+    }
+
+    #[test]
+    fn view_heading_through_plus_z_is_calm() {
+        let s = sys();
+        let target = 3;
+        let guess = s.planets[target].position_at(9.0);
+        // start behind the target along -Z and to its side, heading +X+Z: the heading has to swing
+        // across +Z (with a small vertical component) to come round to the planet
+        let start = guess - DVec3::Z * 30000.0 - DVec3::X * 6000.0 + DVec3::Y * 50.0;
+        let heading = DVec3::new(1.0, 0.02, 1.0).normalize();
+        let trip = Trip::plan(&s, target, start, heading, heading, 0.0);
+        let look = Quat::from_rotation_arc(Vec3::NEG_Z, heading.as_vec3());
+        let views = fly(&s, &trip, look);
+        let mut crossed = false;
+        for w in views.windows(2) {
+            let (a, b) = (w[0].1, w[1].1);
+            assert!(
+                a.angle_between(b) < 10f32.to_radians(),
+                "a jump at {}",
+                w[1].0
+            );
+            assert!((a * Vec3::Y).dot(b * Vec3::Y) > 10f32.to_radians().cos());
+            let (fa, fb) = (a * Vec3::NEG_Z, b * Vec3::NEG_Z);
+            crossed |= fa.x.signum() != fb.x.signum() && fb.z > 0.5;
+        }
+        assert!(crossed, "the heading never crossed +Z");
+    }
+
+    // Important 3: the trip ends co-moving with the planet
+    #[test]
+    fn arrival_moves_with_the_planet() {
+        let s = sys();
+        for target in [0, 3, 6] {
+            let start = s.planets[(target + 2) % 7].position_at(0.0) + DVec3::Y * 300.0;
+            let trip = Trip::plan(&s, target, start, DVec3::Y, DVec3::Y, 0.0);
+            let t1 = trip.t0 + trip.duration;
+            let p = &s.planets[target];
+            let planet_v = (p.position_at(t1 + 1e-3) - p.position_at(t1 - 1e-3)) / 2e-3;
+            let v = trip.velocity(t1 - 0.02);
+            assert!(
+                (v - planet_v).length() < 0.05 * planet_v.length(),
+                "#{target}: {v} vs {planet_v}"
+            );
+            // over the last frame or so the ship barely moves relative to the planet
+            let rel = |t: f64| trip.position(t) - p.position_at(t);
+            let d = (rel(t1) - rel(t1 - 0.02)).length();
+            assert!(d < 0.5, "#{target}: {d}");
+        }
+    }
+
+    // Minor 6: whatever the start, the flown path never enters the heat zone
+    #[test]
+    fn no_start_enters_the_heat_zone() {
+        let s = sys();
+        let star = s.star.position();
+        let zone = HEAT_ZONE_RADII * s.star.radius;
+        for target in 0..s.planets.len() {
+            for k in 0..12 {
+                let ang = std::f64::consts::TAU * k as f64 / 12.0;
+                let r = zone * (1.05 + 0.5 * (k % 3) as f64);
+                let start = star + DVec3::new(ang.cos(), 0.05 * (k as f64 - 6.0), ang.sin()) * r;
+                // heading straight at the star: the hardest start
+                let dir = (star - start).normalize();
+                let trip = Trip::plan(&s, target, start, dir, dir, 0.0);
+                for i in 1..=400 {
+                    let t = trip.duration * i as f64 / 400.0;
+                    assert!(
+                        trip.position(t).distance(star) > zone,
+                        "#{target} from {k}: inside the heat zone at {t}"
+                    );
+                }
+            }
+        }
     }
 }
