@@ -1,7 +1,8 @@
 // rt_hw.wgsl
 // Hardware ray-traced shadow term and ambient occlusion (see hw_rt.rs). cs_gbuf_down (shader.wgsl) has
 // written each shadow texel's world position, camera distance and normal. cs_shadow casts one ray per
-// texel toward the sun and writes (shadow, distance, 1) like the ray march (cs_march). The progressive AO
+// texel toward the sun and writes (shadow, distance, blocker distance, 1) (cs_march: the same with 1 for the
+// third; the blocker distance feeds the soft shadows, blur.wgsl and shadow.rs). The progressive AO
 // (ao.rs) runs in four more dispatches: cs_ao_sample casts AO rays for one texel per BLOCK x BLOCK block
 // (Bayer-rotated per frame), cs_ao_accumulate adds them to a running mean per texel (its history
 // reprojected from the last frame; reset on settings, size and block edits), cs_ao_fill_h/_v fill and
@@ -117,14 +118,21 @@ fn cs_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let N = normalize(textureLoad(g_nrm, p, 0).xyz);
     let L = normalize(hw.sun_dir.xyz);
     var s = 0.0; // faces turned away from the sun are in their own shadow
+    var blocker = 0.0; // distance to what casts the shadow (0: lit, or facing away): soft shadows (shadow.rs)
     if (dot(N, L) > 0.0) {
         var rq: ray_query;
-        // start just off the surface so the ray can't hit the face it starts on
-        rayQueryInitialize(&rq, scene_tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0xFFu, 0.001, HW_RT_RANGE, g.xyz + N * 0.002, L));
+        // start just off the surface so the ray can't hit the face it starts on; no early termination,
+        // so the committed hit is the nearest blocker (a far first hit would soften contact shadows)
+        rayQueryInitialize(&rq, scene_tlas, RayDesc(0u, 0xFFu, 0.001, HW_RT_RANGE, g.xyz + N * 0.002, L));
         rayQueryProceed(&rq);
-        s = select(1.0, 0.0, rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE);
+        let hit = rayQueryGetCommittedIntersection(&rq);
+        if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+            blocker = hit.t;
+        } else {
+            s = 1.0;
+        }
     }
-    textureStore(out_tex, p, vec4<f32>(s, g.w, 1.0, 1.0)); // AO: its own texture (cs_ao_*)
+    textureStore(out_tex, p, vec4<f32>(s, g.w, blocker, 1.0)); // AO: its own texture (cs_ao_*)
 }
 
 // --- progressive AO (ao.rs) ---

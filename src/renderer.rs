@@ -2721,7 +2721,10 @@ impl Renderer {
         // the shadow-resolution G-buffer comes from pass 1, then one compute invocation per shadow texel
         {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
-            self.rt_blur.set_fov(&self.queue, fov.to_radians());
+                                                                              // soft shadows need the hardware rays' blocker distances (shadow.rs)
+            let soft_shadows = self.hw_shadows && self.hw_rt.is_some() && self.shadow.soft;
+            let soft = soft_shadows.then_some(&self.shadow);
+            self.rt_blur.set_params(&self.queue, fov.to_radians(), soft);
             self.deferred.downsample(
                 &self.device,
                 &mut enc,
@@ -2783,7 +2786,8 @@ impl Renderer {
             if ao_frame.is_none() {
                 self.rt_blur.clear_ao(&mut enc);
             }
-            self.rt_blur.blur(&mut enc, self.gpu_timer.as_ref());
+            self.rt_blur
+                .blur(&mut enc, self.gpu_timer.as_ref(), soft_shadows);
         }
 
         // while the motion blur is on, every pixel is shaded once into Deferred::shaded first, and the
@@ -3877,8 +3881,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn blur_params_match_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<crate::rt_blur::BlurParams>(), 32);
+    }
+
+    #[test]
     fn blur_shader_is_valid_wgsl() {
         assert_valid_wgsl(include_str!("blur.wgsl"));
+    }
+
+    // the soft shadows' shader plumbing (shadow.rs): cs_shadow stores the blocker distance, the search
+    // passes exist and handle an empty search, the blur takes the per-texel width
+    #[test]
+    fn soft_shadow_shaders_are_wired() {
+        let blur = include_str!("blur.wgsl");
+        assert!(blur.contains("fn fs_search_h") && blur.contains("fn fs_search_v"));
+        assert!(
+            blur.contains("const TAPS: i32 = 8;") && blur.contains("const MAX_RADIUS: f32 = 32.0;")
+        );
+        assert!(
+            blur.contains("bp.mode == 1u"),
+            "the blur picks the per-texel width in soft mode"
+        );
+        let rt = include_str!("rt_hw.wgsl");
+        let shadow = &rt[rt.find("fn cs_shadow").unwrap()..rt.find("fn cs_ao_sample").unwrap()];
+        assert!(
+            shadow.contains("blocker = hit.t"),
+            "blocker distance stored"
+        );
+        assert!(
+            shadow.contains("vec4<f32>(s, g.w, blocker, 1.0)"),
+            "in the third channel"
+        );
+    }
+
+    // an empty search (no shadowed neighbour, sky) gives MIN_WIDTH, never 0/0 (Review Focus 2)
+    #[test]
+    fn blur_shader_handles_empty_search() {
+        let blur = include_str!("blur.wgsl");
+        let v = &blur[blur.find("fn fs_search_v").unwrap()..blur.find("fn fs_blur").unwrap()];
+        assert!(v.contains("select(bp.min_width"), "{v}");
     }
 
     // landing messages (F) must be seen without opening the console: a short HUD status line

@@ -18,7 +18,6 @@ use wgpu::util::DeviceExt;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const POS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float; // positions need f32 precision
 const NRM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-pub const PENUMBRA_WIDTH: f32 = 0.3; // world units
 pub const MAX_RT_PIXELS: f32 = 1.5e6;
 
 // size of the shadow targets for a screen size, keeping the aspect ratio
@@ -35,10 +34,14 @@ fn rt_size(width: u32, height: u32) -> (u32, u32) {
 // must match BlurParams in blur.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct BlurParams {
+pub(crate) struct BlurParams {
     dir: [f32; 2],
     focal: f32,
     width: f32,
+    tan_sun: f32,
+    min_width: f32,
+    max_blocker: f32,
+    mode: u32, // 1: width per texel (soft), 0: fixed
 }
 
 struct Targets {
@@ -47,9 +50,14 @@ struct Targets {
     g_pos: wgpu::TextureView,
     g_nrm: wgpu::TextureView,
     march_bind: wgpu::BindGroup,
+    search_tmp: wgpu::TextureView,
+    widened: wgpu::TextureView,
     tmp: wgpu::TextureView,
     out: wgpu::TextureView,
     sample_bind: wgpu::BindGroup,
+    bind_search_h: wgpu::BindGroup,
+    bind_search_v: wgpu::BindGroup,
+    bind_h_soft: wgpu::BindGroup,
     bind_h: wgpu::BindGroup,
     bind_v: wgpu::BindGroup,
 }
@@ -63,16 +71,23 @@ pub struct RtBlur {
     march_pipeline: wgpu::ComputePipeline,
     march_layout: wgpu::BindGroupLayout,
     march_bind: wgpu::BindGroup, // group 3 of cs_march: G-buffer in, target out
+    search_tmp: wgpu::TextureView, // soft shadows: horizontal blocker search
+    widened: wgpu::TextureView,  // soft shadows: (shadow, distance, edge width)
     tmp: wgpu::TextureView,
     out: wgpu::TextureView,
     pub sample_layout: wgpu::BindGroupLayout,
     pub sample_bind: wgpu::BindGroup, // group 2 of the scene pipelines: `out`, `ao_out`
     blur_layout: wgpu::BindGroupLayout,
     blur_pipeline: wgpu::RenderPipeline,
+    search_h_pipeline: wgpu::RenderPipeline,
+    search_v_pipeline: wgpu::RenderPipeline,
     params_h: wgpu::Buffer,
     params_v: wgpu::Buffer,
-    bind_h: wgpu::BindGroup, // target -> tmp
-    bind_v: wgpu::BindGroup, // tmp -> out
+    bind_h: wgpu::BindGroup,        // target -> tmp (fixed width)
+    bind_v: wgpu::BindGroup,        // tmp -> out
+    bind_search_h: wgpu::BindGroup, // target -> search_tmp
+    bind_search_v: wgpu::BindGroup, // search_tmp -> widened
+    bind_h_soft: wgpu::BindGroup,   // widened -> tmp
 }
 
 impl RtBlur {
@@ -177,27 +192,32 @@ impl RtBlur {
             bind_group_layouts: &[Some(&blur_layout)],
             immediate_size: 0,
         });
-        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("RT Blur Pipeline"),
-            layout: Some(&blur_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blur_shader,
-                entry_point: Some("vs_full"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blur_shader,
-                entry_point: Some("fs_blur"),
-                compilation_options: Default::default(),
-                targets: &[Some(FORMAT.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let blur_pipeline = |label: &str, fragment: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&blur_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &blur_shader,
+                    entry_point: Some("vs_full"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blur_shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(FORMAT.into())],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let search_h_pipeline = blur_pipeline("RT Search H Pipeline", "fs_search_h");
+        let search_v_pipeline = blur_pipeline("RT Search V Pipeline", "fs_search_v");
+        let blur_pipeline = blur_pipeline("RT Blur Pipeline", "fs_blur");
 
         let params = |dir: [f32; 2]| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -205,7 +225,11 @@ impl RtBlur {
                 contents: bytemuck::cast_slice(&[BlurParams {
                     dir,
                     focal: 1.0,
-                    width: PENUMBRA_WIDTH,
+                    width: crate::shadow::FIXED_WIDTH,
+                    tan_sun: 0.0,
+                    min_width: crate::shadow::MIN_WIDTH,
+                    max_blocker: crate::shadow::MAX_BLOCKER,
+                    mode: 0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
@@ -233,16 +257,23 @@ impl RtBlur {
             march_pipeline,
             march_layout,
             march_bind: t.march_bind,
+            search_tmp: t.search_tmp,
+            widened: t.widened,
             tmp: t.tmp,
             out: t.out,
             sample_layout,
             sample_bind: t.sample_bind,
             blur_layout,
             blur_pipeline,
+            search_h_pipeline,
+            search_v_pipeline,
             params_h,
             params_v,
             bind_h: t.bind_h,
             bind_v: t.bind_v,
+            bind_search_h: t.bind_search_h,
+            bind_search_v: t.bind_search_v,
+            bind_h_soft: t.bind_h_soft,
         }
     }
 
@@ -285,6 +316,8 @@ impl RtBlur {
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING; // written by cs_gbuf_down
         let g_pos = tex(POS_FORMAT, shadow_gbuf);
         let g_nrm = tex(NRM_FORMAT, shadow_gbuf);
+        let search_tmp = tex(FORMAT, color);
+        let widened = tex(FORMAT, color);
         let tmp = tex(FORMAT, color);
         let out = tex(FORMAT, color);
         // written by hw_rt.rs's AO fill (storage) or cleared to 1 (render attachment), read by the lighting
@@ -322,6 +355,9 @@ impl RtBlur {
         };
         let bind_h = blur_bind(&target, params_h);
         let bind_v = blur_bind(&tmp, params_v);
+        let bind_search_h = blur_bind(&target, params_h); // target -> search_tmp
+        let bind_search_v = blur_bind(&search_tmp, params_v); // search_tmp -> widened
+        let bind_h_soft = blur_bind(&widened, params_h); // widened -> tmp
         let march_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("march_bind"),
             layout: march_layout,
@@ -346,9 +382,14 @@ impl RtBlur {
             g_pos,
             g_nrm,
             march_bind,
+            search_tmp,
+            widened,
             tmp,
             out,
             sample_bind,
+            bind_search_h,
+            bind_search_v,
+            bind_h_soft,
             bind_h,
             bind_v,
         }
@@ -381,6 +422,19 @@ impl RtBlur {
             self.bind_h,
             self.bind_v,
         ) = (t.tmp, t.out, t.sample_bind, t.bind_h, t.bind_v);
+        (
+            self.search_tmp,
+            self.widened,
+            self.bind_search_h,
+            self.bind_search_v,
+            self.bind_h_soft,
+        ) = (
+            t.search_tmp,
+            t.widened,
+            t.bind_search_h,
+            t.bind_search_v,
+            t.bind_h_soft,
+        );
     }
 
     // ray-marched shadow term, one invocation per texel (cs_march); global_bind: group 0 of the scene
@@ -400,8 +454,14 @@ impl RtBlur {
         pass.dispatch_workgroups(self.size.0.div_ceil(8), self.size.1.div_ceil(8), 1);
     }
 
-    // the camera's vertical field of view, so the blur radius covers PENUMBRA_WIDTH at the targets' size
-    pub fn set_fov(&self, queue: &wgpu::Queue, fov_y: f32) {
+    // the blur's parameters: the camera's vertical field of view (pixels per world unit) and the shadow
+    // look; `soft` None: the fixed width (/shadow off, or the ray-march path, which has no blocker distance)
+    pub fn set_params(
+        &self,
+        queue: &wgpu::Queue,
+        fov_y: f32,
+        soft: Option<&crate::shadow::ShadowSettings>,
+    ) {
         let focal = self.size.1 as f32 * 0.5 / (fov_y * 0.5).tan(); // pixels per world unit at distance 1
         for (buf, dir) in [(&self.params_h, [1.0, 0.0]), (&self.params_v, [0.0, 1.0])] {
             queue.write_buffer(
@@ -410,7 +470,11 @@ impl RtBlur {
                 bytemuck::cast_slice(&[BlurParams {
                     dir,
                     focal,
-                    width: PENUMBRA_WIDTH,
+                    width: crate::shadow::FIXED_WIDTH,
+                    tan_sun: soft.map_or(0.0, |s| s.tan_sun()),
+                    min_width: crate::shadow::MIN_WIDTH,
+                    max_blocker: crate::shadow::MAX_BLOCKER,
+                    mode: u32::from(soft.is_some()),
                 }]),
             );
         }
@@ -453,12 +517,25 @@ impl RtBlur {
         });
     }
 
-    // timer: the horizontal pass writes the blur's begin timestamp, the vertical pass its end
-    pub fn blur(&self, enc: &mut wgpu::CommandEncoder, timer: Option<&GpuTimer>) {
-        for (i, (dst, bind)) in [(&self.tmp, &self.bind_h), (&self.out, &self.bind_v)]
-            .into_iter()
-            .enumerate()
-        {
+    // timer: the first pass writes the blur's begin timestamp, the last its end; soft: the search passes
+    // first (blocker distances -> widths), then the blur reads their result
+    pub fn blur(&self, enc: &mut wgpu::CommandEncoder, timer: Option<&GpuTimer>, soft: bool) {
+        let mut passes: Vec<(&wgpu::TextureView, &wgpu::BindGroup, &wgpu::RenderPipeline)> =
+            Vec::new();
+        if soft {
+            passes.push((
+                &self.search_tmp,
+                &self.bind_search_h,
+                &self.search_h_pipeline,
+            ));
+            passes.push((&self.widened, &self.bind_search_v, &self.search_v_pipeline));
+            passes.push((&self.tmp, &self.bind_h_soft, &self.blur_pipeline));
+        } else {
+            passes.push((&self.tmp, &self.bind_h, &self.blur_pipeline));
+        }
+        passes.push((&self.out, &self.bind_v, &self.blur_pipeline));
+        let last = passes.len() - 1;
+        for (i, (dst, bind, pipeline)) in passes.into_iter().enumerate() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("RT Blur Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -468,11 +545,14 @@ impl RtBlur {
                     ops: Self::clear_ops(),
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: timer.and_then(|t| t.writes(gpu_timer::BLUR, i == 0, i == 1)),
+                // the middle passes of the soft path write no timestamp (wgpu refuses a pass with neither)
+                timestamp_writes: timer
+                    .filter(|_| i == 0 || i == last)
+                    .and_then(|t| t.writes(gpu_timer::BLUR, i == 0, i == last)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.blur_pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
         }
