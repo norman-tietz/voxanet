@@ -64,9 +64,14 @@ fn vs_precip(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -
     fade *= 1.0 - smoothstep(0.85, 1.0, max(edge.x, max(edge.y, edge.z)));
 
     // under a roof (or below the water / ground): hidden
-    let g = center - precip.grid_origin.xyz;
+    // the cell is found radially, as RoofGrid::build filled it (mirror: RoofGrid::cell_of, same maths)
+    let rn = normalize(center);
+    let r0 = length(precip.grid_origin.xyz);
+    let gu = precip.grid_origin.xyz / r0;
+    let dn = dot(rn, gu);
+    let g = rn * (r0 / max(dn, 1e-4)) - precip.grid_origin.xyz;
     let cell = vec2<i32>(floor(vec2<f32>(dot(g, precip.grid_east.xyz), dot(g, precip.grid_north.xyz)) / precip.grid_origin.w)) + ROOF_GRID / 2;
-    if (all(cell >= vec2<i32>(0)) && all(cell < vec2<i32>(ROOF_GRID))) {
+    if (dn > 0.0 && all(cell >= vec2<i32>(0)) && all(cell < vec2<i32>(ROOF_GRID))) {
         let roof = textureLoad(roof_grid, cell, 0).r;
         if (length(center) < roof + 0.1) { fade = 0.0; }
     }
@@ -118,7 +123,8 @@ fn fs_precip(in: PrecipOut) -> @location(0) vec4<f32> {
     // lit by the sky and (a little) the sun, no shadows; rain takes the sky colour itself
     let L = normalize(global.sun_dir.xyz);
     let light = biome.sky_zenith.rgb * atmo_ambient_daylight(in.world, L)
-        + biome.sun.rgb * cloud_shadow(in.world, L) * 0.5;
+        + biome.sun.rgb * cloud_shadow(in.world, L) * 0.5
+            * smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(normalize(in.world), L)); // none at night
     let base = select(precip.color.rgb, vec3<f32>(0.6, 0.65, 0.7), kind == 0u);
     let lit = base * light;
     // premultiplied, tone-mapped like the rest of the frame

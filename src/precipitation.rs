@@ -157,6 +157,28 @@ impl RoofGrid {
             + self.north * ((j as f32 + 0.5 - half) * CELL)
     }
 
+    // the cell whose column a world point is looked up in: the point projected radially onto the
+    // grid plane, then its plane coordinates / CELL. Line-by-line the same maths as vs_precip in
+    // precip.wgsl; None outside the grid or when the point is not above the plane's hemisphere.
+    #[allow(dead_code)] // the shader does this at runtime; the Rust copy is for tests
+    pub fn cell_of(&self, world: Vec3) -> Option<(usize, usize)> {
+        let n = world.normalize();
+        let r0 = self.origin.length();
+        let gu = self.origin / r0;
+        let dn = n.dot(gu);
+        if dn <= 0.0 {
+            return None;
+        }
+        let q = n * (r0 / dn);
+        let g = q - self.origin;
+        let x = (g.dot(self.east) / CELL).floor() as i32 + GRID as i32 / 2;
+        let y = (g.dot(self.north) / CELL).floor() as i32 + GRID as i32 / 2;
+        if x < 0 || y < 0 || x >= GRID as i32 || y >= GRID as i32 {
+            return None;
+        }
+        Some((x as usize, y as usize))
+    }
+
     // each cell: the radius of its column's highest surface, the top block (edits included) or the
     // water, whichever is higher; 0 where no column is found
     pub fn build(planet: &PlanetData, cam: Vec3) -> RoofGrid {
@@ -259,7 +281,12 @@ impl Precipitation {
         self.offset = wrap_box(offset);
         self.prev_cam = Some(cam);
 
-        // the roof grid: rebuilt when the camera left its middle, or after an edit
+        let instances = match precip {
+            Some(k) if on => instances(k, intensity),
+            _ => 0,
+        };
+        // the roof grid: rebuilt when the camera left its middle, or after an edit, but only on a
+        // frame that draws (a stale grid waits for the first drawing frame, before the upload)
         let edits = planet.edit_generation();
         let stale = match &self.grid {
             None => true,
@@ -268,16 +295,12 @@ impl Precipitation {
                 let tangent = Vec3::new(d.dot(g.east), 0.0, d.dot(g.north)).length();
                 tangent > REBUILD_DIST || edits != self.grid_edits
             }
-        };
+        } && instances > 0;
         if stale {
             self.grid = Some(RoofGrid::build(planet, cam));
             self.grid_edits = edits;
         }
 
-        let instances = match precip {
-            Some(k) if on => instances(k, intensity),
-            _ => 0,
-        };
         PrecipFrame {
             kind: precip,
             instances,
@@ -540,6 +563,45 @@ mod tests {
             pr.update(0.016, cam + fr.east * 9.0, &p, &s, &f, 10.0)
                 .grid_rebuilt
         );
+    }
+
+    #[test]
+    fn no_grid_is_built_while_nothing_is_drawn() {
+        let p = planet();
+        let (s, f) = storm_everywhere();
+        let mut off = s.clone();
+        off.particles = false;
+        let mut pr = Precipitation::new();
+        let cam = ground(&p, Vec3::X);
+        assert!(!pr.update(0.016, cam, &p, &off, &f, 10.0).grid_rebuilt);
+        assert!(pr.grid().is_none());
+        assert!(
+            pr.update(0.016, cam, &p, &s, &f, 10.0).grid_rebuilt,
+            "first drawing frame builds"
+        );
+    }
+
+    // the shader's lookup (cell_of mirrors it) finds the cell a point radially above a centre is in
+    #[test]
+    fn cell_of_round_trips_radially() {
+        let p = planet();
+        let g = RoofGrid::build(&p, ground(&p, Vec3::X));
+        let r0 = g.origin.length();
+        for &(i, j) in &[
+            (0, 0),
+            (GRID - 1, 0),
+            (0, GRID - 1),
+            (GRID - 1, GRID - 1),
+            (32, 32),
+            (5, 50),
+            (60, 11),
+        ] {
+            for h in [0.0, 10.0, 25.0] {
+                let w = g.cell_centre(i, j).normalize() * (r0 + h);
+                assert_eq!(g.cell_of(w), Some((i, j)), "cell ({i}, {j}) at +{h}");
+            }
+        }
+        assert_eq!(g.cell_of(-g.origin), None);
     }
 
     #[test]
