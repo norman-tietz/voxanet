@@ -255,7 +255,7 @@ impl TerrainShape {
         }
     }
 
-    // cellular noise at a feature size of `blocks` columns (constant in blocks on every planet size)
+    // cellular noise at a cell spacing of `blocks` world units at sea level (about columns near a face centre; constant on every planet size)
     fn cells(&self, g: &NoiseGenerator, dir: Vec3, blocks: f32, salt: Vec3) -> (f32, f32, f32) {
         g.cellular(dir * (self.resolution as f32 / 2.0 / blocks) + salt)
     }
@@ -274,22 +274,34 @@ impl TerrainShape {
             * 0.8
             * r
             * land;
-        let (f1, _, h) = self.cells(g, dir, 60.0, Vec3::new(-4.4, 2.2, 9.9));
+        let (f1, f2, h) = self.cells(g, dir, 60.0, Vec3::new(-4.4, 2.2, 9.9));
+        let edge = smoothstep(0.0, EDGE_FADE, f2 - f1); // features reach 0 at a cell boundary: no cliffs
         let caldera = if h < 0.5 {
             let rim = (-((f1 - 0.45) / 0.08).powi(2)).exp() * 0.5 * r;
             let bowl = smoothstep(0.4, 0.2, f1) * 1.0 * r;
-            (rim - bowl) * land
+            (rim - bowl) * land * edge
         } else {
             0.0
         };
-        let fissure = smoothstep(
-            0.9,
-            0.97,
-            g.ridged(dir * self.hill_freq * 0.7 + Vec3::new(12.0, 1.0, -3.0), 3),
-        ) * 0.4
-            * r
-            * land;
+        let fissure = self.fissure(g, dir) * 0.4 * r * land;
         self.soft_cap(self.base(c) + ridges + caldera - fissure)
+    }
+
+    // the Volcanic fissure term in 0..1: a band around the zero crossings of one noise octave (period
+    // FISSURE_PERIOD world units), whose edge is set by the distance to the crossing in world units
+    // (|noise| / |gradient|, by finite differences), so it is at least FISSURE_WIDTH units across
+    // wherever the gradient is, and on every planet size (see the width test)
+    pub(crate) fn fissure(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let p = dir * (self.resolution as f32 / 2.0 / FISSURE_PERIOD) + Vec3::new(12.0, 1.0, -3.0);
+        let n = g.perlin(p);
+        const E: f32 = 0.02;
+        let grad = Vec3::new(
+            g.perlin(p + Vec3::X * E) - n,
+            g.perlin(p + Vec3::Y * E) - n,
+            g.perlin(p + Vec3::Z * E) - n,
+        ) / E;
+        let dist = n.abs() / grad.length().max(1e-3) * FISSURE_PERIOD; // world units
+        smoothstep(FISSURE_WIDTH, 0.0, dist)
     }
 
     // smooth billow land, frozen seas (the fill), rare wide ice spikes
@@ -299,12 +311,12 @@ impl TerrainShape {
         let land = smoothstep(-0.02, 0.12, c);
         let hills =
             g.billow(dir * self.hill_freq * 0.6 + Vec3::new(7.7, 0.3, -2.9), 2) * 0.15 * r * land;
-        // a spike per lucky cell (cells of 40 columns): a flat top ~2.4 columns across, sloping out to a
+        // a spike per lucky cell (cells of 40 world units): a flat top ~2.4 columns across, sloping out to a
         // 10-column radius, so neighbouring columns differ by <= ~0.2R (the width test) and the low-poly
         // smoothing keeps it
-        let (f1, _, h) = self.cells(g, dir, 40.0, Vec3::new(1.5, 6.6, -7.1));
+        let (f1, f2, h) = self.cells(g, dir, 40.0, Vec3::new(1.5, 6.6, -7.1));
         let spike = if h < 0.15 {
-            smoothstep(0.25, 0.03, f1) * 1.0 * r
+            smoothstep(0.25, 0.03, f1) * 1.0 * r * smoothstep(0.0, EDGE_FADE, f2 - f1)
         } else {
             0.0
         };
@@ -342,11 +354,11 @@ impl TerrainShape {
         } else {
             0.05 * r * smoothstep(0.0, 0.12, c)
         } + g.fbm(dir * self.hill_freq + Vec3::new(0.7, -0.7, 3.3), 3) * 0.03 * r * land;
-        let (f1, _, h) = self.cells(g, dir, 30.0, Vec3::new(-2.2, -5.5, 8.8));
+        let (f1, f2, h) = self.cells(g, dir, 30.0, Vec3::new(-2.2, -5.5, 8.8));
         let rc = 0.15 + 0.2 * h; // crater radius in cell units, by the cell's hash
         let bowl = smoothstep(rc, rc * 0.4, f1) * 0.4 * r;
         let rim = (-((f1 - rc) / 0.05).powi(2)).exp() * 0.1 * r;
-        self.soft_cap(flat + (rim - bowl) * land)
+        self.soft_cap(flat + (rim - bowl) * land * smoothstep(0.0, EDGE_FADE, f2 - f1))
     }
 
     // deep sea, steep rocky islands where the mask breaks through
@@ -365,10 +377,10 @@ impl TerrainShape {
     fn shattered(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
         let r = self.relief;
         let c = self.continent(g, dir);
-        if c < 0.0 {
+        let land = smoothstep(-0.02, 0.12, c);
+        if land == 0.0 {
             return self.base(c);
         }
-        let land = smoothstep(-0.02, 0.12, c);
         let (f1, f2, h) = self.cells(g, dir, 50.0, Vec3::new(5.0, -1.0, 7.0));
         let tilt = g.fbm(
             dir * self.range_freq * 4.0 + Vec3::new(h * 10.0, 0.0, 0.0),
@@ -378,8 +390,8 @@ impl TerrainShape {
         let plate = (-0.3 + 0.9 * h) * r + tilt;
         let shards = g.ridged(dir * self.hill_freq + Vec3::new(-8.0, 3.0, 1.0), 3) * 0.2 * r;
         let top = self.base(c) + (plate + shards) * land;
-        // the crack: where the two nearest cells are about equally near (>= 2 columns wide at 50-column cells)
-        let crack = smoothstep(0.06, 0.0, f2 - f1) * land;
+        // the crack: where the two nearest cells are about equally near (>= 2 columns wide at 50-unit cells)
+        let crack = smoothstep(0.08, 0.0, f2 - f1) * land;
         self.soft_cap(top + crack * (-0.3 * r - top))
     }
 
@@ -443,6 +455,13 @@ pub(crate) fn land_offset(t: PlanetType) -> f32 {
         _ => 0.08,
     }
 }
+
+// Volcanic fissures: one noise octave per this many world units
+// per-cell features fade to 0 over this much f2 - f1 (cell units) so they have no cliffs at cell boundaries
+const EDGE_FADE: f32 = 0.1;
+const FISSURE_PERIOD: f32 = 40.0;
+// the band reaches out to this distance from the crossing (half depth at half of it), so >= 2 units wide
+const FISSURE_WIDTH: f32 = 6.0;
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -613,7 +632,9 @@ impl NoiseGenerator {
                 for dx in -1..=1 {
                     let cell = base + Vec3::new(dx as f32, dy as f32, dz as f32);
                     let [jx, jy, jz, h] = self.cell_hash(cell);
-                    let d = (cell + Vec3::new(jx, jy, jz) - p).length();
+                    // feature points stay 0.1 inside their cell, so a point two cells away is never nearer than
+                    // the 3x3x3 neighbourhood's second-nearest: the search is exact enough
+                    let d = (cell + Vec3::splat(0.1) + Vec3::new(jx, jy, jz) * 0.8 - p).length();
                     if d < f1 {
                         f2 = f1;
                         f1 = d;
@@ -1129,6 +1150,76 @@ mod tests {
         let sd = (hs.iter().map(|h| (h - mean).powi(2)).sum::<f32>() / hs.len() as f32).sqrt();
         println!("shattered sd {sd} relief {}", s.relief);
         assert!(sd > 0.15 * s.relief, "{sd}");
+    }
+
+    // `n` points `step` columns apart along the great circle number `k` (a column is 1 world unit)
+    fn circle(k: usize, res: u32, step: f32, arc_columns: f32) -> Vec<Vec3> {
+        let a = fib_dirs(64)[k];
+        let b = a.cross(Vec3::new(0.3, 0.9, 0.31)).normalize();
+        let n = (arc_columns / step) as usize;
+        let r = res as f32 / 2.0;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 * step / r;
+                (a * t.cos() + b * t.sin()).normalize()
+            })
+            .collect()
+    }
+
+    // every contiguous run of "fissure deeper than half" is at least 2 columns long
+    #[test]
+    fn volcanic_fissures_are_at_least_two_columns_wide() {
+        for res in [64, 500] {
+            let (s, g) = shape_of(PlanetType::Volcanic, res, 11);
+            let (mut runs, mut shortest) = (0, f32::MAX);
+            for k in 0..40 {
+                let pts = circle(k, res, 0.25, 2.0 * std::f32::consts::PI * res as f32 / 2.0);
+                let deep: Vec<bool> = pts.iter().map(|&d| s.fissure(&g, d) > 0.5).collect();
+                // skip a run touching either end of the line
+                let mut i = deep.iter().position(|&x| !x).unwrap_or(deep.len());
+                while i < deep.len() {
+                    if deep[i] {
+                        let start = i;
+                        while i < deep.len() && deep[i] {
+                            i += 1;
+                        }
+                        if i < deep.len() {
+                            runs += 1;
+                            shortest = shortest.min((i - start) as f32 * 0.25);
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            println!("res {res}: {runs} fissure runs, shortest {shortest} columns");
+            assert!(runs > 20, "res {res}: only {runs} fissures sampled");
+            assert!(
+                shortest >= 2.0,
+                "res {res}: a fissure {shortest} columns wide"
+            );
+        }
+    }
+
+    // per-cell features fade out at cell boundaries: no cliffs between neighbouring samples
+    #[test]
+    fn cell_features_have_no_cliffs() {
+        let res = 500;
+        for t in [PlanetType::Volcanic, PlanetType::Toxic, PlanetType::Ice] {
+            let (s, g) = shape_of(t, res, 3);
+            let mut worst = 0.0_f32;
+            for k in 0..30 {
+                let pts = circle(k, res, 0.01, 600.0);
+                let mut prev = s.natural_height(&g, pts[0]);
+                for &d in &pts[1..] {
+                    let h = s.natural_height(&g, d);
+                    worst = worst.max((h - prev).abs());
+                    prev = h;
+                }
+            }
+            println!("{t:?} max jump over 0.01 columns: {worst} layers");
+            assert!(worst < 0.5, "{t:?}: {worst}");
+        }
     }
 
     // Review Focus 5 and 1

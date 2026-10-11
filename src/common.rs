@@ -432,16 +432,10 @@ impl PlanetData {
         // Fibonacci-sphere sampling: far denser than the 6 cube-axis points this used to check
         // (which could all land in ocean on a small or heavily-watered planet), still cheap since
         // each sample is just a height-map lookup
-        const SAMPLES: u32 = 256;
-        (0..SAMPLES)
-            .map(|i| {
-                let phi = (1.0 + 5.0_f32.sqrt()) / 2.0; // golden ratio
-                let t = (i as f32 + 0.5) / SAMPLES as f32;
-                let incl = (1.0 - 2.0 * t).acos();
-                let azim = 2.0 * std::f32::consts::PI * (i as f32) / phi;
-                glam::Vec3::new(incl.sin() * azim.cos(), incl.sin() * azim.sin(), incl.cos())
-            })
-            .find(|&dir| probe_wet(dir) == Some(false))
+        // the dry sample nearest `preferred` (largest dot), so a wet noon spawn stays near its noon
+        spawn_samples()
+            .filter(|&dir| probe_wet(dir) == Some(false))
+            .max_by(|a, b| a.dot(preferred).total_cmp(&b.dot(preferred)))
             .unwrap_or(preferred)
     }
 
@@ -767,6 +761,18 @@ impl Frustum {
         }
         true
     }
+}
+
+// 256 evenly-spread directions over the sphere (Fibonacci), for the spawn search
+fn spawn_samples() -> impl Iterator<Item = glam::Vec3> {
+    const SAMPLES: u32 = 256;
+    (0..SAMPLES).map(|i| {
+        let phi = (1.0 + 5.0_f32.sqrt()) / 2.0; // golden ratio
+        let t = (i as f32 + 0.5) / SAMPLES as f32;
+        let incl = (1.0 - 2.0 * t).acos();
+        let azim = 2.0 * std::f32::consts::PI * (i as f32) / phi;
+        glam::Vec3::new(incl.sin() * azim.cos(), incl.sin() * azim.sin(), incl.cos())
+    })
 }
 
 #[cfg(test)]
@@ -1455,6 +1461,16 @@ pub(crate) mod tests {
             !planet.holds_water(id.face, id.u, id.v),
             "spawned in the water"
         );
+        // and it is the dry sample nearest the preferred direction
+        let dry = |d: glam::Vec3| {
+            let id = planet.cell_at(d * 64.0).unwrap();
+            !planet.holds_water(id.face, id.u, id.v)
+        };
+        let best = spawn_samples()
+            .filter(|&d| dry(d))
+            .map(|d| d.dot(wet))
+            .fold(f32::MIN, f32::max);
+        assert!(dir.dot(wet) >= best - 1e-6, "not the nearest dry sample");
     }
 }
 
