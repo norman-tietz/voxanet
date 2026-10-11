@@ -129,6 +129,7 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/screenshot <path>` | Save the current frame as a PNG to a custom path (e.g. `/screenshot captures/shot.png`), instead of the `F2` default location |
 | `/view [first\|third]` | Show or switch camera mode from the console |
 | `/style [hex\|lowpoly\|cubes]` | Show or switch the terrain style (hex is the default) |
+| `/shadow [on\|off\|sun <0-10>]` | Show or set the sun's size (degrees) for soft shadows; `off` = a fixed edge width |
 | `/galaxy home` | Return to the start planet, standing at local noon |
 | `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
 | `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`) and radius (20–500) on the next orbit outward (up to 15 planets) |
