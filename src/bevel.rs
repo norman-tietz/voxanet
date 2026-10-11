@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn wall_pieces_round_off_only_cell_corners() {
         let res = 33;
-        let edges = crate::hex::edges(4, 0, 5, res);
+        let edges = crate::hex::edges(4, 0, 4, res); // an even row's first cell: its border side
         let pieces: Vec<_> = edges.iter().map(|e| (e.a, e.b)).collect();
         let side_of = polygon_lines(&pieces);
         let n = pieces.len();

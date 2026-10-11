@@ -115,6 +115,19 @@ pub fn cell_at(face: u8, u: f64, v: f64, res: u32) -> (u8, u32, u32) {
     };
     let row = row.clamp(0, n - 1);
     let col = ((x - shift6(face, row) as f64) / 6.0).floor() as i64;
+    if !ring(face) && col < 0 {
+        // the gap in front of an odd row's first cell (border_gap): above or below the neighbouring
+        // hexagons' extended edges it belongs to the first cell of the row above / below
+        let (dy, slope) = (y - (6 * row + 3) as f64, x.max(0.0) * 2.0 / 3.0);
+        let row = if dy > slope && row + 1 < n {
+            row + 1
+        } else if dy < -slope && row > 0 {
+            row - 1
+        } else {
+            row
+        };
+        return (face, 0, row as u32);
+    }
     if ring(face) && !(0..n).contains(&col) {
         // the gap: the neighbour's cell reaches into it
         let (f, ..) = ring_neighbour(face, col >= n);
@@ -141,9 +154,10 @@ pub fn outline(face: u8, u: u32, v: u32, res: u32) -> Vec<(i64, i64)> {
     let (lo, hi) = if ring(face) {
         (6 * col + s, 6 * col + 6 + s)
     } else {
-        // the face border clamps cell_at's column: the first cell reaches u = 0, the last u = res
+        // the last cell is cut at u = res; an odd row's first cell starts as a whole hexagon, the gap
+        // before it is shared out below (border_gap)
         (
-            if col == 0 { 0 } else { 6 * col + s },
+            if col == 0 && s == 0 { 0 } else { 6 * col + s },
             if col == n - 1 { 6 * n } else { 6 * col + 6 + s },
         )
     };
@@ -158,7 +172,35 @@ pub fn outline(face: u8, u: u32, v: u32, res: u32) -> Vec<(i64, i64)> {
     let xs: Vec<i64> = (lo..=hi).step_by(3).collect();
     let mut pts: Vec<(i64, i64)> = xs.iter().map(|&x| (x, bottom(x))).collect();
     pts.extend(xs.iter().rev().map(|&x| (x, top(x))));
+    if !ring(face) && col == 0 {
+        border_gap(&mut pts, row, n);
+    }
     drop_collinear(pts)
+}
+
+// faces 4 and 5 (off the ring): the half-column gap at u = 0 in front of an odd row's first cell, cut
+// into three triangles along the neighbouring hexagons' edges extended to the border: the upper one to
+// the first cell of the row above, the lower one to the row below's, the middle one to the odd row's own
+// first cell, which gets a point at the border. The only split that keeps all three cells convex (any
+// other leaves a notch where a neighbour's point sits); cell_at follows the same lines
+fn border_gap(pts: &mut Vec<(i64, i64)>, row: i64, n: i64) {
+    if row % 2 == 1 {
+        // the hexagon's outline ends at its top-left corner: on to the border (via the squared-off top
+        // corner in the last row) and the point at 6·row + 3; its left corners fall in line and go
+        if row == n - 1 {
+            pts.push((0, 6 * n));
+        }
+        pts.push((0, 6 * row + 3));
+    } else {
+        // the even row's left side, from the row below's gap point to the row above's
+        if row > 0 {
+            pts[0] = (0, 6 * row - 3);
+        }
+        if row < n - 1 {
+            let last = pts.len() - 1;
+            pts[last] = (0, 6 * row + 9);
+        }
+    }
 }
 
 // removes corners lying on the straight line through their neighbours (and repeated corners)
@@ -176,15 +218,6 @@ fn drop_collinear(mut pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
             None => return pts,
         }
     }
-}
-
-// where a non-convex cell's top and bottom fans are split (u6 of a vertical line), None for a convex
-// cell. Only the widened first cell of an odd row isn't convex: the neighbouring rows' points poke into
-// it at u = ½, its old left corners. The bevel's distances to a side's line interpolate exactly only
-// over a fan whose vertices all lie on the line's inner side, so the mesher draws each half separately.
-// Only faces 4 and 5 have such cells; on the ring faces every cell is a whole hexagon.
-pub fn fan_split(face: u8, u: u32, v: u32, res: u32) -> Option<i64> {
-    (!ring(face) && u == 0 && v % 2 == 1 && res > 1).then_some(3)
 }
 
 // the centroid of an outline, in columns (the top and bottom faces' fan centre)
@@ -400,7 +433,7 @@ mod tests {
     }
 
     // ring faces have no half or widened cells: every cell off the first and last row is a whole
-    // hexagon (6 corners, area 1); faces 4 and 5 keep the widened / cut border cells
+    // hexagon (6 corners, area 1); faces 4 and 5 keep cut border cells (border_gap)
     #[test]
     fn ring_cells_are_whole_hexagons() {
         for res in [8u32, 9] {
@@ -412,7 +445,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(area(&outline(4, 0, 1, res)), 1.5);
+            assert_eq!(area(&outline(4, 0, 1, res)), 7.0 / 6.0);
             assert_eq!(area(&outline(4, res - 1, 1, res)), 0.5);
         }
     }
@@ -496,40 +529,37 @@ mod tests {
                         }
                         row += a;
                     }
-                    assert_eq!(row, res as f64, "face {face} row {v} of res {res}");
+                    // off the ring the gap at u = 0 is shared with the rows above and below
+                    if ring(face) {
+                        assert_eq!(row, res as f64, "face {face} row {v} of res {res}");
+                    }
                     total += row;
                 }
-                assert_eq!(total, (res * res) as f64);
+                assert!(
+                    (total - (res * res) as f64).abs() < 1e-9,
+                    "face {face} res {res}"
+                );
             }
         }
     }
 
-    // the fans fan_split cuts are convex, and every other cell is convex as it is
+    // every cell on every face is convex (the bevel's distances to its sides interpolate exactly only
+    // over a convex fan, and a notch reads as a broken cell)
     #[test]
-    fn fan_parts_are_convex() {
+    fn every_cell_is_convex() {
         let convex = |p: &[(i64, i64)]| {
             let n = p.len();
             (0..n).all(|i| {
                 let (a, b, c) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
-                (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0) >= 0
+                (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0) > 0
             })
         };
-        for res in [7u32, 8] {
+        for res in [2u32, 7, 8, 9] {
             for face in 0..6u8 {
                 for v in 0..res {
                     for u in 0..res {
                         let p = outline(face, u, v, res);
-                        match fan_split(face, u, v, res) {
-                            None => assert!(convex(&p), "{face} ({u},{v}) {p:?}"),
-                            Some(x) => {
-                                assert!(!ring(face));
-                                let left: Vec<_> = p.iter().copied().filter(|q| q.0 <= x).collect();
-                                let right: Vec<_> =
-                                    p.iter().copied().filter(|q| q.0 >= x).collect();
-                                assert!(convex(&left) && convex(&right), "({u},{v}) {p:?}");
-                                assert!(left.len() >= 3 && right.len() >= 3, "({u},{v}) {p:?}");
-                            }
-                        }
+                        assert!(convex(&p), "res {res} face {face} ({u}, {v}) {p:?}");
                     }
                 }
             }
@@ -539,10 +569,19 @@ mod tests {
     #[test]
     fn border_cells_are_cut_off_straight() {
         let res = 8;
-        // faces 4 and 5, odd row, first cell: widened to u = 0 (8 corners, area 1½)
-        let first = outline(4, 0, 1, res);
-        assert_eq!(area(&first), 1.5);
-        assert_eq!(first.iter().filter(|p| p.0 == 0).count(), 2);
+        // faces 4 and 5, odd row, first cell: a hexagon with a point at the border (the gap's middle
+        // triangle, area 1 + 1/6); the even rows' first cells take the gap's other triangles: the
+        // border side runs from one gap point to the next (area 1 + 1/3)
+        let first = outline(4, 0, 3, res);
+        assert_eq!(area(&first), 7.0 / 6.0);
+        assert_eq!(
+            first.iter().filter(|p| p.0 == 0).collect::<Vec<_>>(),
+            vec![&(0, 21)]
+        );
+        let even = outline(4, 0, 2, res);
+        assert_eq!(area(&even), 4.0 / 3.0);
+        assert_eq!(even.iter().filter(|p| p.0 == 0).count(), 2);
+        assert!(even.contains(&(0, 9)) && even.contains(&(0, 21)));
         // odd row, last cell: cut at u = res (area ½)
         assert_eq!(area(&outline(4, res - 1, 1, res)), 0.5);
         // first row: squared off at v = 0, on every face

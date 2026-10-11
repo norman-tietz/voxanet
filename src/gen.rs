@@ -876,28 +876,8 @@ impl MeshGen {
         let block_center = centre_dir * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
         let water_here = data.water_surface_radius(id.face, id.u, id.v);
 
-        // the fans: the whole cell, or the two convex halves of a cell hex::fan_split cuts (each a run of
-        // walls closed by the split line); each part's vertices measure only the sides bounding it, so
-        // every side's distance interpolates exactly within the part
-        let n_walls = walls.len();
-        let parts: Vec<Vec<usize>> = match crate::hex::fan_split(id.face, id.u, id.v, res) {
-            None => vec![(0..n_walls).collect()],
-            Some(x) => {
-                let left = |i: usize| walls[i].a.0.max(walls[i].b.0) <= x;
-                [true, false]
-                    .into_iter()
-                    .map(|want| {
-                        let first = (0..n_walls)
-                            .find(|&i| left(i) == want && left((i + n_walls - 1) % n_walls) != want)
-                            .expect("a split cell has walls on both sides");
-                        (0..n_walls)
-                            .map(|k| (first + k) % n_walls)
-                            .take_while(|&i| left(i) == want)
-                            .collect()
-                    })
-                    .collect()
-            }
-        };
+        // one fan per face over the whole cell: every cell is convex (hex::border_gap), so each side's
+        // distance interpolates exactly across it
         let fan = |verts: &mut Vec<Vertex>,
                    inds: &mut Vec<u32>,
                    idx: &mut u32,
@@ -909,53 +889,29 @@ impl MeshGen {
             } else {
                 -centre_dir
             };
-            let radius = CoordSystem::get_layer_radius(layer, res);
-            for part in &parts {
-                let whole = part.len() == n_walls;
-                // the part's corners (sixths) with the wall each starts: a split half adds the end of its
-                // last wall, where the split line closes it
-                let mut corners: Vec<((i64, i64), usize)> =
-                    part.iter().map(|&i| (walls[i].a, i)).collect();
-                if !whole {
-                    let last = *part.last().unwrap();
-                    corners.push((walls[last].b, (last + 1) % n_walls));
-                }
-                let centre = if whole {
-                    centre_dir * radius
-                } else {
-                    let pts: Vec<_> = corners.iter().map(|c| c.0).collect();
-                    let (pu, pv) = crate::hex::centroid(&pts);
-                    CoordSystem::get_direction_hex(id.face, pu, pv, res) * radius
-                };
-                let pieces: Vec<_> = part
-                    .iter()
-                    .map(|&i| (corner(walls[i].a, layer), corner(walls[i].b, layer)))
-                    .collect();
-                let part_sides: Vec<_> = part.iter().map(|&i| side_of[i]).collect();
-                // every vertex of the part measures every side bounding it (slot = side), so the fan
-                // shares them
-                let vertex = |p: Vec3, color: [f32; 3]| Vertex {
-                    pos: p.to_array(),
-                    color,
-                    normal: normal.to_array(),
-                    water: water_here,
-                    edge: crate::bevel::pack(crate::bevel::polygon_edges(p, &part_sides, &pieces)),
-                };
-                let base_idx = *idx;
-                verts.push(vertex(centre, centre_color));
-                for &(q, i) in &corners {
-                    verts.push(vertex(corner(q, layer), colors[i]));
-                }
-                let m = corners.len() as u32;
-                for i in 0..m {
-                    inds.extend_from_slice(&[
-                        base_idx,
-                        base_idx + 1 + i,
-                        base_idx + 1 + (i + 1) % m,
-                    ]);
-                }
-                *idx += m + 1;
+            let centre = centre_dir * CoordSystem::get_layer_radius(layer, res);
+            let pieces: Vec<_> = walls
+                .iter()
+                .map(|w| (corner(w.a, layer), corner(w.b, layer)))
+                .collect();
+            // every vertex measures every side of the cell (slot = side), so the fan shares them
+            let vertex = |p: Vec3, color: [f32; 3]| Vertex {
+                pos: p.to_array(),
+                color,
+                normal: normal.to_array(),
+                water: water_here,
+                edge: crate::bevel::pack(crate::bevel::polygon_edges(p, &side_of, &pieces)),
+            };
+            let base_idx = *idx;
+            verts.push(vertex(centre, centre_color));
+            for (&(a, _), &color) in pieces.iter().zip(colors) {
+                verts.push(vertex(a, color));
             }
+            let n = walls.len() as u32;
+            for i in 0..n {
+                inds.extend_from_slice(&[base_idx, base_idx + 1 + i, base_idx + 1 + (i + 1) % n]);
+            }
+            *idx += n + 1;
         };
 
         if !has_top {
