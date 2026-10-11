@@ -29,7 +29,8 @@ pub(crate) const WEATHER_BAKE_SHADER: &str = concat!(
 
 pub const SNAPSHOT_SECS: f64 = 5.0;
 const SLOTS: u32 = 3;
-pub const WEATHER_USAGE: &str = "Usage: /weather [on|off|auto|clear|rain|storm|snow]";
+pub const WEATHER_USAGE: &str =
+    "Usage: /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]";
 
 const WEATHER_PERIOD: f32 = 3600.0;
 const WEATHER_SCALE: f32 = 1.6;
@@ -97,6 +98,11 @@ fn fract(x: f32) -> f32 {
 pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+// how heavily it precipitates at a storm value
+pub(crate) fn precipitation(storm: f32) -> f32 {
+    smoothstep(RAIN_LO, RAIN_HI, storm)
 }
 
 // atmosphere.wgsl hash31 / value_noise3
@@ -175,7 +181,7 @@ fn rain(dir: Vec3, t: f32, f: &WeatherForce) -> f32 {
 
 pub fn sample(dir: Vec3, t: f32, f: &WeatherForce) -> [f32; 4] {
     let s0 = storm(dir, t, f);
-    let r0 = smoothstep(RAIN_LO, RAIN_HI, s0);
+    let r0 = precipitation(s0);
     let wet = r0
         .max(0.7 * rain(dir, t - 30.0, f))
         .max(0.45 * rain(dir, t - 60.0, f))
@@ -304,6 +310,7 @@ struct ForceState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherSettings {
     pub on: bool,
+    pub particles: bool,
     force: Option<ForceState>,
 }
 
@@ -311,6 +318,7 @@ impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
             on: true,
+            particles: true,
             force: None,
         }
     }
@@ -323,6 +331,7 @@ pub enum WeatherCommand {
     Off,
     Auto,
     Force(Force),
+    Particles(Option<bool>),
 }
 
 impl WeatherCommand {
@@ -336,6 +345,9 @@ impl WeatherCommand {
             ["rain"] => Ok(WeatherCommand::Force(Force::Rain)),
             ["storm"] => Ok(WeatherCommand::Force(Force::Storm)),
             ["snow"] => Ok(WeatherCommand::Force(Force::Snow)),
+            ["particles"] => Ok(WeatherCommand::Particles(None)),
+            ["particles", "on"] => Ok(WeatherCommand::Particles(Some(true))),
+            ["particles", "off"] => Ok(WeatherCommand::Particles(Some(false))),
             _ => Err(WEATHER_USAGE),
         }
     }
@@ -388,7 +400,11 @@ impl WeatherSettings {
     ) -> (String, bool) {
         let dir = dir.try_normalize().unwrap_or(Vec3::Y);
         let changed = match cmd {
-            WeatherCommand::Show => false,
+            WeatherCommand::Show | WeatherCommand::Particles(None) => false,
+            WeatherCommand::Particles(Some(v)) => {
+                self.particles = v;
+                false
+            }
             WeatherCommand::On => !std::mem::replace(&mut self.on, true),
             WeatherCommand::Off => std::mem::replace(&mut self.on, false),
             WeatherCommand::Auto => match &mut self.force {
@@ -428,9 +444,10 @@ impl WeatherSettings {
         let s = sample(dir, t, &self.force_uniform());
         let (wet, cover) = surface(s, kind.rule());
         format!(
-            "Weather ({mode}): storm {:.2}, wet {wet:.2}, cover {cover:.2}; this planet: {}",
+            "Weather ({mode}): storm {:.2}, wet {wet:.2}, cover {cover:.2}; this planet: {}, particles {}",
             s[0],
-            kind.name()
+            kind.name(),
+            if self.particles { "on" } else { "off" }
         )
     }
 }

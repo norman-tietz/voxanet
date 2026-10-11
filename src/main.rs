@@ -29,6 +29,7 @@ mod mc_tables;
 mod noise;
 mod physics;
 mod plastic;
+mod precipitation;
 mod renderer;
 mod rt_blur;
 mod rt_shadow;
@@ -759,7 +760,11 @@ impl Game {
             use crate::weather::WeatherCommand;
             // in galaxy flight the player's position and the loaded planet's type are stale: only the
             // global switch makes sense there
-            if *mode == GameMode::Galaxy && !matches!(cmd, WeatherCommand::On | WeatherCommand::Off)
+            if *mode == GameMode::Galaxy
+                && !matches!(
+                    cmd,
+                    WeatherCommand::On | WeatherCommand::Off | WeatherCommand::Particles(_)
+                )
             {
                 console.log(
                     "Land on a planet to see or force its weather.",

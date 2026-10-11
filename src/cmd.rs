@@ -25,7 +25,7 @@ const HELP_LINES: [&str; 12] = [
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
-    "  /weather [on|off|auto|clear|rain|storm|snow]",
+    "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
     "  /screenshot <path>             help",
 ];
