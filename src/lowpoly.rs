@@ -8,8 +8,8 @@ use crate::mc_tables::{CUBE_CORNER_OFFSETS, EDGE_VERTEX_PAIRS, TRI_TABLE};
 use glam::Vec3;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-// how terrain is drawn: low-poly (the game's look), the original cubes (development comparison) or hex
-// columns (hex.rs; the planet's cells are hexagonal then, PlanetData::cells), console /terrain_style.
+// how terrain is drawn: hex columns (the default for now; hex.rs, the planet's cells are hexagonal then,
+// PlanetData::cells), low-poly or the original cubes; console /style.
 // Read once per mesh build at the entry points (MeshGen::build_chunk, build_water, generate_lod_mesh,
 // generate_lod_morph, via style_for) and passed down, so tests can pick a style explicitly
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +19,7 @@ pub enum TerrainStyle {
     Hex,
 }
 
-static STYLE: AtomicU8 = AtomicU8::new(1);
+static STYLE: AtomicU8 = AtomicU8::new(2); // Hex
 
 pub fn style() -> TerrainStyle {
     match STYLE.load(Ordering::Relaxed) {

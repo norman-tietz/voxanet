@@ -19,7 +19,7 @@ const HELP_LINES: [&str; 10] = [
     "Commands (up/down recall earlier ones):",
     "  /debug_mode set true|false     /view set first|third",
     "  /move_speed get|set <value>    /jump_force get|set <value>",
-    "  /hw_shadows set true|false     /terrain_style cubes|lowpoly|hex",
+    "  /hw_shadows set true|false     /style hex|lowpoly|cubes",
     "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
     "  /ao get|on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>",
     "  /plastic get|on|off|roughness|specular|smudge|scratch|reflection <v>",
@@ -74,7 +74,7 @@ pub struct Console {
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<bool>, // set by /view, applied by the game loop (controller); true = first person
     pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
-    pub terrain_style_request: Option<crate::lowpoly::TerrainStyle>, // set by /terrain_style, applied by the game loop (renderer)
+    pub style_request: Option<crate::lowpoly::TerrainStyle>, // set by /style, applied by the game loop (renderer)
     pub bevel_request: Option<crate::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
     pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
     pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
@@ -97,7 +97,7 @@ impl Console {
             screenshot_request: None,
             view_request: None,
             galaxy_request: None,
-            terrain_style_request: None,
+            style_request: None,
             bevel_request: None,
             film_request: None,
             ao_request: None,
@@ -297,17 +297,13 @@ impl Console {
                 _ => self.log("Usage: /view set first|third", [1.0, 0.5, 0.0]),
             },
 
-            "/terrain_style" => match parts.get(1) {
-                Some(&"cubes") => {
-                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::Cubes)
-                }
+            "/style" => match parts.get(1) {
+                Some(&"cubes") => self.style_request = Some(crate::lowpoly::TerrainStyle::Cubes),
                 Some(&"lowpoly") => {
-                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::LowPoly)
+                    self.style_request = Some(crate::lowpoly::TerrainStyle::LowPoly)
                 }
-                Some(&"hex") => {
-                    self.terrain_style_request = Some(crate::lowpoly::TerrainStyle::Hex)
-                }
-                _ => self.log("Usage: /terrain_style cubes|lowpoly|hex", [1.0, 0.5, 0.0]),
+                Some(&"hex") => self.style_request = Some(crate::lowpoly::TerrainStyle::Hex),
+                _ => self.log("Usage: /style hex|lowpoly|cubes", [1.0, 0.5, 0.0]),
             },
 
             "/galaxy" => match parse_galaxy_command(&parts[1..]) {
@@ -567,19 +563,19 @@ mod tests {
         assert!(parse_galaxy_command(&[]).is_err());
     }
 
-    // /terrain_style switches between the low-poly look and the cubes (development comparison)
+    // /style switches between the terrain styles
     #[test]
-    fn terrain_style_command_requests_a_style() {
+    fn style_command_requests_a_style() {
         use crate::lowpoly::TerrainStyle;
         let mut c = Console::new();
         let mut player = crate::entity::Player::new();
-        c.exec("/terrain_style cubes", &mut player);
-        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::Cubes));
-        c.exec("/terrain_style lowpoly", &mut player);
-        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::LowPoly));
-        c.exec("/terrain_style hex", &mut player);
-        assert_eq!(c.terrain_style_request.take(), Some(TerrainStyle::Hex));
-        c.exec("/terrain_style round", &mut player);
-        assert_eq!(c.terrain_style_request, None);
+        c.exec("/style cubes", &mut player);
+        assert_eq!(c.style_request.take(), Some(TerrainStyle::Cubes));
+        c.exec("/style lowpoly", &mut player);
+        assert_eq!(c.style_request.take(), Some(TerrainStyle::LowPoly));
+        c.exec("/style hex", &mut player);
+        assert_eq!(c.style_request.take(), Some(TerrainStyle::Hex));
+        c.exec("/style round", &mut player);
+        assert_eq!(c.style_request, None);
     }
 }

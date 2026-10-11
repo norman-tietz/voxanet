@@ -1,5 +1,5 @@
 // hex.rs
-// Hex columns: the honeycomb a cube face is divided into in the hex terrain style (/terrain_style hex).
+// Hex columns: the honeycomb a cube face is divided into in the hex terrain style (/style hex).
 // Column (u, v) of the square grid is hex cell (u, v): rows run along u, every odd row (v odd) shifted
 // by half a column, so the height map, edits and chunks are the same in both styles. Cells are 1 wide,
 // their vertical sides span the middle ⅔ of the row and their points reach ⅙ into the rows above and

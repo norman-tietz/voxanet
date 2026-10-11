@@ -163,7 +163,7 @@ impl ChunkMods {
     }
 }
 
-// the shape of a column's cells: the square grid, or hex columns (hex.rs; /terrain_style hex). Both use
+// the shape of a column's cells: the square grid, or hex columns (hex.rs; /style hex). Both use
 // the same (face, u, v) columns, heights and edits; only which point lies in which cell differs
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CellShape {
@@ -194,7 +194,7 @@ pub struct PlanetData {
     // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
     // edits record it so they're only restored onto the same terrain
     pub seed: u32,
-    // the cells' shape (set with /terrain_style; physics, the raycast, water and the meshes follow it)
+    // the cells' shape (set with /style; physics, the raycast, water and the meshes follow it)
     pub cells: CellShape,
 }
 

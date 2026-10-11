@@ -214,7 +214,7 @@ fn install_world(
     stream_from: glam::Vec3,
 ) {
     *planet = baked.data;
-    // the terrain style's cells (/terrain_style hex) carry over to every planet installed
+    // the terrain style's cells (/style hex) carry over to every planet installed
     planet.cells = crate::lowpoly::cells_for(crate::lowpoly::style());
     controller.selected_block = crate::material::placeable(&planet.planet_type.def().palette)[0];
     renderer.force_reload_all(planet, stream_from);
@@ -776,7 +776,7 @@ impl Game {
             // ray-traced AO needs the hardware path; vertex AO otherwise
             renderer.apply_ao_state(planet, player.position);
         }
-        if let Some(style) = console.terrain_style_request.take() {
+        if let Some(style) = console.style_request.take() {
             crate::lowpoly::set_style(style);
             planet.cells = crate::lowpoly::cells_for(style);
             renderer.force_reload_all(planet, player.position);
