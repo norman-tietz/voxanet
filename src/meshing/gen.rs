@@ -217,7 +217,7 @@ impl CoordSystem {
         r as f32
     }
 
-    // get_layer_radius for a fractional layer (galaxy impostors sample the terrain noise continuously)
+    // get_layer_radius for a fractional layer (planet impostors sample the terrain noise continuously)
     pub fn get_layer_radius_f(layer: f32, res: u32) -> f32 {
         let s = res as f64 / 2.0;
         (s * (Self::K * ((layer as f64 / s) - 1.0)).exp()) as f32
@@ -530,7 +530,7 @@ pub(crate) fn lod_water_color(
 const LOD_WATER_GAIN: f32 = 9.0;
 const LOD_WATER_REFLECTION: f32 = 0.01;
 
-// a Yellow star's sunlight (galaxy.rs) at a typical daytime incidence, for lod_water_color
+// a Yellow star's sunlight (solar_system.rs) at a typical daytime incidence, for lod_water_color
 const TYPICAL_SUN: [f32; 3] = [1.6 * 0.7, 1.5 * 0.7, 1.3 * 0.7];
 
 // mixes two sRGB-ish vertex colours in linear space (the shaders decode them with pow 2.2)

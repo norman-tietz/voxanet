@@ -1,8 +1,8 @@
-// galaxy.wgsl
-// Minimal forward-rendering shader for galaxy mode: a procedural starfield background plus
+// space.wgsl
+// Minimal forward-rendering shader for Space mode: a procedural starfield background plus
 // icosphere bodies for the star and each planet. Planet impostors share the sky, cloud, fog and
 // tone-mapping maths with the voxel engine through atmosphere.wgsl (prepended at compile time,
-// galaxy_render.rs GALAXY_SHADER), so they look the same at the landing handover.
+// render.rs SPACE_SHADER), so they look the same at the landing handover.
 
 struct Camera {
     view_proj: mat4x4<f32>, // camera-relative: positions are pre-translated so the camera is at the origin
@@ -103,20 +103,20 @@ fn fs_star(in: StarOut) -> StarFragOut {
 
 struct PlanetUniform {
     offset: vec4<f32>,      // xyz: camera-relative planet centre, w: planet radius (voxel resolution / 2)
-    light_dir: vec4<f32>,   // xyz: direction from this planet toward the star (galaxy space), w unused
+    light_dir: vec4<f32>,   // xyz: direction from this planet toward the star (space), w unused
     sky_zenith: vec4<f32>,  // the planet type's atmosphere colours (rgb), as the engine's Biome uniform
     sky_horizon: vec4<f32>,
     space_color: vec4<f32>,
     cloud_light: vec4<f32>,
     cloud_dark: vec4<f32>,
-    sun_color: vec4<f32>,   // sunlight (rgb): the galaxy star type's
+    sun_color: vec4<f32>,   // sunlight (rgb): the solar system star type's
     glow: vec4<f32>,        // rgb: the planet type's glowing liquid colour (lava), w: 1 if it has one
-    glow_emission: vec4<f32>, // rgb: what that liquid emits (galaxy_render.rs lava_emission)
+    glow_emission: vec4<f32>, // rgb: what that liquid emits (render.rs lava_emission)
     plastic: vec4<f32>,       // x: base roughness, y: specular strength, z: reflection weight (plastic.rs)
     light: vec4<f32>,         // x: ground bounce, y: wrap lighting (light.rs)
     weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: vec4<f32>,
-    model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
+    model: mat3x3<f32>,     // planet frame -> space rotation: the planet's spin at this time
 }
 
 @group(1) @binding(0) var<uniform> planet: PlanetUniform;
@@ -130,7 +130,7 @@ fn planet_atmosphere() -> Atmosphere {
         planet.cloud_light.rgb,
         planet.cloud_dark.rgb,
         planet.sun_color.rgb,
-        // impostor shells draw the sky dome only: the galaxy draws the star itself
+        // impostor shells draw the sky dome only: the solar system draws the star itself
         StarLook(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 1.0, 0.0, 1.0),
         0.0,
         vec4<f32>(0.0, 0.0, 0.0, 1.0),
@@ -139,7 +139,7 @@ fn planet_atmosphere() -> Atmosphere {
     );
 }
 
-// the camera (at the galaxy-space origin, camera-relative rendering) and the sun, in this planet's
+// the camera (at the space origin, camera-relative rendering) and the sun, in this planet's
 // own frame — where the voxel engine does all its lighting, clouds and sky
 fn planet_frame_camera() -> vec3<f32> {
     return transpose(planet.model) * -planet.offset.xyz;
@@ -192,7 +192,7 @@ fn fs_planet(in: PlanetVertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(planet_color(in, facet_normal(in)), 1.0);
 }
 
-// the landing handover's cross-fade (GalaxyRenderer::draw_handover_overlay): the near impostor blended
+// the landing handover's cross-fade (SpaceRenderer::draw_handover_overlay): the near impostor blended
 // over the finished voxel frame at camera.screen.w opacity, fading out
 @fragment
 fn fs_planet_overlay(in: PlanetVertexOut) -> @location(0) vec4<f32> {
@@ -269,7 +269,7 @@ fn fs_atmosphere(in: AtmosphereVertexOut) -> @location(0) vec4<f32> {
     let ray_dir = normalize(in.local_pos - cam);
 
     var alpha = atmo_sky_opacity(ray_dir, cam, L, a.planet_r);
-    // no sun disc: the galaxy draws the star itself (atmo_sky_dome)
+    // no sun disc: the solar system draws the star itself (atmo_sky_dome)
     var color = atmo_sky_dome(ray_dir, cam, L, a) * alpha;
     let cloud_t = sphere_hit(cam, ray_dir, a.planet_r * CLOUD_ALT);
     if (cloud_t > 0.0) {

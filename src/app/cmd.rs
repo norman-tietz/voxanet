@@ -1,7 +1,7 @@
 use crate::player::entity::Player;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum GalaxyRequest {
+pub enum SystemRequest {
     Home, // respawn on the start planet
     Goto {
         planet: usize,
@@ -10,7 +10,7 @@ pub enum GalaxyRequest {
     Add {
         planet_type: crate::planet::biome::PlanetType,
         radius: f32,
-    }, // debug: append a planet to the galaxy
+    }, // debug: append a planet to the solar system
 }
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
@@ -26,19 +26,19 @@ const HELP_LINES: [&str; 12] = [
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]   /perf <seconds> [label]",
-    "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
+    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
     "  /screenshot <path>             help",
 ];
 const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
 const HELP_COLOR: [f32; 3] = [0.8, 0.8, 0.8];
 
-const GALAXY_USAGE: &str = "Usage: /galaxy home|goto <n> <radii>|add <type> <radius>";
+const SYSTEM_USAGE: &str = "Usage: /system home|goto <n> <radii>|add <type> <radius>";
 
-// parses the words after "/galaxy"; the planet number's upper bound is checked by the game, which
-// knows how many planets the galaxy has
-fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
+// parses the words after "/system"; the planet number's upper bound is checked by the game, which
+// knows how many planets the solar system has
+fn parse_system_command(args: &[&str]) -> Result<SystemRequest, &'static str> {
     match args {
-        ["home"] => Ok(GalaxyRequest::Home),
+        ["home"] => Ok(SystemRequest::Home),
         ["add", planet_type, radius] => {
             let planet_type = crate::planet::biome::PlanetType::from_name(planet_type);
             let radius = radius.parse::<f32>().ok().filter(|r| {
@@ -47,11 +47,11 @@ fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
                     .contains(r)
             });
             match (planet_type, radius) {
-                (Some(planet_type), Some(radius)) => Ok(GalaxyRequest::Add {
+                (Some(planet_type), Some(radius)) => Ok(SystemRequest::Add {
                     planet_type,
                     radius,
                 }),
-                _ => Err("Usage: /galaxy add earthlike|volcanic|ice|desert|toxic|ocean|shattered <radius 20-500>"),
+                _ => Err("Usage: /system add earthlike|volcanic|ice|desert|toxic|ocean|shattered <radius 20-500>"),
             }
         }
         ["goto", n, radii] => {
@@ -61,11 +61,11 @@ fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
                 .ok()
                 .filter(|r| r.is_finite() && *r > 1.0);
             match (planet, radii) {
-                (Some(planet), Some(radii)) => Ok(GalaxyRequest::Goto { planet, radii }),
-                _ => Err("Usage: /galaxy goto <planet number> <distance in radii, more than 1>"),
+                (Some(planet), Some(radii)) => Ok(SystemRequest::Goto { planet, radii }),
+                _ => Err("Usage: /system goto <planet number> <distance in radii, more than 1>"),
             }
         }
-        _ => Err(GALAXY_USAGE),
+        _ => Err(SYSTEM_USAGE),
     }
 }
 
@@ -77,7 +77,7 @@ pub struct Console {
     pub hw_shadows_request: Option<Option<bool>>, // set by /hw_shadows (None inside: show), applied by the game loop (renderer)
     pub screenshot_request: Option<String>, // set by /screenshot, applied by the game loop (renderer)
     pub view_request: Option<Option<bool>>, // set by /view (None inside: show), applied by the game loop (controller); true = first person
-    pub galaxy_request: Option<GalaxyRequest>, // set by /galaxy, applied by the game loop
+    pub system_request: Option<SystemRequest>, // set by /system, applied by the game loop
     pub style_request: Option<crate::meshing::lowpoly::TerrainStyle>, // set by /style, applied by the game loop (renderer)
     pub bevel_request: Option<crate::meshing::bevel::BevelCommand>, // set by /bevel, applied by the game loop (renderer)
     pub film_request: Option<crate::render::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
@@ -103,7 +103,7 @@ impl Console {
             hw_shadows_request: None,
             screenshot_request: None,
             view_request: None,
-            galaxy_request: None,
+            system_request: None,
             style_request: None,
             bevel_request: None,
             film_request: None,
@@ -340,8 +340,8 @@ impl Console {
                 _ => self.log("Usage: /style [hex|lowpoly|cubes]", [1.0, 0.5, 0.0]),
             },
 
-            "/galaxy" => match parse_galaxy_command(&parts[1..]) {
-                Ok(request) => self.galaxy_request = Some(request),
+            "/system" => match parse_system_command(&parts[1..]) {
+                Ok(request) => self.system_request = Some(request),
                 Err(message) => self.log(message, [1.0, 0.5, 0.0]),
             },
 
@@ -594,8 +594,8 @@ mod tests {
     #[test]
     fn parses_goto() {
         assert_eq!(
-            parse_galaxy_command(&["goto", "2", "3.5"]),
-            Ok(GalaxyRequest::Goto {
+            parse_system_command(&["goto", "2", "3.5"]),
+            Ok(SystemRequest::Goto {
                 planet: 2,
                 radii: 3.5
             })
@@ -604,53 +604,53 @@ mod tests {
 
     #[test]
     fn rejects_bad_goto_arguments() {
-        assert!(parse_galaxy_command(&["goto"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "2"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "0", "3"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "x", "3"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "2", "1"]).is_err()); // inside / on the surface
-        assert!(parse_galaxy_command(&["goto", "2", "0.5"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "2", "nan"]).is_err());
-        assert!(parse_galaxy_command(&["goto", "2", "inf"]).is_err());
+        assert!(parse_system_command(&["goto"]).is_err());
+        assert!(parse_system_command(&["goto", "2"]).is_err());
+        assert!(parse_system_command(&["goto", "0", "3"]).is_err());
+        assert!(parse_system_command(&["goto", "x", "3"]).is_err());
+        assert!(parse_system_command(&["goto", "2", "1"]).is_err()); // inside / on the surface
+        assert!(parse_system_command(&["goto", "2", "0.5"]).is_err());
+        assert!(parse_system_command(&["goto", "2", "nan"]).is_err());
+        assert!(parse_system_command(&["goto", "2", "inf"]).is_err());
     }
 
     #[test]
     fn parses_home_goto_and_add() {
-        assert_eq!(parse_galaxy_command(&["home"]), Ok(GalaxyRequest::Home));
+        assert_eq!(parse_system_command(&["home"]), Ok(SystemRequest::Home));
         assert_eq!(
-            parse_galaxy_command(&["goto", "2", "3.5"]),
-            Ok(GalaxyRequest::Goto {
+            parse_system_command(&["goto", "2", "3.5"]),
+            Ok(SystemRequest::Goto {
                 planet: 2,
                 radii: 3.5
             })
         );
         assert_eq!(
-            parse_galaxy_command(&["add", "Ice", "120"]),
-            Ok(GalaxyRequest::Add {
+            parse_system_command(&["add", "Ice", "120"]),
+            Ok(SystemRequest::Add {
                 planet_type: crate::planet::biome::PlanetType::Ice,
                 radius: 120.0
             })
         );
         // the home planet is gone: you leave and arrive by flying
-        assert!(parse_galaxy_command(&["enter"]).is_err());
-        assert!(parse_galaxy_command(&["exit"]).is_err());
-        assert!(parse_galaxy_command(&["land", "3"]).is_err());
+        assert!(parse_system_command(&["enter"]).is_err());
+        assert!(parse_system_command(&["exit"]).is_err());
+        assert!(parse_system_command(&["land", "3"]).is_err());
     }
 
     #[test]
     fn rejects_bad_add_arguments() {
-        assert!(parse_galaxy_command(&["add"]).is_err());
-        assert!(parse_galaxy_command(&["add", "ice"]).is_err());
-        assert!(parse_galaxy_command(&["add", "lava", "100"]).is_err());
-        assert!(parse_galaxy_command(&["add", "ice", "10"]).is_err());
-        assert!(parse_galaxy_command(&["add", "ice", "600"]).is_err());
-        assert!(parse_galaxy_command(&["add", "ice", "nan"]).is_err());
+        assert!(parse_system_command(&["add"]).is_err());
+        assert!(parse_system_command(&["add", "ice"]).is_err());
+        assert!(parse_system_command(&["add", "lava", "100"]).is_err());
+        assert!(parse_system_command(&["add", "ice", "10"]).is_err());
+        assert!(parse_system_command(&["add", "ice", "600"]).is_err());
+        assert!(parse_system_command(&["add", "ice", "nan"]).is_err());
     }
 
     #[test]
     fn rejects_unknown_subcommands() {
-        assert!(parse_galaxy_command(&["fly"]).is_err());
-        assert!(parse_galaxy_command(&[]).is_err());
+        assert!(parse_system_command(&["fly"]).is_err());
+        assert!(parse_system_command(&[]).is_err());
     }
 
     // /style switches between the terrain styles

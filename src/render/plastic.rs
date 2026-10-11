@@ -46,7 +46,7 @@ impl PlasticSettings {
         [self.roughness, specular, self.smudge, self.scratch]
     }
 
-    // galaxy.wgsl PlanetUniform.plastic for the impostors: base roughness, specular strength (0 while
+    // space.wgsl PlanetUniform.plastic for the impostors: base roughness, specular strength (0 while
     // off), reflection weight; no imperfections
     pub fn impostor_uniform(&self) -> [f32; 4] {
         let u = self.uniform();
@@ -285,7 +285,7 @@ mod tests {
         }
     }
     // the WGSL is what renders: same F0, and the shared function exists (atmosphere.wgsl is prepended to
-    // the scene and the galaxy shaders)
+    // the scene and the space shaders)
     #[test]
     fn wgsl_uses_the_same_constants() {
         let src = include_str!("atmosphere.wgsl");
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(s.uniform_ext()[0], 0.5);
         assert!(s.apply(PlasticCommand::Get).contains("reflection 0.50"));
     }
-    // the galaxy impostors get the base roughness, the strength and the reflection weight (no
+    // the planet impostors get the base roughness, the strength and the reflection weight (no
     // imperfections), so the landing handover doesn't jump in brightness
     #[test]
     fn impostors_get_the_base_look() {

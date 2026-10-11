@@ -1,11 +1,11 @@
 // landing.rs
-// Galaxy landing, milestone 4: the handover between captured galaxy flight and the voxel engine,
+// SolarSystem landing, milestone 4: the handover between captured space flight and the voxel engine,
 // and flying/landing on a planet. Pure functions, unit-tested without a window or GPU.
 
 use crate::player::physics::Physics;
 use glam::{Mat3, Quat, Vec3};
 
-// captured galaxy flight hands over to the voxel engine below this distance from the planet's
+// captured space flight hands over to the voxel engine below this distance from the planet's
 // centre (in its radii), once the voxel world is ready; the voxel engine hands back above
 // LIFTOFF_HANDOVER_RADII — the gap is hysteresis against ping-pong (spec §1)
 pub const LAND_HANDOVER_RADII: f64 = 3.0;
@@ -22,8 +22,8 @@ pub fn should_lift_off(distance_radii: f32) -> bool {
     distance_radii > LIFTOFF_HANDOVER_RADII
 }
 
-// after the landing handover the galaxy's near impostor stays over the voxel world this long, fading
-// out (alpha-blended, GalaxyRenderer::draw_handover_overlay), so the switch between the two renderings
+// after the landing handover the solar system's near impostor stays over the voxel world this long, fading
+// out (alpha-blended, SpaceRenderer::draw_handover_overlay), so the switch between the two renderings
 // is a cross-fade instead of a cut
 pub const HANDOVER_FADE_SECONDS: f32 = 1.0;
 
@@ -33,7 +33,7 @@ pub fn handover_overlay_opacity(elapsed: f32) -> Option<f32> {
     (t < 1.0).then_some(1.0 - t * t * (3.0 - 2.0 * t))
 }
 
-// galaxy flight (eye position and orientation, planet frame) -> the planet engine's player: feet
+// space flight (eye position and orientation, planet frame) -> the planet engine's player: feet
 // position, upright rotation (local Y = up, local -Z = heading), camera pitch and roll. The eye stays
 // where it is and a rolled view stays rolled; pitch is clamped to MAX_PITCH.
 pub fn player_pose_from_flight(eye: Vec3, rotation: Quat) -> (Vec3, Quat, f32, f32) {
@@ -74,7 +74,7 @@ pub fn camera_angles(up: Vec3, rotation: Quat, max_pitch: f32) -> (Quat, f32, f3
     (player_rotation.normalize(), pitch, roll)
 }
 
-// the planet engine's player -> galaxy flight: eye position and the camera's orientation (the same
+// the planet engine's player -> space flight: eye position and the camera's orientation (the same
 // rotation * pitch * roll the first-person view matrix uses, Player::get_view_matrix), so the view
 // doesn't move on liftoff
 pub fn flight_pose_from_player(
@@ -91,7 +91,7 @@ pub fn flight_pose_from_player(
     (eye, camera.normalize())
 }
 
-// the galaxy flight a liftoff hands over to: the planet camera's eye and orientation
+// the space flight a liftoff hands over to: the planet camera's eye and orientation
 // (flight_pose_from_player) and the player's velocity, so a climb doesn't stall at the handover —
 // both sides live in the planet frame, so the velocity carries over unchanged
 pub fn liftoff_flight(
@@ -100,9 +100,9 @@ pub fn liftoff_flight(
     cam_pitch: f32,
     cam_roll: f32,
     velocity: Vec3,
-) -> crate::space::solar_system::GalaxyFlight {
+) -> crate::space::solar_system::SpaceFlight {
     let (eye, flight_rotation) = flight_pose_from_player(position, rotation, cam_pitch, cam_roll);
-    let mut flight = crate::space::solar_system::GalaxyFlight::new(eye.as_dvec3());
+    let mut flight = crate::space::solar_system::SpaceFlight::new(eye.as_dvec3());
     flight.rotation = flight_rotation;
     flight.velocity = velocity.as_dvec3();
     flight
@@ -115,13 +115,13 @@ pub fn handover_altitude(planet_radius: f32) -> f32 {
 }
 
 // fly speed on a planet: today's (move_speed, or ×10 with boost) near the ground, growing with
-// altitude to exactly galaxy flight's cruise/boost speed at the handover altitude, so speed doesn't
+// altitude to exactly space flight's cruise/boost speed at the handover altitude, so speed doesn't
 // jump at the handover. `handover_altitude` is None on the home planet (no handover, no scaling).
 pub fn fly_speed(base: f32, sprint: bool, altitude: f32, handover_altitude: Option<f32>) -> f32 {
     let (near_ground, at_handover) = if sprint {
-        (base * 10.0, crate::space::solar_system::GALAXY_BOOST_SPEED)
+        (base * 10.0, crate::space::solar_system::SPACE_BOOST_SPEED)
     } else {
-        (base, crate::space::solar_system::GALAXY_CRUISE_SPEED)
+        (base, crate::space::solar_system::SPACE_CRUISE_SPEED)
     };
     match handover_altitude {
         None => near_ground,
@@ -361,7 +361,7 @@ pub fn over_damaging_liquid(planet: &crate::planet::data::PlanetData, position: 
         .is_some_and(|id| planet.holds_water(id.face, id.u, id.v))
 }
 
-// captured galaxy flight can't go below this distance from the planet's centre (in its radii):
+// captured space flight can't go below this distance from the planet's centre (in its radii):
 // it only matters while the voxel world isn't ready yet — once it is, the landing handover happens
 // at LAND_HANDOVER_RADII, above this
 pub const MIN_CAPTURED_RADII: f64 = 2.0;
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(handover_overlay_opacity(HANDOVER_FADE_SECONDS), None);
     }
 
-    // liftoff must keep the climb going: galaxy flight starts with the player's velocity, not
+    // liftoff must keep the climb going: space flight starts with the player's velocity, not
     // from rest (both are in the planet frame)
     #[test]
     fn liftoff_keeps_the_climb_speed() {
@@ -422,16 +422,16 @@ mod tests {
     }
 
     #[test]
-    fn fly_speed_matches_galaxy_cruise_at_the_handover_altitude() {
+    fn fly_speed_matches_solar_system_cruise_at_the_handover_altitude() {
         let h = handover_altitude(168.5);
         assert!((h - 337.0).abs() < 1e-3, "2 radii above sea level: {h}");
         assert!(
-            (fly_speed(5.0, false, h, Some(h)) - crate::space::solar_system::GALAXY_CRUISE_SPEED)
+            (fly_speed(5.0, false, h, Some(h)) - crate::space::solar_system::SPACE_CRUISE_SPEED)
                 .abs()
                 < 1e-3
         );
         assert!(
-            (fly_speed(5.0, true, h, Some(h)) - crate::space::solar_system::GALAXY_BOOST_SPEED)
+            (fly_speed(5.0, true, h, Some(h)) - crate::space::solar_system::SPACE_BOOST_SPEED)
                 .abs()
                 < 1e-3
         );
@@ -838,7 +838,7 @@ mod tests {
         );
     }
 
-    // /galaxy goto looks straight at the planet's centre: heading is undefined there, and the
+    // /system goto looks straight at the planet's centre: heading is undefined there, and the
     // planet camera can't pitch past MAX_PITCH
     #[test]
     fn straight_down_flight_becomes_the_steepest_planet_view() {

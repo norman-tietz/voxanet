@@ -1,15 +1,15 @@
-// galaxy_terrain.rs
-// Sub-project #2 (galaxy terrain impostors): generates a terrain-displaced icosphere mesh for one
-// GalaxyPlanet, sampling the same TerrainShape/NoiseGenerator the real single-planet engine uses —
+// impostor.rs
+// Sub-project #2 (system terrain impostors): generates a terrain-displaced icosphere mesh for one
+// Planet, sampling the same TerrainShape/NoiseGenerator the real single-planet engine uses —
 // but directly, with no baked PlanetTerrain heightmap. Baking a heightmap for every planet in the
-// galaxy would defeat sub-project #1's "many planets, bounded memory" design (see that feature's
+// system would defeat sub-project #1's "many planets, bounded memory" design (see that feature's
 // design discussion). Colors are a simplified, slope-free height-banded rule — material::natural_type
 // needs neighbor-slope data that's meaningless on this sparse, widely-spaced mesh.
 
 use crate::meshing::gen::CoordSystem;
 use crate::planet::data::Vertex;
 use crate::planet::noise::{NoiseGenerator, TerrainShape};
-use crate::space::solar_system::GalaxyPlanet;
+use crate::space::solar_system::Planet;
 use glam::Vec3;
 
 // fractions of this planet's own peak height (shape_relief) above sea level — the same fractions
@@ -21,14 +21,14 @@ const SNOW_LINE: f32 = 0.62;
 // per-vertex biome color and a real face-normal (not a noise-sampled one, so shading matches
 // whatever faceting exists at this subdivision level rather than implying smoothness the mesh
 // doesn't have)
-pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Vertex>, Vec<u32>) {
+pub fn generate_planet_mesh(planet: &Planet, subdivision: u32) -> (Vec<Vertex>, Vec<u32>) {
     let (unit_verts, indices) = crate::space::icosphere::generate(subdivision);
-    // the same resolution GalaxyPlanet::bake uses, so impostor and voxel world agree to the unit
+    // the same resolution Planet::bake uses, so impostor and voxel world agree to the unit
     let res = planet.voxel_resolution();
     let sea_level = (res / 2) as f32;
     let def = planet.planet_type.def();
     let generator = NoiseGenerator::new(planet.noise_seed);
-    // lakes like the baked planet (GalaxyPlanet::bake: liquid planet types)
+    // lakes like the baked planet (Planet::bake: liquid planet types)
     let shape = TerrainShape::new(res, &generator, planet.planet_type, def.liquid.is_some());
 
     // TerrainShape returns offsets in layers from sea level, like the real engine's; per vertex the
@@ -185,7 +185,7 @@ mod tests {
         for res in [80, 337, 500] {
             assert_eq!(near_impostor_node_size(res) / 64, 2, "resolution {res}");
         }
-        assert_eq!(near_impostor_node_size(1000), 256); // /galaxy add's biggest: every 4th
+        assert_eq!(near_impostor_node_size(1000), 256); // /system add's biggest: every 4th
     }
 
     // the near impostor is exactly the engine's own distant-terrain meshes, so the later handover to
@@ -257,8 +257,8 @@ mod tests {
         }
     }
 
-    fn test_planet(noise_seed: u32, planet_type: PlanetType) -> GalaxyPlanet {
-        GalaxyPlanet {
+    fn test_planet(noise_seed: u32, planet_type: PlanetType) -> Planet {
+        Planet {
             orbit_radius: 8_000.0,
             orbit_speed: 0.01,
             orbit_phase: 0.0,
@@ -349,7 +349,7 @@ mod tests {
         });
         assert!(differs, "two different noise seeds produced identical terrain — the per-planet seeding isn't taking effect");
     }
-    fn lake_test_planet(planet_type: PlanetType) -> GalaxyPlanet {
+    fn lake_test_planet(planet_type: PlanetType) -> Planet {
         (1..80)
             .map(|seed| test_planet(seed, planet_type))
             .find(|p| {

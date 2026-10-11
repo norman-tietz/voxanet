@@ -238,7 +238,7 @@ impl Precipitation {
         }
     }
 
-    // a planet switch or galaxy mode: start over (the grid is rebuilt on the next update)
+    // a planet switch or Space mode: start over (the grid is rebuilt on the next update)
     pub fn reset(&mut self) {
         *self = Self::new();
     }

@@ -147,8 +147,8 @@ pub struct Player {
     pub spawn_point: Vec3,
     pub landing: bool, // F pressed while flying: auto-descending until touchdown (landing.rs)
     pub taking_off: Option<f32>, // F pressed while walking/swimming: auto-climbing to this radius
-    pub handover_altitude: Option<f32>, // on a galaxy planet: fly speed scales up to this altitude
-    pub spin_rate: f32, // the planet frame's spin about +Y, rad/s (galaxy::co_rotation; 0: none)
+    pub handover_altitude: Option<f32>, // on a planet: fly speed scales up to this altitude
+    pub spin_rate: f32, // the planet frame's spin about +Y, rad/s (solar_system::co_rotation; 0: none)
 
     // Configuration
     pub move_speed: f32,
@@ -218,7 +218,7 @@ impl Player {
         sprint: bool,
     ) -> bool {
         // high up, fly mode turns with the planet's spin only partly, fading out toward the landing
-        // handover so captured flight continues it (galaxy::co_rotation)
+        // handover so captured flight continues it (solar_system::co_rotation)
         if flying {
             let distance = self.position.length() / (planet.resolution as f32 / 2.0);
             let q = crate::space::solar_system::counter_spin(self.spin_rate, distance, dt);

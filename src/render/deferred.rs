@@ -158,7 +158,7 @@ impl Deferred {
             ],
             immediate_size: 0,
         });
-        // blended over the galaxy backdrop: fs_light outputs premultiplied colour and the sky's opacity as
+        // blended over the space backdrop: fs_light outputs premultiplied colour and the sky's opacity as
         // alpha (1 for terrain and for a thick, lit atmosphere); so does fs_motion_blur
         let full_screen = |label, layout, entry_point, format, blend, depth: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

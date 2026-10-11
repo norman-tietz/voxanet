@@ -49,7 +49,7 @@ fn windowed(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--windowed")
 }
 
-// --seed <n>: the galaxy seed (default 1): sets the star type and the planets
+// --seed <n>: the solar system seed (default 1): sets the star type and the planets
 fn parse_seed(args: &[String]) -> u64 {
     args.iter()
         .skip_while(|a| *a != "--seed")
@@ -89,23 +89,23 @@ struct App {
     // created in `resumed`, once a window can be opened
     game: Option<Game>,
     initial_biome: crate::planet::biome::PlanetType, // from --biome, see parse_biome_arg()
-    seed: u64,                                       // the galaxy seed, from --seed (parse_seed)
+    seed: u64, // the solar system seed, from --seed (parse_seed)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum GameMode {
     Planet,
-    Galaxy,
+    Space,
 }
 
-// galaxy mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
+// Space mode has no Q/E key-yaw, so mouse-look must be active even if the player entered while in
 // third person (Controller::raw_input gates it on first_person && !mouse_released)
-fn enter_galaxy_controls(controller: &mut Controller) {
+fn enter_space_controls(controller: &mut Controller) {
     controller.first_person = true;
     controller.mouse_released = false;
 }
 
-// a galaxy planet baked on a background thread: its voxel world plus the near impostor built from it
+// a planet baked on a background thread: its voxel world plus the near impostor built from it
 struct BakedPlanet {
     index: usize,
     data: PlanetData,
@@ -114,14 +114,14 @@ struct BakedPlanet {
     impostor_generation: u64, // data.edit_generation() when the near impostor was built
 }
 
-// bakes a galaxy planet's voxel world and its near impostor: synchronously at start-up and for
-// /galaxy home, on a background thread on capture (start_bake)
+// bakes a planet's voxel world and its near impostor: synchronously at start-up and for
+// /system home, on a background thread on capture (start_bake)
 fn bake_planet(
-    galaxy: &crate::space::solar_system::Galaxy,
+    system: &crate::space::solar_system::SolarSystem,
     index: usize,
     edits: Option<crate::planet::data::PlanetEdits>,
 ) -> BakedPlanet {
-    let data = galaxy.planets[index].bake_with_edits(edits);
+    let data = system.planets[index].bake_with_edits(edits);
     let (near_verts, near_indices) = crate::space::impostor::near_impostor_mesh(&data);
     BakedPlanet {
         index,
@@ -133,12 +133,12 @@ fn bake_planet(
 }
 
 fn start_bake(
-    galaxy: &crate::space::solar_system::Galaxy,
+    system: &crate::space::solar_system::SolarSystem,
     index: usize,
     edits: Option<crate::planet::data::PlanetEdits>,
 ) -> std::sync::mpsc::Receiver<BakedPlanet> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let target = galaxy.planets[index];
+    let target = system.planets[index];
     std::thread::spawn(move || {
         let data = target.bake_with_edits(edits);
         let (near_verts, near_indices) = crate::space::impostor::near_impostor_mesh(&data);
@@ -178,8 +178,8 @@ fn near_impostor_outdated(built_at: u64, planet: &PlanetData) -> bool {
 // a near impostor rebuilt in the background: (planet index, edit generation it shows, mesh)
 type ImpostorRebuild = (usize, u64, Vec<crate::planet::data::Vertex>, Vec<u32>);
 
-// makes a baked galaxy planet the voxel engine's world: palette, full mesh reload streaming from
-// `stream_from` (planet frame), near impostor for the galaxy renderer
+// makes a baked planet the voxel engine's world: palette, full mesh reload streaming from
+// `stream_from` (planet frame), near impostor for the space renderer
 fn install_world(
     renderer: &mut Renderer,
     controller: &mut Controller,
@@ -216,25 +216,25 @@ fn edit_refused_message(why: Option<crate::planet::data::EditRefused>) -> &'stat
     }
 }
 
-// where a player stands at local noon on galaxy planet `index` (whose voxel world is `planet`):
+// where a player stands at local noon on planet `index` (whose voxel world is `planet`):
 // the surface point facing the star, moved to dry land if that is lava
 fn noon_spawn(
     planet: &PlanetData,
-    galaxy: &crate::space::solar_system::Galaxy,
+    system: &crate::space::solar_system::SolarSystem,
     index: usize,
     t: f64,
 ) -> glam::Vec3 {
-    let noon = galaxy.planets[index].sun_dir_in_planet_frame(galaxy.star.position(), t);
+    let noon = system.planets[index].sun_dir_in_planet_frame(system.star.position(), t);
     let dir = planet.safe_spawn_direction(noon);
     dir * spawn_radius(planet, dir, 10.0)
 }
 
-// a finished bake is installed unless the player has since gone home, landed (both leave galaxy
+// a finished bake is installed unless the player has since gone home, landed (both leave system
 // mode) or been captured by another planet; having merely left orbit again keeps it (spec §1:
 // re-capturing the same planet doesn't re-bake). Capturing another planet also replaces bake_rx,
 // so an older bake can't arrive after that.
 fn bake_still_wanted(mode: GameMode, frame: FlightFrame, index: usize) -> bool {
-    mode == GameMode::Galaxy
+    mode == GameMode::Space
         && match frame {
             FlightFrame::Free => true,
             FlightFrame::Captured(i) => i == index,
@@ -250,17 +250,17 @@ struct Game {
     last_time: Instant,
     current_cursor_locked: bool,
     mode: GameMode,
-    galaxy: crate::space::solar_system::Galaxy,
-    galaxy_flight: crate::space::solar_system::GalaxyFlight,
-    flight_frame: FlightFrame, // galaxy space, or captured by a planet (galaxy.rs)
+    system: crate::space::solar_system::SolarSystem,
+    space_flight: crate::space::solar_system::SpaceFlight,
+    flight_frame: FlightFrame, // space, or captured by a planet (solar_system.rs)
     bake_rx: Option<std::sync::mpsc::Receiver<BakedPlanet>>, // the running background bake, if any
     baking: Option<usize>,     // which planet it is for
-    voxel_ready_announced: bool, // "voxel world ready" printed for the loaded galaxy planet
-    clock: GameClock,          // shared game clock: galaxy orbits and planet day/night
+    voxel_ready_announced: bool, // "voxel world ready" printed for the loaded planet
+    clock: GameClock,          // shared game clock: system orbits and planet day/night
     bench: Option<Bench>,      // a --bench run in progress (perf.rs)
     pub quit: bool,            // the bench run is done: about_to_wait exits
-    loaded_world: usize,       // the galaxy planet the voxel engine holds (always one)
-    start_planet: usize,       // where the game starts and /galaxy home returns to
+    loaded_world: usize,       // the planet the voxel engine holds (always one)
+    start_planet: usize,       // where the game starts and /system home returns to
     // each planet's edits while another planet is installed (stash_edits), handed to its next bake
     edits_by_planet: std::collections::HashMap<usize, crate::planet::data::PlanetEdits>,
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
@@ -313,29 +313,29 @@ impl Game {
         let mut renderer = pollster::block_on(Renderer::new(window));
         let mut controller = Controller::new();
         let mut player = Player::new();
-        let galaxy = crate::space::solar_system::Galaxy::generate(seed);
+        let system = crate::space::solar_system::SolarSystem::generate(seed);
         println!(
-            "Galaxy seed {seed}: {} star",
-            galaxy.star.star_type.def().name
+            "Solar system seed {seed}: {} star",
+            system.star.star_type.def().name
         );
-        let start_planet = galaxy.start_planet_index(initial_biome);
+        let start_planet = system.start_planet_index(initial_biome);
 
-        // every planet lives in the galaxy: start on one of them, standing at local noon
+        // every planet lives in the solar system: start on one of them, standing at local noon
         let mut planet = PlanetData::new(8); // placeholder, replaced right below
-        let baked = bake_planet(&galaxy, start_planet, None);
+        let baked = bake_planet(&system, start_planet, None);
         let impostor_generation = baked.impostor_generation;
         // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
         // turned on past noon while baking
         // a --bench run freezes it at t = 0 (noon, no day cycle, clouds and weather standing still)
         let bench = crate::app::perf::parse_bench_args(&std::env::args().collect::<Vec<_>>());
         let clock = GameClock::new(bench.is_some());
-        let spawn = noon_spawn(&baked.data, &galaxy, start_planet, 0.0);
+        let spawn = noon_spawn(&baked.data, &system, start_planet, 0.0);
         install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
         player.spawn(spawn);
         player.handover_altitude = Some(crate::player::landing::handover_altitude(
-            galaxy.planets[start_planet].radius,
+            system.planets[start_planet].radius,
         ));
-        player.spin_rate = galaxy.planets[start_planet].spin_rate() as f32;
+        player.spin_rate = system.planets[start_planet].spin_rate() as f32;
 
         // fixed comparison poses (screenshots of terrain styles, docs/showcase-like captures): lift the
         // spawn into fly mode VOXANET_POSE_ALT units up, pitched VOXANET_POSE_PITCH radians
@@ -375,8 +375,8 @@ impl Game {
             last_time: Instant::now(),
             current_cursor_locked: false,
             mode: GameMode::Planet,
-            galaxy,
-            galaxy_flight: crate::space::solar_system::GalaxyFlight::new(glam::DVec3::new(
+            system,
+            space_flight: crate::space::solar_system::SpaceFlight::new(glam::DVec3::new(
                 0.0, 0.0, 120_000.0,
             )),
             flight_frame: FlightFrame::Free,
@@ -409,8 +409,8 @@ impl Game {
             last_time,
             current_cursor_locked,
             mode,
-            galaxy,
-            galaxy_flight,
+            system,
+            space_flight,
             flight_frame,
             bake_rx,
             baking,
@@ -462,68 +462,68 @@ impl Game {
                 renderer.update_cursor(planet, controller.cursor_id);
                 renderer.update_view(player.position, planet);
 
-                // high enough above the planet: hand back to captured galaxy flight
-                let radius = galaxy.planets[*loaded_world].radius;
+                // high enough above the planet: hand back to captured space flight
+                let radius = system.planets[*loaded_world].radius;
                 if crate::player::landing::should_lift_off(player.position.length() / radius) {
                     lift_off_from = Some(*loaded_world);
                 }
             }
-            GameMode::Galaxy => {
+            GameMode::Space => {
                 let (_, jump, down, sprint, mouse_delta) = controller.raw_input();
-                let (input, keys) = controller.galaxy_flight_input();
-                // turning and climbing follow galaxy space's +Y in free flight, the local radial up
+                let (input, keys) = controller.space_flight_input();
+                // turning and climbing follow space's +Y in free flight, the local radial up
                 // while captured (the planet's spin axis would pitch the view at its equator)
                 let up = match *flight_frame {
                     FlightFrame::Free => None,
-                    FlightFrame::Captured(_) => galaxy_flight.position.as_vec3().try_normalize(),
+                    FlightFrame::Captured(_) => space_flight.position.as_vec3().try_normalize(),
                 };
-                galaxy_flight.update(dt, input, jump, down, mouse_delta, sprint, keys, up);
-                // captured flight turns with the planet only close to it (galaxy::co_rotation)
+                space_flight.update(dt, input, jump, down, mouse_delta, sprint, keys, up);
+                // captured flight turns with the planet only close to it (solar_system::co_rotation)
                 if let FlightFrame::Captured(i) = *flight_frame {
-                    let p = &galaxy.planets[i];
-                    let distance = (galaxy_flight.position.length() / p.radius as f64) as f32;
+                    let p = &system.planets[i];
+                    let distance = (space_flight.position.length() / p.radius as f64) as f32;
                     let q = crate::space::solar_system::counter_spin(
                         p.spin_rate() as f32,
                         distance,
                         dt,
                     )
                     .as_dquat();
-                    galaxy_flight.position = q * galaxy_flight.position;
-                    galaxy_flight.velocity = q * galaxy_flight.velocity;
-                    galaxy_flight.rotation = (q.as_quat() * galaxy_flight.rotation).normalize();
+                    space_flight.position = q * space_flight.position;
+                    space_flight.velocity = q * space_flight.velocity;
+                    space_flight.rotation = (q.as_quat() * space_flight.rotation).normalize();
                 }
-                // the star's heat zone pushes free flight back out and can't be passed (galaxy.rs);
+                // the star's heat zone pushes free flight back out and can't be passed (solar_system.rs);
                 // planets orbit outside it, so captured flight never meets it
                 if *flight_frame == FlightFrame::Free {
-                    let star = galaxy.star.position();
-                    let r = galaxy.star.radius;
-                    galaxy_flight.velocity = crate::space::solar_system::star_heat_push(
-                        galaxy_flight.velocity,
-                        galaxy_flight.position - star,
+                    let star = system.star.position();
+                    let r = system.star.radius;
+                    space_flight.velocity = crate::space::solar_system::star_heat_push(
+                        space_flight.velocity,
+                        space_flight.position - star,
                         r,
                         dt,
                     );
                     let kept =
-                        crate::space::solar_system::keep_off_star(galaxy_flight.position - star, r)
+                        crate::space::solar_system::keep_off_star(space_flight.position - star, r)
                             + star;
-                    if kept != galaxy_flight.position {
+                    if kept != space_flight.position {
                         // at the limit: no further inward speed
                         let out = (kept - star).normalize();
-                        let inward = galaxy_flight.velocity.dot(out).min(0.0);
-                        galaxy_flight.velocity -= out * inward;
-                        galaxy_flight.position = kept;
+                        let inward = space_flight.velocity.dot(out).min(0.0);
+                        space_flight.velocity -= out * inward;
+                        space_flight.position = kept;
                     }
                 }
                 let t = clock.now();
-                // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
+                // capture by / release from a planet's frame (solar_system.rs, CAPTURE_RADII)
                 let next = crate::space::solar_system::next_flight_frame(
-                    galaxy,
+                    system,
                     *flight_frame,
-                    galaxy_flight.position,
+                    space_flight.position,
                     t,
                 );
                 if next != *flight_frame {
-                    galaxy_flight.change_frame(*flight_frame, next, galaxy, t);
+                    space_flight.change_frame(*flight_frame, next, system, t);
                     match next {
                         FlightFrame::Captured(i) => println!("Entering the orbit of #{}", i + 1),
                         FlightFrame::Free => println!("Leaving orbit"),
@@ -532,27 +532,27 @@ impl Game {
                 }
                 if let FlightFrame::Captured(i) = *flight_frame {
                     // the impostor is all there is until the voxel world is ready: don't sink into it
-                    galaxy_flight.position = crate::player::landing::keep_above_planet(
-                        galaxy_flight.position,
-                        galaxy.planets[i].radius as f64,
+                    space_flight.position = crate::player::landing::keep_above_planet(
+                        space_flight.position,
+                        system.planets[i].radius as f64,
                     );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
                     if *loaded_world != i && *baking != Some(i) {
                         // the stored edits stay in the store until this bake is installed, so a
                         // dropped bake loses nothing
-                        *bake_rx = Some(start_bake(galaxy, i, edits_by_planet.get(&i).cloned()));
+                        *bake_rx = Some(start_bake(system, i, edits_by_planet.get(&i).cloned()));
                         *baking = Some(i);
                     }
                     // once loaded, the voxel engine streams from the flight's planet-frame position,
                     // so its meshes are ready by the time the landing handover needs them
                     if *loaded_world == i {
-                        renderer.update_view(galaxy_flight.position.as_vec3(), planet);
+                        renderer.update_view(space_flight.position.as_vec3(), planet);
                         if !*voxel_ready_announced && renderer.view_covered() {
                             println!("Voxel world for #{} ready", i + 1);
                             *voxel_ready_announced = true;
                         }
                         let distance_radii =
-                            galaxy_flight.position.length() / galaxy.planets[i].radius as f64;
+                            space_flight.position.length() / system.planets[i].radius as f64;
                         if crate::player::landing::should_land(
                             distance_radii,
                             renderer.view_covered(),
@@ -565,25 +565,25 @@ impl Game {
         }
 
         if let Some(i) = land_on {
-            // galaxy flight -> voxel engine: same eye, same view direction and roll, in fly mode
+            // space flight -> voxel engine: same eye, same view direction and roll, in fly mode
             let (position, rotation, cam_pitch, cam_roll) =
                 crate::player::landing::player_pose_from_flight(
-                    galaxy_flight.position.as_vec3(),
-                    galaxy_flight.rotation,
+                    space_flight.position.as_vec3(),
+                    space_flight.rotation,
                 );
             player.position = position;
             player.rotation = rotation;
             player.cam_pitch = cam_pitch;
             player.cam_roll = cam_roll;
             // both sides live in the planet frame: the flight carries on at its speed
-            player.velocity = galaxy_flight.velocity.as_vec3();
-            player.roll_rate = galaxy_flight.roll_rate; // a roll in progress carries on
+            player.velocity = space_flight.velocity.as_vec3();
+            player.roll_rate = space_flight.roll_rate; // a roll in progress carries on
             player.landing = false;
             player.taking_off = None;
             player.handover_altitude = Some(crate::player::landing::handover_altitude(
-                galaxy.planets[i].radius,
+                system.planets[i].radius,
             ));
-            player.spin_rate = galaxy.planets[i].spin_rate() as f32;
+            player.spin_rate = system.planets[i].spin_rate() as f32;
             // dying here respawns on dry land below, not back in orbit
             let below = planet.safe_spawn_direction(position.normalize());
             player.spawn_point = below * spawn_radius(planet, below, 10.0);
@@ -594,19 +594,19 @@ impl Game {
             println!("Landing handover onto #{}", i + 1);
         }
         if let Some(i) = lift_off_from {
-            // voxel engine -> captured galaxy flight: same eye, same view direction and roll, same velocity
-            *galaxy_flight = crate::player::landing::liftoff_flight(
+            // voxel engine -> captured space flight: same eye, same view direction and roll, same velocity
+            *space_flight = crate::player::landing::liftoff_flight(
                 player.position,
                 player.rotation,
                 player.cam_pitch,
                 player.cam_roll,
                 player.velocity,
             );
-            galaxy_flight.roll_rate = player.roll_rate; // a roll in progress carries on
+            space_flight.roll_rate = player.roll_rate; // a roll in progress carries on
             *flight_frame = FlightFrame::Captured(i);
             player.landing = false;
-            *mode = GameMode::Galaxy;
-            enter_galaxy_controls(controller);
+            *mode = GameMode::Space;
+            enter_space_controls(controller);
             println!("Liftoff into the orbit of #{}", i + 1);
         }
 
@@ -617,11 +617,11 @@ impl Game {
             *bake_rx = None;
             *baking = None;
             if bake_still_wanted(*mode, *flight_frame, baked.index) {
-                // the engine streams in the planet frame; free flight is in galaxy space
+                // the engine streams in the planet frame; free flight is in space
                 let local = match *flight_frame {
-                    FlightFrame::Captured(_) => galaxy_flight.position,
-                    FlightFrame::Free => galaxy.planets[baked.index]
-                        .to_planet_frame(galaxy_flight.position, clock.now()),
+                    FlightFrame::Captured(_) => space_flight.position,
+                    FlightFrame::Free => system.planets[baked.index]
+                        .to_planet_frame(space_flight.position, clock.now()),
                 };
                 let index = baked.index;
                 let generation = baked.impostor_generation;
@@ -636,9 +636,9 @@ impl Game {
             }
         }
 
-        // the galaxy shows the installed planet's near impostor: rebuild it in the background when the
-        // planet was edited since it was built (after liftoff, or leaving by /galaxy goto)
-        if *mode == GameMode::Galaxy
+        // the solar system shows the installed planet's near impostor: rebuild it in the background when the
+        // planet was edited since it was built (after liftoff, or leaving by /system goto)
+        if *mode == GameMode::Space
             && impostor_rx.is_none()
             && near_impostor_outdated(*impostor_generation, planet)
         {
@@ -682,35 +682,35 @@ impl Game {
             };
             console.log(&format!("View: {view}"), [0.0, 1.0, 0.0]);
         }
-        if let Some(request) = console.galaxy_request.take() {
-            use crate::app::cmd::GalaxyRequest;
+        if let Some(request) = console.system_request.take() {
+            use crate::app::cmd::SystemRequest;
             let say = |console: &mut Console, text: &str| {
                 console.log(text, [1.0, 1.0, 1.0]);
                 println!("{text}");
             };
             match request {
-                GalaxyRequest::Home => {
+                SystemRequest::Home => {
                     // a running bake was for wherever the player was flying: drop it
                     *bake_rx = None;
                     *baking = None;
                     let i = *start_planet;
                     if *loaded_world != i {
-                        let baked = bake_planet(galaxy, i, edits_by_planet.remove(&i));
+                        let baked = bake_planet(system, i, edits_by_planet.remove(&i));
                         let generation = baked.impostor_generation;
                         // the time after the bake: the planet keeps turning while it bakes
                         let t = clock.now();
-                        let spawn = noon_spawn(&baked.data, galaxy, i, t);
+                        let spawn = noon_spawn(&baked.data, system, i, t);
                         stash_edits(edits_by_planet, Some(*loaded_world), i, planet);
                         install_world(renderer, controller, planet, baked, spawn);
                         *impostor_generation = generation;
                         *loaded_world = i;
                     }
                     let t = clock.now();
-                    player.spawn(noon_spawn(planet, galaxy, i, t));
+                    player.spawn(noon_spawn(planet, system, i, t));
                     player.handover_altitude = Some(crate::player::landing::handover_altitude(
-                        galaxy.planets[i].radius,
+                        system.planets[i].radius,
                     ));
-                    player.spin_rate = galaxy.planets[i].spin_rate() as f32;
+                    player.spin_rate = system.planets[i].spin_rate() as f32;
                     controller.fly_mode = false;
                     *flight_frame = FlightFrame::Free;
                     *mode = GameMode::Planet;
@@ -719,40 +719,40 @@ impl Game {
                         &format!("Back on #{} {}.", i + 1, planet.planet_type.def().name),
                     );
                 }
-                GalaxyRequest::Add {
+                SystemRequest::Add {
                     planet_type,
                     radius,
-                } => match galaxy.add_planet(planet_type, radius) {
+                } => match system.add_planet(planet_type, radius) {
                     Ok(i) => say(
                         console,
                         &format!(
-                            "Added #{n} {} (radius {radius}). /galaxy goto {n} 3 to visit.",
+                            "Added #{n} {} (radius {radius}). /system goto {n} 3 to visit.",
                             planet_type.def().name,
                             n = i + 1
                         ),
                     ),
                     Err(message) => console.log(message, [1.0, 0.5, 0.0]),
                 },
-                GalaxyRequest::Goto { planet: n, radii } => match galaxy.planets.get(n - 1) {
+                SystemRequest::Goto { planet: n, radii } => match system.planets.get(n - 1) {
                     None => console.log(
                         &format!(
-                            "No planet #{n}: this galaxy has 1..={}",
-                            galaxy.planets.len()
+                            "No planet #{n}: this solar system has 1..={}",
+                            system.planets.len()
                         ),
                         [1.0, 0.5, 0.0],
                     ),
                     Some(target) => {
                         let t = clock.now();
                         // over the day side, looking at the planet's centre (roll levels out by itself)
-                        let dir = target.sun_dir_in_planet_frame(galaxy.star.position(), t);
-                        *galaxy_flight = crate::space::solar_system::GalaxyFlight::new(
+                        let dir = target.sun_dir_in_planet_frame(system.star.position(), t);
+                        *space_flight = crate::space::solar_system::SpaceFlight::new(
                             (dir * radii * target.radius).as_dvec3(),
                         );
-                        galaxy_flight.rotation =
+                        space_flight.rotation =
                             glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
                         *flight_frame = FlightFrame::Captured(n - 1);
-                        *mode = GameMode::Galaxy;
-                        enter_galaxy_controls(controller);
+                        *mode = GameMode::Space;
+                        enter_space_controls(controller);
                         say(
                             console,
                             &format!(
@@ -832,9 +832,9 @@ impl Game {
         }
         if let Some(cmd) = console.weather_request.take() {
             use crate::weather::WeatherCommand;
-            // in galaxy flight the player's position and the loaded planet's type are stale: only the
+            // in space flight the player's position and the loaded planet's type are stale: only the
             // global switch makes sense there
-            if *mode == GameMode::Galaxy
+            if *mode == GameMode::Space
                 && !matches!(
                     cmd,
                     WeatherCommand::On | WeatherCommand::Off | WeatherCommand::Particles(_)
@@ -920,7 +920,7 @@ impl Game {
         } = self;
 
         // GLOBAL KEYS: work in every mode and even while the console is open (it captures all other
-        // keyboard input, and in galaxy mode it isn't drawn, so an open console is easy to miss)
+        // keyboard input, and in Space mode it isn't drawn, so an open console is easy to miss)
         if let WindowEvent::KeyboardInput {
             event: key_event, ..
         } = &event
@@ -1071,7 +1071,7 @@ impl Game {
                 }
             }
 
-            // planet-only keys: in galaxy mode these would silently regenerate the hidden planet. First
+            // planet-only keys: in Space mode these would silently regenerate the hidden planet. First
             // press only: holding F would otherwise auto-repeat, starting and cancelling a landing in turn
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -1131,21 +1131,21 @@ impl Game {
                 match &self.mode {
                     GameMode::Planet => {
                         let i = self.loaded_world;
-                        let sun = self.galaxy.planets[i]
-                            .sun_dir_in_planet_frame(self.galaxy.star.position(), t);
-                        // the galaxy behind the voxel world, seen from exactly the planet camera
-                        use crate::space::render::{Backdrop, GalaxyCamera, GalaxyContent};
+                        let sun = self.system.planets[i]
+                            .sun_dir_in_planet_frame(self.system.star.position(), t);
+                        // the solar system behind the voxel world, seen from exactly the planet camera
+                        use crate::space::render::{Backdrop, SpaceCamera, SpaceContent};
                         let (eye, cam_rot) = controller.camera_pose(player);
                         let fov_y = controller.fov_y();
-                        let camera = GalaxyCamera::on_galaxy_planet(
-                            &self.galaxy.planets[i],
+                        let camera = SpaceCamera::on_system_planet(
+                            &self.system.planets[i],
                             eye,
                             cam_rot,
                             fov_y,
                             t,
                         );
-                        let content = GalaxyContent::AllButPlanet(i);
-                        // the galaxy's impostor fading out over the voxel world after a landing
+                        let content = SpaceContent::AllButPlanet(i);
+                        // the solar system's impostor fading out over the voxel world after a landing
                         let handover_overlay = self
                             .landed_at
                             .and_then(|at| {
@@ -1155,7 +1155,7 @@ impl Game {
                             })
                             .map(|opacity| (i, opacity));
                         let backdrop = Backdrop {
-                            galaxy: &self.galaxy,
+                            system: &self.system,
                             camera,
                             content,
                             t,
@@ -1163,14 +1163,14 @@ impl Game {
                         };
                         renderer.render(controller, player, planet, console, t, sun, &backdrop)
                     }
-                    GameMode::Galaxy => {
-                        let camera = crate::space::render::GalaxyCamera::from_flight_in_frame(
-                            &self.galaxy_flight,
+                    GameMode::Space => {
+                        let camera = crate::space::render::SpaceCamera::from_flight_in_frame(
+                            &self.space_flight,
                             self.flight_frame,
-                            &self.galaxy,
+                            &self.system,
                             t,
                         );
-                        renderer.render_galaxy(&camera, &self.galaxy, t, &self.console)
+                        renderer.render_space(&camera, &self.system, t, &self.console)
                     }
                 }
             }
@@ -1340,12 +1340,12 @@ mod tests {
     #[test]
     fn late_bakes_are_dropped_only_after_going_home_landing_or_another_capture() {
         assert!(bake_still_wanted(
-            GameMode::Galaxy,
+            GameMode::Space,
             FlightFrame::Captured(2),
             2
         ));
         assert!(!bake_still_wanted(
-            GameMode::Galaxy,
+            GameMode::Space,
             FlightFrame::Captured(3),
             2
         ));
@@ -1356,6 +1356,6 @@ mod tests {
         ));
         // spec §1: leaving orbit before landing keeps the bake — a bake finishing while flight is
         // free again (nobody else captured it meanwhile) is still installed, so re-capture won't re-bake
-        assert!(bake_still_wanted(GameMode::Galaxy, FlightFrame::Free, 2));
+        assert!(bake_still_wanted(GameMode::Space, FlightFrame::Free, 2));
     }
 }

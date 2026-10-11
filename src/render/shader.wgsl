@@ -50,7 +50,7 @@ struct Biome {
     star_limb: vec4<f32>,
     star_corona: vec4<f32>,  // rgb, w: corona_size
     star_params: vec4<f32>,  // granulation, granule_scale, sunspots, unused
-    star_frame: vec4<f32>,   // quaternion: planet frame -> galaxy space (GalaxyPlanet::orientation)
+    star_frame: vec4<f32>,   // quaternion: planet frame -> space (Planet::orientation)
     weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: vec4<f32>,
 }
@@ -488,7 +488,7 @@ fn triplanar_detail(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 // --- ATMOSPHERE & CLOUDS ---
-// The maths lives in atmosphere.wgsl (shared with the galaxy planet impostors); these wrappers feed it
+// The maths lives in atmosphere.wgsl (shared with the planet impostors); these wrappers feed it
 // the engine's globals so every call site below stays as it was. A thin cloud shell wraps the planet at
 // CLOUD_ALT * planet radius, shaded procedurally (no mesh): every call site solves for where a ray crosses
 // that shell, then shades it — from the ground, at the horizon, reflected in water, or from orbit.
@@ -888,7 +888,7 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 // shades one pixel (G-buffer sample, sky/cloud compositing), without post-processing (fs_light, and
 // fs_shade for the motion blur, which post-processes after averaging).
 // Returns premultiplied colour and coverage: terrain is opaque, the sky only as opaque as
-// sky_opacity, so the galaxy backdrop shows through where the atmosphere is thin or dark.
+// sky_opacity, so the space backdrop shows through where the atmosphere is thin or dark.
 fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<f32> {
     let dist = textureLoad(d_dist, px, 0).r;
     let uv = (vec2<f32>(px) + 0.5) / global.screen.xy;
@@ -976,7 +976,7 @@ fn fs_motion_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 // full-screen white flash drawn over everything (text included) right after F2/`/screenshot` captures a
 // frame, so the capture itself is reliably invisible: it only fires once the swapchain image already
 // has the un-flashed frame copied out. `local.params.x` is the flash's current opacity (Renderer::render),
-// `params.yzw` its colour (white for the flash; the galaxy's star heat glow uses the same pass).
+// `params.yzw` its colour (white for the flash; the solar system's star heat glow uses the same pass).
 @fragment
 fn fs_flash() -> @location(0) vec4<f32> {
     return vec4<f32>(local.params.yzw, local.params.x);

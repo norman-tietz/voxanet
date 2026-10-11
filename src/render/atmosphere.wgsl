@@ -1,7 +1,7 @@
 // atmosphere.wgsl
 // Sky, atmosphere limb, clouds (the noise; clouds.wgsl samples it from the baked cloud map), air fog and tone mapping shared by the voxel engine (shader.wgsl) and
-// the galaxy planet impostors (galaxy.wgsl). Both are compiled with this file prepended (renderer.rs
-// SCENE_SHADER, galaxy_render.rs GALAXY_SHADER), so a planet looks the same from galaxy flight and from
+// the planet impostors (space.wgsl). Both are compiled with this file prepended (renderer.rs
+// SCENE_SHADER, render.rs SPACE_SHADER), so a planet looks the same from space flight and from
 // the voxel engine at the landing handover. Everything here is in the planet's own frame (centre at
 // the origin) and takes the planet's radius and colours as an `Atmosphere`, never engine globals.
 
@@ -40,10 +40,10 @@ struct Atmosphere {
     space_color: vec3<f32>,
     cloud_light: vec3<f32>,
     cloud_dark: vec3<f32>,
-    sun_color: vec3<f32>, // sunlight: the star type's (galaxy.rs StarTypeDef.sunlight)
+    sun_color: vec3<f32>, // sunlight: the star type's (solar_system.rs StarTypeDef.sunlight)
     star: StarLook,       // the star's look (star.wgsl), for the sun disc in the sky
     star_angle: f32,      // the star's angular radius from this planet; 0 = no disc (impostor shells)
-    star_frame: vec4<f32>, // quaternion: planet frame -> galaxy space, so the disc shows the star's own surface
+    star_frame: vec4<f32>, // quaternion: planet frame -> space, so the disc shows the star's own surface
     time: f32,            // seconds, for the star's boiling surface
     overcast: f32,        // 0..1 storm overhead (weather.rs overcast): greys and dims the dome
 }
@@ -154,7 +154,7 @@ fn atmo_ambient_daylight(pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
     return mix(NIGHT_AMBIENT, vec3<f32>(1.0), smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
 }
 
-// how opaque the sky is along the ray, for blending it over what lies behind (the galaxy): thick,
+// how opaque the sky is along the ray, for blending it over what lies behind (the solar system): thick,
 // sunlit atmosphere = 1; open space and the night side = 0. Daylight is the sun's elevation at the
 // ray's closest point to the planet (for a camera on the ground looking up: the camera itself).
 fn atmo_sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, planet_r: f32) -> f32 {
@@ -172,7 +172,7 @@ fn atmo_sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: At
     return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L, a);
 }
 
-// the sky without the sun disc: for the galaxy impostors' atmosphere shell, where the galaxy draws
+// the sky without the sun disc: for the planet impostors' atmosphere shell, where the solar system draws
 // the star itself — and where L (planet -> star) is not the camera's direction to the star, so the
 // engine's disc would show up as a second sun beside the real one
 const OVERCAST_GREY: f32 = 0.6; // an overcast dome goes this far toward grey ...
@@ -192,15 +192,15 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
 // white-hot. Only ever drawn where the ray truly reaches deep space (never for a ray that hit terrain
 // first), so it's automatically hidden on the planet's own night side and correctly occluded wherever
 // callers composite clouds on top afterwards.
-// the star in the sky at its real apparent size (a.star_angle), shaded like the galaxy's star (star.wgsl):
-// limb-darkened disc, then its corona, so the sky's sun and the galaxy backdrop's star match at the
+// the star in the sky at its real apparent size (a.star_angle), shaded like the solar system's star (star.wgsl):
+// limb-darkened disc, then its corona, so the sky's sun and the space backdrop's star match at the
 // handover. It fades with the sky's opacity like the rest of the sky (atmo_sky_over_black, fs_light).
 fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     if (a.star_angle <= 0.0) {
         return vec3<f32>(0.0);
     }
     // the star scaled to distance 1: centre at L, radius sin(star_angle); the near side's hit point, as
-    // fs_star finds it, turned into galaxy space so the same granules and spots show (star_shading.rs
+    // fs_star finds it, turned into space so the same granules and spots show (star_shading.rs
     // sky_disc_normal mirrors this)
     let r = sin(a.star_angle);
     let along = dot(ray_dir, L);

@@ -2,14 +2,14 @@
 // Screen-space lens flares for the visible sun (flare.rs): a starburst at the sun, six ghosts along the
 // line from the sun through the screen centre and a faint halo ring, drawn additively over the finished
 // frame before the HUD text. Compiled with atmosphere.wgsl and star.wgsl prepended (for
-// atmo_cloud_shadow). Occlusion: 9 taps around the sun in the vertex shader — the galaxy depth buffer
-// (galaxy mode) or the G-buffer distance (planet mode).
+// atmo_cloud_shadow). Occlusion: 9 taps around the sun in the vertex shader — the solar system depth buffer
+// (Space mode) or the G-buffer distance (planet mode).
 
 struct Flare {
-    sun: vec4<f32>,    // xy: sun NDC, z: galaxy mode: the star's expected reversed-Z depth, w: intensity
+    sun: vec4<f32>,    // xy: sun NDC, z: Space mode: the star's expected reversed-Z depth, w: intensity
     tint: vec4<f32>,   // corona colour
     tint2: vec4<f32>,  // surface colour
-    mode: vec4<f32>,   // x: 0 galaxy depth taps, 1 G-buffer taps; y: tap radius px; zw: screen size
+    mode: vec4<f32>,   // x: 0 system depth taps, 1 G-buffer taps; y: tap radius px; zw: screen size
     camera: vec4<f32>, // planet mode: camera position (planet frame), planet radius
     light: vec4<f32>,  // planet mode: direction to the sun, cloud time
 }
@@ -28,7 +28,7 @@ const GHOSTS = array<vec4<f32>, 6>(
 );
 
 // share of 9 taps around the sun that see it: planet mode, open sky in the G-buffer (distance 0);
-// galaxy mode, nothing nearer than the star (reversed-Z: a tap's depth not above the star's expected
+// Space mode, nothing nearer than the star (reversed-Z: a tap's depth not above the star's expected
 // depth, with a small tolerance)
 fn sun_visibility() -> f32 {
     let size = flare.mode.zw;

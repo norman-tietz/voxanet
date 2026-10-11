@@ -1186,13 +1186,13 @@ mod tests {
         assert!(sum / n < 0.15, "mean {}", sum / n);
     }
 
-    // the game's start planet (galaxy seed 1, planet #1, Earth-like, res 337): larger and steeper than
+    // the game's start planet (system seed 1, planet #1, Earth-like, res 337): larger and steeper than
     // the small test planets above. Slow in a debug build (~25 s), hence ignored; run with
     // cargo test --release start_planet_is_a_closed_manifold -- --ignored
     #[test]
     #[ignore]
     fn start_planet_is_a_closed_manifold() {
-        let planet = crate::space::solar_system::Galaxy::generate(1).planets[0].bake();
+        let planet = crate::space::solar_system::SolarSystem::generate(1).planets[0].bake();
         assert_eq!(planet.resolution, 337);
         assert_manifold(&planet);
     }
@@ -1249,7 +1249,7 @@ mod tests {
     #[test]
     #[ignore]
     fn start_planet_smooth_surface_stays_near_the_blocks() {
-        let planet = crate::space::solar_system::Galaxy::generate(1).planets[0].bake();
+        let planet = crate::space::solar_system::SolarSystem::generate(1).planets[0].bake();
         let (max, p99, mean, over) = smooth_mismatch(&planet);
         println!("start planet: max {max} p99 {p99} mean {mean} share>1 {over}");
         assert!(max < 4.0 && p99 < 1.0 && mean < 0.3, "{max} {p99} {mean}");
@@ -1315,7 +1315,7 @@ mod tests {
     // whole planet 0.19 % vs 1.0 %)
     #[test]
     fn start_planet_slopes_have_few_near_vertical_facets() {
-        let planet = crate::space::solar_system::Galaxy::generate(1).planets[0].bake();
+        let planet = crate::space::solar_system::SolarSystem::generate(1).planets[0].bake();
         let res = planet.resolution;
         let n = res.div_ceil(CHUNK_SIZE);
         // the chunk with the most face-0 neighbour pairs one to two smooth layers apart (45–63°)

@@ -1,11 +1,11 @@
 // star.wgsl
-// The star's surface and corona, shared by the galaxy renderer (the star in space, galaxy.wgsl) and the
+// The star's surface and corona, shared by the space renderer (the star in space, space.wgsl) and the
 // voxel engine's sky (atmo_sun_disc, atmosphere.wgsl), so both show the same sun. Prepended after
 // atmosphere.wgsl. Mirrored for tests in star_shading.rs.
 
 const STAR_LIMB_DARKENING: f32 = 0.6;
 
-// a star type's look (galaxy.rs StarTypeDef)
+// a star type's look (solar_system.rs StarTypeDef)
 struct StarLook {
     surface: vec3<f32>,
     limb: vec3<f32>,
@@ -28,7 +28,7 @@ fn star_pcg(v: u32) -> u32 {
 }
 
 // a lattice point's value in [0, 1]. Integer hashing on purpose: the classic fract(sin(dot(p, k)) * big)
-// loses its randomness once the dot product is large (GPU f32 sin, see galaxy.wgsl's star_hash)
+// loses its randomness once the dot product is large (GPU f32 sin, see space.wgsl's star_hash)
 fn sun_hash(p: vec3<f32>) -> f32 {
     let c = bitcast<vec3<u32>>(vec3<i32>(p));
     return f32(star_pcg(c.x ^ star_pcg(c.y ^ star_pcg(c.z)))) / 4294967295.0;

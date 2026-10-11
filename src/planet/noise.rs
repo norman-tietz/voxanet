@@ -470,7 +470,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 
 // --- PLANET TERRAIN DATA ---
 
-// the home planet's noise seed (the value every planet used before galaxy planets had their own)
+// the home planet's noise seed (the value every planet used before planets had their own)
 pub const HOME_SEED: u32 = 42;
 
 #[derive(Clone)]

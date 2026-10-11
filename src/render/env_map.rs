@@ -32,7 +32,7 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    // this frame's work; `reset`: the map no longer fits (planet switch, back from galaxy mode)
+    // this frame's work; `reset`: the map no longer fits (planet switch, back from Space mode)
     pub fn update(&mut self, reset: bool) -> Vec<EnvBake> {
         if reset || !self.valid {
             self.valid = true;

@@ -1,6 +1,6 @@
 // icosphere.rs
-// A standalone icosphere generator for galaxy mode's placeholder planet/star meshes
-// (src/galaxy_render.rs). Not voxel-related; deliberately separate from gen.rs/MeshGen, which only
+// A standalone icosphere generator for Space mode's placeholder planet/star meshes
+// (src/render.rs). Not voxel-related; deliberately separate from gen.rs/MeshGen, which only
 // ever builds terrain geometry.
 
 use glam::Vec3;

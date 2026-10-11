@@ -1,7 +1,7 @@
 // weather.wgsl
 // The deterministic weather (weather.rs mirrors it line by line; keep them identical): a function of the
 // direction from the planet centre (planet frame) and the shared clock (seconds, wrapped at 3600). Prepended
-// after atmosphere.wgsl to the weather bake, the cloud bake, the scene and the galaxy shaders.
+// after atmosphere.wgsl to the weather bake, the cloud bake, the scene and the space shaders.
 
 const WEATHER_PERIOD: f32 = 3600.0;          // the clock's wrap: every rate is whole cycles per period
 const WEATHER_SCALE: f32 = 1.6;              // noise frequency over the unit direction (~3-5 fronts around)

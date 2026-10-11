@@ -1,7 +1,7 @@
 // biome.rs
 // The whole planet's type, as pure data in the `def()` table: Earth-like (water), Volcanic (lava),
 // Ice (no liquid, slippery ice shores), Desert (no liquid), Toxic (glowing sludge), Ocean (water,
-// sandy islands) and Shattered (glowing plasma). Every galaxy planet has one (galaxy.rs cycles
+// sandy islands) and Shattered (glowing plasma). Every planet has one (solar_system.rs cycles
 // through `ALL`). Each type has its own landscape (noise.rs TerrainShape, one profile per type on a
 // shared continent mask) and fills it with its own blocks, liquid (look and physics, `LiquidPhysics`),
 // atmosphere and day length.
@@ -32,7 +32,7 @@ impl PlanetType {
     ];
 
     // matches a planet type's name case-insensitively, ignoring spaces and hyphens ("Earth-like",
-    // "earthlike", "EARTHLIKE"); used by --biome and /galaxy add
+    // "earthlike", "EARTHLIKE"); used by --biome and /system add
     pub fn from_name(name: &str) -> Option<PlanetType> {
         let normalize = |s: &str| s.to_lowercase().replace(['-', ' '], "");
         let wanted = normalize(name);

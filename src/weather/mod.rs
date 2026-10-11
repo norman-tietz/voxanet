@@ -614,7 +614,7 @@ impl WeatherMap {
         }
     }
 
-    // scene group 0 and galaxy camera group 0 (weather_map.wgsl); sampled with the cloud map's sampler
+    // scene group 0 and space camera group 0 (weather_map.wgsl); sampled with the cloud map's sampler
     pub fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
         let fragment = wgpu::ShaderStages::FRAGMENT;
         [

@@ -1,6 +1,6 @@
 // weather_map.wgsl
 // The baked weather (weather.rs WeatherMap): (storm, rain history, cover history, snow share) per
-// direction, blended between the two snapshots around now. Prepended to the scene and galaxy shaders,
+// direction, blended between the two snapshots around now. Prepended to the scene and space shaders,
 // whose group 0 both carry the map at these bindings (sampled with the cloud map's sampler).
 
 struct WeatherMapParams {

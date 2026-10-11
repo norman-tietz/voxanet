@@ -1,5 +1,5 @@
-// galaxy.rs
-// Sub-project #1 (galaxy foundation) of the planned multi-planet feature: a seeded single-star
+// solar_system.rs
+// Sub-project #1 (system foundation) of the planned multi-planet feature: a seeded single-star
 // solar system of orbiting placeholder bodies, deliberately separate from the existing
 // single-planet engine (PlanetData/CoordSystem/Player/Physics) — no voxel terrain, no collision,
 // and no connection yet to the player's actual planet (that's a later sub-project, landing/liftoff).
@@ -12,7 +12,7 @@ pub struct Star {
     pub star_type: StarType,
 }
 
-// the galaxy's star: one of five types, picked from the galaxy seed (star_type_for); sets the star's
+// the solar system's star: one of five types, picked from the solar system seed (star_type_for); sets the star's
 // look and size and the sunlight colour on its planets (spec 2026-10-04 star rendering)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StarType {
@@ -113,7 +113,7 @@ impl StarType {
     }
 }
 
-// the star type of the galaxy with this seed: a bit-mixing hash (fmix64, as planet_radius_for) of the
+// the star type of the solar system with this seed: a bit-mixing hash (fmix64, as planet_radius_for) of the
 // seed alone, independent of the planets' hashes
 pub fn star_type_for(seed: u64) -> StarType {
     let mut h = seed.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ 0x5DEE_CE66_D1CE_4E5B;
@@ -126,14 +126,14 @@ pub fn star_type_for(seed: u64) -> StarType {
 }
 
 impl Star {
-    // the star sits at the origin of galaxy space; kept as a method so callers don't hardcode it
+    // the star sits at the origin of space; kept as a method so callers don't hardcode it
     pub fn position(&self) -> DVec3 {
         DVec3::ZERO
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GalaxyPlanet {
+pub struct Planet {
     pub orbit_radius: f64,
     pub orbit_speed: f64, // radians/sec; positive = counterclockwise looking down +Y
     pub orbit_phase: f64, // starting angle, radians
@@ -141,14 +141,14 @@ pub struct GalaxyPlanet {
     pub orbit_node: f64, // direction of the tilt axis within the plane, radians
     pub radius: f32,
     pub planet_type: PlanetType,
-    pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/galaxy_terrain.rs);
+    pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/impostor.rs);
                          // independent of planet_radius_for's hash so radius and terrain shape don't correlate
 }
 
-pub struct Galaxy {
+pub struct SolarSystem {
     pub star: Star,
-    pub planets: Vec<GalaxyPlanet>,
-    pub seed: u64, // generation seed: planets added later (/galaxy add) are seeded from it too
+    pub planets: Vec<Planet>,
+    pub seed: u64, // generation seed: planets added later (/system add) are seeded from it too
 }
 
 const PLANET_COUNT: usize = 7;
@@ -163,19 +163,19 @@ const ORBIT_JITTER_MAX: f64 = 1.10;
 const MAX_ORBIT_TILT: f64 = 4.0 * std::f64::consts::PI / 180.0;
 const MIN_PLANET_RADIUS: f32 = 40.0;
 const MAX_PLANET_RADIUS: f32 = 250.0;
-// most planets a galaxy can hold (generated + /galaxy add): the galaxy renderer sizes its per-planet
+// most planets a system can hold (generated + /system add): the space renderer sizes its per-planet
 // uniform buffer for this many
 pub const MAX_PLANETS: usize = 15;
-// /galaxy add accepts radii in this range (bake time grows with the square of the radius)
+// /system add accepts radii in this range (bake time grows with the square of the radius)
 pub const MIN_ADDED_RADIUS: f32 = 20.0;
 pub const MAX_ADDED_RADIUS: f32 = 500.0;
 
-impl Galaxy {
+impl SolarSystem {
     pub fn generate(seed: u64) -> Self {
         let planets = (0..PLANET_COUNT)
             .map(|i| {
                 let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(seed, i);
-                GalaxyPlanet {
+                Planet {
                     orbit_radius,
                     orbit_speed: orbit_speed_for(orbit_radius),
                     orbit_phase,
@@ -206,7 +206,7 @@ impl Galaxy {
             .unwrap_or(0)
     }
 
-    // debug (/galaxy add): appends a planet of the given type and radius on the next orbit outward,
+    // debug (/system add): appends a planet of the given type and radius on the next orbit outward,
     // shaped like the generated ones (same orbit progression, phase spread and seeded terrain);
     // returns its index
     pub fn add_planet(
@@ -215,14 +215,14 @@ impl Galaxy {
         radius: f32,
     ) -> Result<usize, &'static str> {
         if self.planets.len() >= MAX_PLANETS {
-            return Err("The galaxy is full (15 planets).");
+            return Err("The system is full (15 planets).");
         }
         if !(MIN_ADDED_RADIUS..=MAX_ADDED_RADIUS).contains(&radius) {
             return Err("Planet radius must be 20-500.");
         }
         let i = self.planets.len();
         let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(self.seed, i);
-        self.planets.push(GalaxyPlanet {
+        self.planets.push(Planet {
             orbit_radius,
             orbit_speed: orbit_speed_for(orbit_radius),
             orbit_phase,
@@ -242,7 +242,7 @@ fn orbit_speed_for(orbit_radius: f64) -> f64 {
     std::f64::consts::TAU / INNER_ORBIT_PERIOD_SECS * (INNER_ORBIT_RADIUS / orbit_radius).powf(1.5)
 }
 
-// a deterministic value in 0..1 for (galaxy seed, planet index, `salt` naming what it's for): fmix64 as
+// a deterministic value in 0..1 for (system seed, planet index, `salt` naming what it's for): fmix64 as
 // planet_radius_for, with a salt per property so they don't correlate
 fn seeded_unit(seed: u64, index: usize, salt: u64) -> f64 {
     let mut h = seed
@@ -257,7 +257,7 @@ fn seeded_unit(seed: u64, index: usize, salt: u64) -> f64 {
     (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
-// planet `index`'s orbit in the galaxy with `seed`: (radius, starting angle, tilt, tilt axis direction)
+// planet `index`'s orbit in the solar system with `seed`: (radius, starting angle, tilt, tilt axis direction)
 fn orbit_for(seed: u64, index: usize) -> (f64, f64, f64, f64) {
     let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(index as i32);
     let jitter =
@@ -282,7 +282,7 @@ fn planet_radius_for(seed: u64, index: usize) -> f32 {
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(index as u64);
     // full MurmurHash3 fmix64 (two multiply-xorshift rounds): the single-round version this used
-    // to be doesn't avalanche small sequential `index` values enough — an entire galaxy's planets
+    // to be doesn't avalanche small sequential `index` values enough — an entire system's planets
     // came out clustered within a few units of each other instead of spanning the intended range
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
@@ -293,7 +293,7 @@ fn planet_radius_for(seed: u64, index: usize) -> f32 {
     MIN_PLANET_RADIUS + (t as f32) * (MAX_PLANET_RADIUS - MIN_PLANET_RADIUS)
 }
 
-// deterministic pseudo-random seed per (galaxy seed, index), independent of planet_radius_for's
+// deterministic pseudo-random seed per (system seed, index), independent of planet_radius_for's
 // hash (different multiplier constant) so a planet's size and its terrain shape don't correlate
 fn noise_seed_for(seed: u64, index: usize) -> u32 {
     let mut h = seed
@@ -309,7 +309,7 @@ fn noise_seed_for(seed: u64, index: usize) -> u32 {
     (h & 0xFFFF_FFFF) as u32
 }
 
-impl GalaxyPlanet {
+impl Planet {
     // the star's angular radius seen from this planet (radians): its apparent size in the planet's sky
     pub fn star_angular_radius(&self, star: &Star) -> f32 {
         (star.radius / self.orbit_radius).min(1.0).asin() as f32
@@ -368,7 +368,7 @@ impl GalaxyPlanet {
         self.spin_f32(t).inverse() * local_rot
     }
 
-    // planet frame -> galaxy space rotation: how the planet (and so its impostor mesh) is turned at t
+    // planet frame -> space rotation: how the planet (and so its impostor mesh) is turned at t
     pub fn orientation(&self, t: f64) -> Quat {
         self.spin_f32(t).inverse()
     }
@@ -385,7 +385,7 @@ impl GalaxyPlanet {
         ((self.radius as f64 * 2.0).round() as u32).max(8)
     }
 
-    // the real voxel planet for this galaxy planet: own seed, matching size, own planet type
+    // the real voxel planet for this planet: own seed, matching size, own planet type
     pub fn bake(&self) -> crate::planet::data::PlanetData {
         crate::planet::data::PlanetData::new_for_type(
             self.voxel_resolution(),
@@ -413,25 +413,30 @@ impl GalaxyPlanet {
 pub const CAPTURE_RADII: f64 = 10.0;
 pub const RELEASE_RADII: f64 = 11.0;
 
-// which frame galaxy flight lives in: galaxy space, or a planet's own frame (spec §1 "captured")
+// which frame space flight lives in: space, or a planet's own frame (spec §1 "captured")
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FlightFrame {
     Free,
-    Captured(usize), // index into Galaxy::planets
+    Captured(usize), // index into SolarSystem::planets
 }
 
-// the frame flight should be in, given its position `pos` in its current frame (galaxy space when
+// the frame flight should be in, given its position `pos` in its current frame (space when
 // Free, the planet frame when Captured)
-pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64) -> FlightFrame {
+pub fn next_flight_frame(
+    system: &SolarSystem,
+    frame: FlightFrame,
+    pos: DVec3,
+    t: f64,
+) -> FlightFrame {
     match frame {
         FlightFrame::Captured(i) => {
-            if pos.length() > RELEASE_RADII * galaxy.planets[i].radius as f64 {
+            if pos.length() > RELEASE_RADII * system.planets[i].radius as f64 {
                 FlightFrame::Free
             } else {
                 frame
             }
         }
-        FlightFrame::Free => galaxy
+        FlightFrame::Free => system
             .planets
             .iter()
             .enumerate()
@@ -442,10 +447,10 @@ pub fn next_flight_frame(galaxy: &Galaxy, frame: FlightFrame, pos: DVec3, t: f64
     }
 }
 
-pub const GALAXY_CRUISE_SPEED: f32 = 500.0;
-pub const GALAXY_BOOST_SPEED: f32 = 2000.0;
+pub const SPACE_CRUISE_SPEED: f32 = 500.0;
+pub const SPACE_BOOST_SPEED: f32 = 2000.0;
 
-pub struct GalaxyFlight {
+pub struct SpaceFlight {
     pub position: DVec3,
     pub velocity: DVec3,
     pub rotation: Quat,
@@ -454,7 +459,7 @@ pub struct GalaxyFlight {
     mouse_sens: f32,
 }
 
-impl GalaxyFlight {
+impl SpaceFlight {
     pub fn new(position: DVec3) -> Self {
         Self {
             position,
@@ -469,19 +474,25 @@ impl GalaxyFlight {
     // re-expresses position, orientation and velocity in another frame, so capture and release
     // don't move the view. Velocity is only rotated: the planet's own orbital and spin motion is
     // neither added nor removed, so on capture the player simply starts co-moving with the planet.
-    pub fn change_frame(&mut self, from: FlightFrame, to: FlightFrame, galaxy: &Galaxy, t: f64) {
+    pub fn change_frame(
+        &mut self,
+        from: FlightFrame,
+        to: FlightFrame,
+        system: &SolarSystem,
+        t: f64,
+    ) {
         if from == to {
             return;
         }
         if let FlightFrame::Captured(i) = from {
-            let p = &galaxy.planets[i];
+            let p = &system.planets[i];
             self.position = p.from_planet_frame(self.position, t);
             self.rotation = p.rotation_from_planet_frame(self.rotation, t);
             // a direction, not a point: rotate without the planet's offset
             self.velocity = p.from_planet_frame(self.velocity, t) - p.position_at(t);
         }
         if let FlightFrame::Captured(i) = to {
-            let p = &galaxy.planets[i];
+            let p = &system.planets[i];
             self.position = p.to_planet_frame(self.position, t);
             self.rotation = p.rotation_to_planet_frame(self.rotation, t);
             self.velocity = p.to_planet_frame(self.velocity + p.position_at(t), t);
@@ -536,9 +547,9 @@ impl GalaxyFlight {
         let dir = compose_fly_direction(forward, jump, down, up);
 
         let target_speed = if sprint {
-            GALAXY_BOOST_SPEED
+            SPACE_BOOST_SPEED
         } else {
-            GALAXY_CRUISE_SPEED
+            SPACE_CRUISE_SPEED
         };
         let target_velocity = dir * target_speed;
 
@@ -611,7 +622,7 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) ->
 pub const HEAT_ZONE_RADII: f64 = 2.0;
 pub const HEAT_LIMIT_RADII: f64 = 1.15;
 // outward push at full heat: eased flight pulls toward boost speed at up to ~8000 units/s^2
-// (GALAXY_BOOST_SPEED / FLIGHT_EASE_SECONDS), so this always wins near the limit
+// (SPACE_BOOST_SPEED / FLIGHT_EASE_SECONDS), so this always wins near the limit
 const HEAT_PUSH_ACCEL: f64 = 12_000.0;
 
 // heat 0..1 at `distance` from the star's centre (smooth: 0 at the zone's edge, 1 at the limit)
@@ -622,7 +633,7 @@ pub fn star_heat(distance: f64, star_radius: f64) -> f32 {
     (t * t * (3.0 - 2.0 * t)) as f32
 }
 
-// the velocity after this step's outward heat push (galaxy space, the star at the origin)
+// the velocity after this step's outward heat push (space, the star at the origin)
 pub fn star_heat_push(velocity: DVec3, position: DVec3, star_radius: f64, dt: f32) -> DVec3 {
     let heat = star_heat(position.length(), star_radius) as f64;
     if heat <= 0.0 {
@@ -642,7 +653,7 @@ pub fn keep_off_star(position: DVec3, star_radius: f64) -> DVec3 {
     }
 }
 
-// Where a target sits relative to the camera, for the galaxy-mode compass overlay: yaw is the
+// Where a target sits relative to the camera, for the solar system-mode compass overlay: yaw is the
 // left/right angle from the view direction (positive = right, ±180 = straight behind), pitch the
 // up/down angle (positive = above). Both in degrees, camera-relative, so they follow mouse-look.
 #[derive(Clone, Copy, Debug)]
@@ -688,8 +699,8 @@ mod tests {
     // a bake with stored edits contains them; one without doesn't
     #[test]
     fn bake_with_edits_restores_them() {
-        let galaxy = Galaxy::generate(1);
-        let planet = &galaxy.planets[0];
+        let system = SolarSystem::generate(1);
+        let planet = &system.planets[0];
         let mut first = planet.bake();
         let (face, u, v) = (0u8, 40u32, 40u32);
         let top = first.terrain.get_height(face, u, v) + 1; // one block on the surface: under the ceiling
@@ -709,7 +720,7 @@ mod tests {
 
     #[test]
     fn start_planet_is_the_first_of_the_preferred_type() {
-        let mut g = Galaxy::generate(1);
+        let mut g = SolarSystem::generate(1);
         assert_eq!(g.start_planet_index(PlanetType::EarthLike), 0);
         assert_eq!(g.start_planet_index(PlanetType::Volcanic), 1);
         assert_eq!(g.start_planet_index(PlanetType::Ice), 2);
@@ -723,7 +734,7 @@ mod tests {
 
     #[test]
     fn added_planet_continues_the_orbit_progression_and_is_deterministic() {
-        let mut a = Galaxy::generate(1);
+        let mut a = SolarSystem::generate(1);
         let i = a.add_planet(PlanetType::Ice, 120.0).unwrap();
         assert_eq!(i, 7);
         let p = a.planets[7];
@@ -736,14 +747,14 @@ mod tests {
         assert_eq!(p.planet_type, PlanetType::Ice);
         assert_eq!(p.radius, 120.0);
         assert_eq!(p.noise_seed, noise_seed_for(1, 7));
-        let mut b = Galaxy::generate(1);
+        let mut b = SolarSystem::generate(1);
         b.add_planet(PlanetType::Ice, 120.0).unwrap();
         assert_eq!(a.planets[7], b.planets[7]);
     }
 
     #[test]
     fn adding_beyond_the_cap_or_out_of_range_fails() {
-        let mut g = Galaxy::generate(1);
+        let mut g = SolarSystem::generate(1);
         assert!(g.add_planet(PlanetType::Ice, 10.0).is_err());
         assert!(g.add_planet(PlanetType::Ice, 600.0).is_err());
         while g.planets.len() < MAX_PLANETS {
@@ -764,7 +775,7 @@ mod tests {
         let up = Vec3::X;
         // camera right = -Y, camera up = +X (radial), looking along -Z
         let rot = Quat::from_mat3(&glam::Mat3::from_cols(Vec3::NEG_Y, Vec3::X, Vec3::Z));
-        let mut flight = GalaxyFlight::new(DVec3::new(600.0, 0.0, 0.0));
+        let mut flight = SpaceFlight::new(DVec3::new(600.0, 0.0, 0.0));
         flight.rotation = rot;
         let before = flight.rotation * Vec3::NEG_Z;
         flight.update(
@@ -787,7 +798,7 @@ mod tests {
 
     // after mouse-right, how far the view turned toward where the camera's right was, and how far it
     // tipped toward the camera's up (a pure turn: first > 0, second ~ 0)
-    fn turn_of(flight: &mut GalaxyFlight, up: Option<Vec3>) -> (f32, f32) {
+    fn turn_of(flight: &mut SpaceFlight, up: Option<Vec3>) -> (f32, f32) {
         let (before, right, cam_up) = (
             flight.rotation * Vec3::NEG_Z,
             flight.rotation * Vec3::X,
@@ -808,12 +819,12 @@ mod tests {
     }
 
     // free flight has no up: whatever the roll after leaving orbit (level, on its side, upside down
-    // relative to galaxy +Y), sideways mouse turns the view sideways — before, it turned about +Y,
+    // relative to system +Y), sideways mouse turns the view sideways — before, it turned about +Y,
     // which pitched the view or mirrored the turn
     #[test]
     fn free_flight_mouse_turns_sideways_at_any_roll() {
         for roll in [0.0f32, 1.0, 1.5708, 2.5, 3.14159] {
-            let mut flight = GalaxyFlight::new(DVec3::ZERO);
+            let mut flight = SpaceFlight::new(DVec3::ZERO);
             flight.rotation = Quat::from_rotation_y(0.4) * Quat::from_rotation_z(roll);
             let (sideways, tipped) = turn_of(&mut flight, None);
             assert!(
@@ -830,7 +841,7 @@ mod tests {
     fn captured_yaw_is_never_inverted_while_roll_levels() {
         let up = Some(Vec3::Y);
         for roll in [1.5708f32, 2.5, 3.14159, -2.0] {
-            let mut flight = GalaxyFlight::new(DVec3::new(0.0, 600.0, 0.0));
+            let mut flight = SpaceFlight::new(DVec3::new(0.0, 600.0, 0.0));
             flight.rotation = Quat::from_rotation_z(roll);
             let (sideways, _) = turn_of(&mut flight, up);
             assert!(
@@ -849,10 +860,10 @@ mod tests {
             turn: 0.0,
         };
         for up in [None, Some(Vec3::Y)] {
-            let mut flight = GalaxyFlight::new(DVec3::new(0.0, 600.0, 0.0));
+            let mut flight = SpaceFlight::new(DVec3::new(0.0, 600.0, 0.0));
             flight.rotation = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.2);
             let (forward, camera_up) = (flight.rotation * Vec3::NEG_Z, flight.rotation * Vec3::Y);
-            let step = |flight: &mut GalaxyFlight, keys| {
+            let step = |flight: &mut SpaceFlight, keys| {
                 flight.update(
                     1.0 / 60.0,
                     Vec3::ZERO,
@@ -892,10 +903,10 @@ mod tests {
         }
     }
 
-    // Q/E turn (Q left) in galaxy flight, without rolling
+    // Q/E turn (Q left) in space flight, without rolling
     #[test]
-    fn q_e_turn_in_galaxy_flight() {
-        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+    fn q_e_turn_in_space_flight() {
+        let mut flight = SpaceFlight::new(DVec3::ZERO);
         let left = -(flight.rotation * Vec3::X);
         let forward = flight.rotation * Vec3::NEG_Z;
         for _ in 0..30 {
@@ -921,12 +932,12 @@ mod tests {
     }
 
     // far from the planet (from CO_ROTATION_OUTER_RADII) captured flight keeps its attitude against
-    // the stars: undoing the planet frame's spin each step leaves the galaxy-space orientation
+    // the stars: undoing the planet frame's spin each step leaves the space orientation
     // unchanged; close to it (below CO_ROTATION_INNER_RADII) it turns with the planet as before
     #[test]
     fn far_out_captured_flight_keeps_still_against_the_stars() {
-        let galaxy = Galaxy::generate(1);
-        let p = &galaxy.planets[0];
+        let system = SolarSystem::generate(1);
+        let p = &system.planets[0];
         let start = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.3);
         for (distance, inertial) in [(5.0f32, true), (1.2, false)] {
             let (mut local, mut t, dt) = (start, 0.0f64, 1.0 / 60.0);
@@ -953,8 +964,8 @@ mod tests {
     // free flight: Space/Shift climb and descend along the camera's own up
     #[test]
     fn free_flight_climbs_along_the_camera_up() {
-        let mut flight = GalaxyFlight::new(DVec3::ZERO);
-        flight.rotation = Quat::from_rotation_z(3.14159); // upside down relative to galaxy +Y
+        let mut flight = SpaceFlight::new(DVec3::ZERO);
+        flight.rotation = Quat::from_rotation_z(3.14159); // upside down relative to system +Y
         flight.update(
             1.0,
             Vec3::ZERO,
@@ -982,7 +993,7 @@ mod tests {
 
     #[test]
     fn capture_inside_ten_radii_and_release_outside() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         let t = 12.0;
         let near = p.position_at(t) + DVec3::new(9.0 * p.radius as f64, 0.0, 0.0);
@@ -1022,7 +1033,7 @@ mod tests {
 
     #[test]
     fn capture_picks_the_planet_you_are_near() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let t = 300.0;
         let p = &g.planets[4];
         let pos = p.position_at(t) + DVec3::new(0.0, 3.0 * p.radius as f64, 0.0);
@@ -1032,14 +1043,14 @@ mod tests {
         );
     }
 
-    // capture/release must not move the view: the same galaxy-space position and orientation before
+    // capture/release must not move the view: the same space position and orientation before
     // and after, whichever way round (the flicker case at exactly 10 radii relies on this)
     #[test]
     fn change_frame_keeps_the_absolute_view() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         let t = 77.0;
-        let mut flight = GalaxyFlight::new(p.position_at(t) + DVec3::new(500.0, 200.0, -300.0));
+        let mut flight = SpaceFlight::new(p.position_at(t) + DVec3::new(500.0, 200.0, -300.0));
         flight.rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.4, -0.2, 0.3);
         flight.velocity = DVec3::new(10.0, -5.0, 2.0);
         let (abs_pos, abs_rot, abs_vel) = (flight.position, flight.rotation, flight.velocity);
@@ -1064,8 +1075,8 @@ mod tests {
     }
 
     #[test]
-    fn orientation_maps_the_planet_frame_into_galaxy_space() {
-        let p = Galaxy::generate(1).planets[2];
+    fn orientation_maps_the_planet_frame_into_space() {
+        let p = SolarSystem::generate(1).planets[2];
         let local = Vec3::new(30.0, -40.0, 120.0);
         for t in [0.0, 55.0, 9_000.0] {
             let rotated = (p.orientation(t) * local).as_dvec3();
@@ -1077,8 +1088,8 @@ mod tests {
         }
     }
 
-    fn inner_planet() -> GalaxyPlanet {
-        Galaxy::generate(1).planets[0]
+    fn inner_planet() -> Planet {
+        SolarSystem::generate(1).planets[0]
     }
 
     #[test]
@@ -1133,7 +1144,7 @@ mod tests {
 
     #[test]
     fn sun_points_at_the_star() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         for p in &g.planets {
             for t in [0.0, 33.0, 4_321.0] {
                 let sun = p.sun_dir_in_planet_frame(g.star.position(), t);
@@ -1151,11 +1162,11 @@ mod tests {
     // same as on the home planet) despite the planet also moving around the star
     #[test]
     fn solar_day_equals_the_planet_types_day_length() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         // exact for an orbit in the common plane; on a tilted orbit (spin axis still +Y) the sun's height
         // swings by up to +-tilt over the year (small seasons), so within one day it can shift by up to twice
         // the tilt's sine (inner planets cover much of their orbit in one of their days)
-        let flat = GalaxyPlanet {
+        let flat = Planet {
             orbit_tilt: 0.0,
             ..g.planets[0]
         };
@@ -1189,7 +1200,7 @@ mod tests {
 
     #[test]
     fn bake_uses_the_planets_own_seed_resolution_and_type() {
-        let mut p = Galaxy::generate(1).planets[1]; // Volcanic
+        let mut p = SolarSystem::generate(1).planets[1]; // Volcanic
         p.radius = 40.0; // smallest size: keeps the bake quick in a debug test build
         let data = p.bake();
         assert_eq!(data.resolution, 80);
@@ -1231,13 +1242,13 @@ mod tests {
 
     #[test]
     fn generate_produces_seven_planets() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         assert_eq!(g.planets.len(), 7);
     }
 
     #[test]
     fn generate_orbit_radii_strictly_increase() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         for pair in g.planets.windows(2) {
             assert!(
                 pair[1].orbit_radius > pair[0].orbit_radius,
@@ -1250,8 +1261,8 @@ mod tests {
 
     #[test]
     fn generate_is_deterministic_for_a_fixed_seed() {
-        let a = Galaxy::generate(42);
-        let b = Galaxy::generate(42);
+        let a = SolarSystem::generate(42);
+        let b = SolarSystem::generate(42);
         assert_eq!(a.planets.len(), b.planets.len());
         for (pa, pb) in a.planets.iter().zip(b.planets.iter()) {
             assert_eq!(pa.orbit_radius, pb.orbit_radius);
@@ -1267,8 +1278,8 @@ mod tests {
 
     #[test]
     fn generate_is_different_for_a_different_seed() {
-        let a = Galaxy::generate(1);
-        let b = Galaxy::generate(2);
+        let a = SolarSystem::generate(1);
+        let b = SolarSystem::generate(2);
         // at least one planet's radius differs between seeds (radius is the only
         // seed-dependent-per-planet field; orbit layout is fixed by index, not seed)
         assert!(a
@@ -1280,7 +1291,7 @@ mod tests {
 
     #[test]
     fn generate_planet_radii_are_in_range() {
-        let g = Galaxy::generate(7);
+        let g = SolarSystem::generate(7);
         for p in &g.planets {
             assert!(
                 (40.0..=250.0).contains(&p.radius),
@@ -1291,14 +1302,14 @@ mod tests {
     }
 
     // regression test for a real bug: the hash's finalizer was missing a round and didn't
-    // avalanche small sequential `index` values enough, so an entire galaxy's planets came out
+    // avalanche small sequential `index` values enough, so an entire system's planets came out
     // clustered within a few units of each other (observed: 160-164 across all 7 planets) instead
     // of spanning anywhere near the intended 40-250 range. "in range" alone doesn't catch this —
     // a tightly clustered set of values is still technically in range.
     #[test]
     fn generate_planet_radii_are_well_spread_not_clustered() {
         for seed in [1, 2, 7, 42] {
-            let g = Galaxy::generate(seed);
+            let g = SolarSystem::generate(seed);
             let radii: Vec<f32> = g.planets.iter().map(|p| p.radius).collect();
             let min = radii.iter().cloned().fold(f32::INFINITY, f32::min);
             let max = radii.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -1312,7 +1323,7 @@ mod tests {
 
     #[test]
     fn position_at_traces_a_circle_of_the_right_radius() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         for t in [0.0, 10.0, 123.4, 10_000.0] {
             let pos = p.position_at(t);
@@ -1331,7 +1342,7 @@ mod tests {
 
     #[test]
     fn position_at_advances_in_the_direction_orbit_speed_implies() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         assert!(
             p.orbit_speed > 0.0,
@@ -1355,7 +1366,7 @@ mod tests {
     fn orbit_periods_follow_kepler() {
         let period = |r: f64| std::f64::consts::TAU / orbit_speed_for(r);
         assert!((period(INNER_ORBIT_RADIUS) - 180.0).abs() < 1e-6);
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         for p in &g.planets {
             let expected = 180.0 * (p.orbit_radius / INNER_ORBIT_RADIUS).powf(1.5);
             assert!((std::f64::consts::TAU / p.orbit_speed - expected).abs() < 1e-6 * expected);
@@ -1365,7 +1376,7 @@ mod tests {
     // starting angles are seeded, not the old even spread, and differ between systems
     #[test]
     fn starting_angles_are_seeded() {
-        let (a, b) = (Galaxy::generate(1), Galaxy::generate(2));
+        let (a, b) = (SolarSystem::generate(1), SolarSystem::generate(2));
         let even = |i: usize| std::f64::consts::TAU * i as f64 / PLANET_COUNT as f64;
         assert!(a
             .planets
@@ -1387,7 +1398,7 @@ mod tests {
     #[test]
     fn orbit_radii_vary_without_crossing() {
         for seed in 0..50u64 {
-            let g = Galaxy::generate(seed);
+            let g = SolarSystem::generate(seed);
             for (i, p) in g.planets.iter().enumerate() {
                 let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(i as i32);
                 assert!(
@@ -1406,7 +1417,7 @@ mod tests {
                 "seed {seed}"
             );
         }
-        let varied = (0..20u64).map(|s| Galaxy::generate(s).planets[3].orbit_radius);
+        let varied = (0..20u64).map(|s| SolarSystem::generate(s).planets[3].orbit_radius);
         let (lo, hi) = varied.fold((f64::MAX, 0.0f64), |(l, h), r| (l.min(r), h.max(r)));
         assert!(hi - lo > 0.05 * lo, "radii don't vary between seeds");
     }
@@ -1414,7 +1425,7 @@ mod tests {
     // orbits are tilted a little (up to MAX_ORBIT_TILT) out of the common plane, staying circles
     #[test]
     fn orbits_are_slightly_tilted() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let mut out_of_plane = false;
         for p in &g.planets {
             assert!(p.orbit_tilt >= 0.0 && p.orbit_tilt <= MAX_ORBIT_TILT);
@@ -1461,7 +1472,7 @@ mod tests {
 
     #[test]
     fn star_angular_radius_follows_size_and_distance() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let (inner, outer) = (&g.planets[0], &g.planets[6]);
         let a = inner.star_angular_radius(&g.star);
         assert!((a - (g.star.radius / inner.orbit_radius).asin() as f32).abs() < 1e-6);
@@ -1473,7 +1484,7 @@ mod tests {
         assert_eq!(star_type_for(7), star_type_for(7));
         let seen: std::collections::HashSet<_> = (0..200u64).map(star_type_for).collect();
         assert_eq!(seen.len(), StarType::ALL.len(), "not every type appears");
-        let g = Galaxy::generate(9);
+        let g = SolarSystem::generate(9);
         assert_eq!(g.star.star_type, star_type_for(9));
         assert_eq!(g.star.radius, star_type_for(9).def().radius);
     }
@@ -1507,11 +1518,11 @@ mod tests {
     // star, full at HEAT_LIMIT_RADII
     #[test]
     fn star_heat_rises_toward_the_star() {
-        let galaxy = Galaxy::generate(1);
-        let r = galaxy.star.radius;
+        let system = SolarSystem::generate(1);
+        let r = system.star.radius;
         assert_eq!(star_heat(HEAT_ZONE_RADII * r, r), 0.0);
         assert_eq!(star_heat(5.0 * r, r), 0.0);
-        let inner_orbit = galaxy
+        let inner_orbit = system
             .planets
             .iter()
             .map(|p| p.orbit_radius - p.radius as f64)
@@ -1530,9 +1541,9 @@ mod tests {
     // boosting straight at the star never gets inside the limit, and is pushed back out from it
     #[test]
     fn boosting_at_the_star_is_pushed_back() {
-        let galaxy = Galaxy::generate(1);
-        let r = galaxy.star.radius;
-        let mut flight = GalaxyFlight::new(DVec3::new(0.0, 0.0, 1.9 * r));
+        let system = SolarSystem::generate(1);
+        let r = system.star.radius;
+        let mut flight = SpaceFlight::new(DVec3::new(0.0, 0.0, 1.9 * r));
         let dt = 1.0 / 60.0;
         let mut closest = f64::MAX;
         for _ in 0..600 {
@@ -1553,8 +1564,8 @@ mod tests {
         }
         assert!(closest >= HEAT_LIMIT_RADII * r - 1e-6, "got to {closest}");
         // right at the limit at full boost: pushed outward
-        let mut at_limit = GalaxyFlight::new(DVec3::new(0.0, 0.0, HEAT_LIMIT_RADII * r));
-        at_limit.velocity = DVec3::new(0.0, 0.0, -(GALAXY_BOOST_SPEED as f64));
+        let mut at_limit = SpaceFlight::new(DVec3::new(0.0, 0.0, HEAT_LIMIT_RADII * r));
+        at_limit.velocity = DVec3::new(0.0, 0.0, -(SPACE_BOOST_SPEED as f64));
         for _ in 0..120 {
             at_limit.update(
                 dt,
@@ -1592,9 +1603,9 @@ mod tests {
 
     // braking from boost speed takes well under a second (it used to glide for 2.5 s)
     #[test]
-    fn galaxy_flight_brakes_from_boost_within_a_second() {
-        let mut flight = GalaxyFlight::new(DVec3::ZERO);
-        flight.velocity = DVec3::new(0.0, 0.0, -GALAXY_BOOST_SPEED as f64);
+    fn space_flight_brakes_from_boost_within_a_second() {
+        let mut flight = SpaceFlight::new(DVec3::ZERO);
+        flight.velocity = DVec3::new(0.0, 0.0, -SPACE_BOOST_SPEED as f64);
         for _ in 0..60 {
             flight.update(
                 1.0 / 60.0,
@@ -1615,8 +1626,8 @@ mod tests {
     }
 
     #[test]
-    fn galaxy_flight_update_moves_position_in_input_direction() {
-        let mut flight = GalaxyFlight::new(DVec3::ZERO);
+    fn space_flight_update_moves_position_in_input_direction() {
+        let mut flight = SpaceFlight::new(DVec3::ZERO);
         for _ in 0..120 {
             flight.update(
                 1.0 / 60.0,
@@ -1642,7 +1653,7 @@ mod tests {
 
     #[test]
     fn noise_seeds_are_distinct_across_all_planets() {
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let mut seeds: Vec<u32> = g.planets.iter().map(|p| p.noise_seed).collect();
         seeds.sort_unstable();
         seeds.dedup();
@@ -1655,8 +1666,8 @@ mod tests {
 
     #[test]
     fn noise_seed_is_deterministic_for_a_fixed_seed() {
-        let a = Galaxy::generate(42);
-        let b = Galaxy::generate(42);
+        let a = SolarSystem::generate(42);
+        let b = SolarSystem::generate(42);
         for (pa, pb) in a.planets.iter().zip(b.planets.iter()) {
             assert_eq!(pa.noise_seed, pb.noise_seed);
         }
@@ -1666,7 +1677,7 @@ mod tests {
     fn noise_seed_differs_from_planet_radius_hash() {
         // sanity check that the two per-planet hashes aren't accidentally the same function
         // reused (which would correlate radius and terrain shape in a confusing way)
-        let g = Galaxy::generate(1);
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         assert_ne!(
             p.noise_seed as f32, p.radius,

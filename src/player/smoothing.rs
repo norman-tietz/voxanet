@@ -1,6 +1,6 @@
 // smoothing.rs
 // Easing for flight controls: key presses and releases ramp speeds and rates instead of switching
-// them instantly (planet fly mode, orbit and galaxy flight).
+// them instantly (planet fly mode, orbit and space flight).
 
 use glam::Vec3;
 

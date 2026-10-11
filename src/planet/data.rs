@@ -192,7 +192,7 @@ pub struct PlanetData {
     // surface the low-poly terrain is drawn on (blocks stay the truth; lowpoly.rs)
     pub smooth: Arc<Vec<f32>>,
     pub planet_type: PlanetType,
-    // the noise seed this planet was baked with (GalaxyPlanet::noise_seed, HOME_SEED for test planets);
+    // the noise seed this planet was baked with (Planet::noise_seed, HOME_SEED for test planets);
     // edits record it so they're only restored onto the same terrain
     pub seed: u32,
     // the cells' shape (set with /style; physics, the raycast, water and the meshes follow it)

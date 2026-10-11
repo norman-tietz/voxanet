@@ -1,6 +1,6 @@
 // clouds.wgsl
 // The visible clouds, sampled from the baked cloud map (cloud_map.rs) instead of evaluating the noise per
-// pixel. Prepended after atmosphere.wgsl to the scene and galaxy shaders, whose group 0 both carry the
+// pixel. Prepended after atmosphere.wgsl to the scene and space shaders, whose group 0 both carry the
 // map at these bindings.
 
 const CLOUD_MAP_SIZE: f32 = 512.0; // cloud_map.rs SIZE

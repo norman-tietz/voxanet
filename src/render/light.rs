@@ -1,5 +1,5 @@
 // Fill-light tuning: the ground's bounce light and wrap lighting (/light), shared by the voxel scene
-// (shade()) and the galaxy impostors (planet_color) so the landing handover keeps the look. A Rust mirror
+// (shade()) and the planet impostors (planet_color) so the landing handover keeps the look. A Rust mirror
 // of atmosphere.wgsl's closed-form terms (atmo_wrap_diffuse) for tests; the WGSL is what renders.
 
 // how much of the sunlit ground's light bounces up into the lower half of a surface's sky light, in the
@@ -26,7 +26,7 @@ impl Default for LightSettings {
 }
 
 impl LightSettings {
-    // shader.wgsl Global.light and galaxy.wgsl PlanetUniform.light: x = bounce, y = wrap
+    // shader.wgsl Global.light and space.wgsl PlanetUniform.light: x = bounce, y = wrap
     pub fn uniform(&self) -> [f32; 4] {
         [self.bounce, self.wrap, 0.0, 0.0]
     }

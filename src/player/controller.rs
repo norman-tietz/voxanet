@@ -12,7 +12,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 const TURN_SPEED: f32 = 2.0;
 
 // flight keys as axes from -1 to 1: A/D roll (A left), Q/E turn (Q left). Planet fly mode in first
-// person, orbit and galaxy flight; their rates are eased (smoothing.rs)
+// person, orbit and space flight; their rates are eased (smoothing.rs)
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FlightKeys {
     pub roll: f32,
@@ -67,7 +67,7 @@ impl Controller {
     }
 
     // gathers raw per-tick input, independent of which physics mode consumes it (planet-surface
-    // Player::update or galaxy_mode's GalaxyFlight::update); resets mouse_delta as a side effect,
+    // Player::update or space_mode's SpaceFlight::update); resets mouse_delta as a side effect,
     // exactly as update_player did before this was extracted, so planet-mode behavior is unchanged
     pub fn raw_input(&mut self) -> (Vec3, bool, bool, bool, (f32, f32)) {
         let mut input = Vec3::ZERO;
@@ -122,8 +122,8 @@ impl Controller {
         self.movement_and_keys(self.fly_mode && self.first_person)
     }
 
-    // galaxy flight (free or in orbit): always flight keys
-    pub fn galaxy_flight_input(&self) -> (Vec3, FlightKeys) {
+    // space flight (free or in orbit): always flight keys
+    pub fn space_flight_input(&self) -> (Vec3, FlightKeys) {
         self.movement_and_keys(true)
     }
 
@@ -311,7 +311,7 @@ impl Controller {
     }
 
     // eye position and orientation (looking down local -Z) of the camera view_matrix describes; the
-    // galaxy backdrop is drawn from exactly this pose (Renderer::render)
+    // space backdrop is drawn from exactly this pose (Renderer::render)
     pub fn camera_pose(&self, player: &Player) -> (Vec3, Quat) {
         let camera_to_world = self.view_matrix(player).inverse();
         (
@@ -452,7 +452,7 @@ mod tests {
         player
     }
 
-    // the galaxy backdrop is drawn from camera_pose(); it must be exactly the camera the voxel
+    // the space backdrop is drawn from camera_pose(); it must be exactly the camera the voxel
     // engine renders with, in both views, or stars would drift against the terrain
     #[test]
     fn camera_pose_reproduces_the_view_matrix() {

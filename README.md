@@ -132,9 +132,9 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/shadow [on\|off\|sun <0-10>]` | Show or set the sun's size (degrees) for soft shadows; `off` = a fixed edge width |
 | `/perf <seconds> [label]` | Record frame and GPU times for that many seconds and append a summary (median, mean, 95th percentile, maximum per render pass) as one JSON line to `perf.log`; `--bench <seconds>` does the same from a frozen, reproducible start and quits |
 | `/weather [on\|off\|auto\|clear\|rain\|storm\|snow\|particles [on\|off]]` | Show the weather where you stand, force a weather around you for testing (`auto` returns to the natural weather; `snow` falls as ash on volcanic planets), turn the falling rain, snow, ash and dust on or off, or turn weather off |
-| `/galaxy home` | Return to the start planet, standing at local noon |
-| `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
-| `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`, `desert`, `toxic`, `ocean`, `shattered`) and radius (20–500) on the next orbit outward (up to 15 planets) |
+| `/system home` | Return to the start planet, standing at local noon |
+| `/system goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
+| `/system add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`, `desert`, `toxic`, `ocean`, `shattered`) and radius (20–500) on the next orbit outward (up to 15 planets) |
 
 ### Debug Keys (require `/debug_mode true`)
 

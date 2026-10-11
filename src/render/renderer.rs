@@ -24,7 +24,7 @@ use wgpu::util::DeviceExt;
 use wgpu::PresentMode;
 use winit::window::Window;
 
-// the scene shader: the shared atmosphere maths (atmosphere.wgsl, also used by the galaxy impostors)
+// the scene shader: the shared atmosphere maths (atmosphere.wgsl, also used by the planet impostors)
 // followed by the voxel engine's own shader
 // the lens flare (flare.wgsl), with the atmosphere (atmo_cloud_shadow) and star code it uses
 pub(crate) const FLARE_SHADER: &str = concat!(
@@ -93,13 +93,13 @@ pub struct BiomeUniform {
     pub star_limb: [f32; 4],
     pub star_corona: [f32; 4],  // rgb, w: corona_size
     pub star_params: [f32; 4],  // granulation, granule_scale, sunspots, unused
-    pub star_frame: [f32; 4], // quaternion planet frame -> galaxy space, so the sky disc shows the star's own surface
+    pub star_frame: [f32; 4], // quaternion planet frame -> space, so the sky disc shows the star's own surface
     pub weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind), set by render
     pub weather_cover: [f32; 4],
 }
 
 impl BiomeUniform {
-    // `angular_radius`: the star's apparent radius from the installed planet (GalaxyPlanet::star_angular_radius)
+    // `angular_radius`: the star's apparent radius from the installed planet (Planet::star_angular_radius)
     pub fn from_def(
         def: &crate::planet::biome::PlanetTypeDef,
         star: &crate::space::solar_system::Star,
@@ -199,8 +199,8 @@ pub struct Renderer {
     local_bind_player: wgpu::BindGroup,
 
     deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
-    galaxy: crate::space::render::GalaxyRenderer,
-    weather_map: crate::weather::WeatherMap, // the baked weather (weather.rs), group 0 of the scene and the galaxy
+    system: crate::space::render::SpaceRenderer,
+    weather_map: crate::weather::WeatherMap, // the baked weather (weather.rs), group 0 of the scene and the solar system
     pub weather: crate::weather::WeatherSettings,
     precip: crate::weather::precipitation::Precipitation, // rain, snow, ash, dust around the camera (CPU side)
     precip_gpu: crate::weather::precipitation::PrecipGpu, // and its draw (precip.wgsl)
@@ -208,7 +208,7 @@ pub struct Renderer {
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
     perf_message: Option<String>, // its finished summary, for the console
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
-    cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
+    cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
     env_reset: bool, // the environment map no longer fits: bake it whole on the next planet frame
     global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
@@ -278,19 +278,19 @@ pub struct Renderer {
     prev_ao_view: Option<(glam::Mat4, Vec3)>, // last frame's view-projection and camera (AO reprojection)
     ao_geometry_epoch: u64, // bumped when a mesh within reach of the AO comes or goes (ao::AoRefresh)
     ao_refresh: crate::render::ao::AoRefresh,
-    film_pipeline: wgpu::RenderPipeline, // galaxy HUD pass (no depth)
+    film_pipeline: wgpu::RenderPipeline, // system HUD pass (no depth)
     film_pipeline_depth: wgpu::RenderPipeline, // planet lighting pass (depth attached)
     film_buf: wgpu::Buffer,
     film_bind: wgpu::BindGroup,
     film_clock: std::time::Instant, // grain animation time
     heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
     heat_bind: wgpu::BindGroup,
-    console_panel_bind: wgpu::BindGroup, // the console's background in galaxy mode, drawn with flash_pipeline
+    console_panel_bind: wgpu::BindGroup, // the console's background in Space mode, drawn with flash_pipeline
     status: Option<(String, std::time::Instant)>, // timed HUD status line, see show_status
     screenshot_flash: Option<std::time::Instant>, // set right after a capture, so the flash itself is never in the PNG
 }
 
-// the star heat glow (galaxy mode): opacity at full heat (the view still shows through) and colour
+// the star heat glow (Space mode): opacity at full heat (the view still shows through) and colour
 const HEAT_GLOW_OPACITY: f32 = 0.85;
 const HEAT_GLOW_COLOR: [f32; 3] = [1.0, 0.62, 0.28];
 // the HUD warns from this heat on
@@ -322,9 +322,9 @@ fn console_height_px(screen_height: f32, height_fraction: f32) -> f32 {
 }
 
 const CONSOLE_PANEL_COLOR: [f32; 3] = [0.1, 0.1, 0.15];
-// the galaxy HUD's console panel (fs_flash, unlit, linear): what planet mode's panel shows on screen,
+// the solar system HUD's console panel (fs_flash, unlit, linear): what planet mode's panel shows on screen,
 // sRGB (38, 42, 63), since that one goes through shade() and post_process
-const CONSOLE_PANEL_GALAXY_COLOR: [f32; 3] = [0.019, 0.023, 0.050];
+const CONSOLE_PANEL_SPACE_COLOR: [f32; 3] = [0.019, 0.023, 0.050];
 
 fn console_bottom_ndc(height_fraction: f32) -> f32 {
     1.0 - 2.0 * CONSOLE_SCREEN_FRACTION * height_fraction
@@ -673,16 +673,16 @@ impl Renderer {
             }],
             label: None,
         });
-        // galaxy mode's console background: flash_pipeline at full opacity, clipped to the panel by a scissor rect (the galaxy HUD pass has no depth for pipeline_ui)
+        // Space mode's console background: flash_pipeline at full opacity, clipped to the panel by a scissor rect (the solar system HUD pass has no depth for pipeline_ui)
         let console_panel_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Console Panel Uniform"),
             contents: bytemuck::cast_slice(&[LocalUniform {
                 model: glam::Mat4::IDENTITY.to_cols_array(),
                 params: [
                     1.0,
-                    CONSOLE_PANEL_GALAXY_COLOR[0],
-                    CONSOLE_PANEL_GALAXY_COLOR[1],
-                    CONSOLE_PANEL_GALAXY_COLOR[2],
+                    CONSOLE_PANEL_SPACE_COLOR[0],
+                    CONSOLE_PANEL_SPACE_COLOR[1],
+                    CONSOLE_PANEL_SPACE_COLOR[2],
                 ],
             }]),
             usage: wgpu::BufferUsages::UNIFORM,
@@ -777,8 +777,8 @@ impl Renderer {
             config.width,
             config.height,
         );
-        let galaxy =
-            crate::space::render::GalaxyRenderer::new(&device, &config, &cloud_map, &weather_map);
+        let system =
+            crate::space::render::SpaceRenderer::new(&device, &config, &cloud_map, &weather_map);
         let precip_gpu = crate::weather::precipitation::PrecipGpu::new(
             &device,
             &shader,
@@ -944,7 +944,7 @@ impl Renderer {
 
         // film look over the finished frame: "2x multiply" (out = 2 · src · dst), alpha kept. Two variants:
         // planet mode draws it in the lighting pass (depth attached) under the console,
-        // galaxy mode in its HUD pass (no depth)
+        // Space mode in its HUD pass (no depth)
         let film_pipeline_for = |depth: Option<wgpu::DepthStencilState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Film Pipeline"),
@@ -1151,7 +1151,7 @@ impl Renderer {
             screenshot_flash: None,
             status: None,
             deferred,
-            galaxy,
+            system,
             cloud_map,
             weather_map,
             weather: crate::weather::WeatherSettings::default(),
@@ -1403,7 +1403,7 @@ impl Renderer {
     }
 
     // the console's log and input line (when it is at least partly open), as (buffer, top) at x = 10;
-    // shared by planet mode's text pass and the galaxy HUD
+    // shared by planet mode's text pass and the solar system HUD
     fn console_text(&mut self, console: &Console) -> Vec<(Buffer, f32)> {
         let mut text_buffers = Vec::new();
         if console.height_fraction > 0.0 {
@@ -1537,7 +1537,7 @@ impl Renderer {
         self.all_voxel = all_voxel(res);
         if self.all_voxel {
             // the whole planet as voxel chunks (nearest first, see the load queue): meshed while the
-            // approach is still in galaxy flight (the landing handover waits for view_covered), so
+            // approach is still in space flight (the landing handover waits for view_covered), so
             // there are no LOD meshes and no voxel <-> LOD hand-overs left to fade during the descent
             let per_face = res.div_ceil(CHUNK_SIZE);
             for face in 0..6 {
@@ -2013,7 +2013,7 @@ impl Renderer {
     }
 
     pub fn set_near_impostor(&mut self, planet_index: usize, verts: &[Vertex], indices: &[u32]) {
-        self.galaxy
+        self.system
             .set_near_impostor(&self.device, planet_index, verts, indices);
     }
 
@@ -2344,7 +2344,7 @@ impl Renderer {
         self.status = Some((text.to_string(), std::time::Instant::now()));
     }
 
-    // shared by render() and render_galaxy() so the counter keeps ticking across a mode switch
+    // shared by render() and render_space() so the counter keeps ticking across a mode switch
     // instead of freezing at whatever it last read in planet mode
     fn update_fps(&mut self) {
         self.frame_count += 1;
@@ -2356,7 +2356,7 @@ impl Renderer {
         }
     }
 
-    // Screenshot flash (F2 / /screenshot feedback), shared by render() and render_galaxy(): a quick
+    // Screenshot flash (F2 / /screenshot feedback), shared by render() and render_space(): a quick
     // white fade-out starting the frame *after* a capture (screenshot_flash is only set once the
     // capture is done), so the flash is visible on screen but never in the PNG. Uploads this
     // frame's opacity and returns it; draw it with draw_flash as the last thing in the frame.
@@ -2382,7 +2382,7 @@ impl Renderer {
         alpha
     }
 
-    // the star's heat glow in galaxy mode (galaxy::star_heat): a warm full-screen tint over the view,
+    // the star's heat glow in Space mode (solar_system::star_heat): a warm full-screen tint over the view,
     // drawn under the HUD text; uploads this frame's opacity and returns it
     fn update_heat_glow(&mut self, heat: f32) -> f32 {
         let alpha = HEAT_GLOW_OPACITY * heat;
@@ -2455,12 +2455,12 @@ impl Renderer {
         planet: &PlanetData,
         console: &Console,
         time: f64,     // shared game clock in seconds (Game::clock)
-        sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs galaxy planet)
-        backdrop: &crate::space::render::Backdrop, // the galaxy behind the voxel world, drawn first
+        sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs planet)
+        backdrop: &crate::space::render::Backdrop, // the solar system behind the voxel world, drawn first
     ) {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
-        self.galaxy.plastic = self.plastic.impostor_uniform();
-        self.galaxy.light = self.light.uniform();
+        self.system.plastic = self.plastic.impostor_uniform();
+        self.system.light = self.light.uniform();
         self.update_console_mesh(console.height_fraction);
 
         if controller.show_collisions {
@@ -2494,18 +2494,18 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // the galaxy behind everything: submitted on its own before this frame's encoder, so it lands
+        // the solar system behind everything: submitted on its own before this frame's encoder, so it lands
         // in the swapchain first; it also uses Deferred::depth, which the geometry pass below clears
         // again, so the backdrop can never hide terrain. The lighting pass blends the sky over it.
         let screen = (self.config.width as f32, self.config.height as f32);
-        self.galaxy.render(
+        self.system.render(
             &self.device,
             &self.queue,
             &view,
             &self.deferred.depth,
             &backdrop.camera,
             backdrop.content,
-            backdrop.galaxy,
+            backdrop.system,
             backdrop.t,
             screen,
         );
@@ -2513,7 +2513,7 @@ impl Renderer {
         self.update_rt_window(player.position, planet);
 
         // the sun direction comes from the game (the real star,
-        // GalaxyPlanet::sun_dir_in_planet_frame); everything downstream (shade(), caustics, cloud_shadow, both
+        // Planet::sun_dir_in_planet_frame); everything downstream (shade(), caustics, cloud_shadow, both
         // shadow paths) re-reads it fresh every frame. The water animation clock wraps hourly as before.
         let precip_dt = self
             .precip_clock
@@ -2625,18 +2625,18 @@ impl Renderer {
 
         // the installed planet is the one the backdrop leaves out (the voxel engine draws it)
         let (angular_radius, star_frame) = match backdrop.content {
-            crate::space::render::GalaxyContent::AllButPlanet(i) => {
-                let p = &backdrop.galaxy.planets[i];
+            crate::space::render::SpaceContent::AllButPlanet(i) => {
+                let p = &backdrop.system.planets[i];
                 (
-                    p.star_angular_radius(&backdrop.galaxy.star),
+                    p.star_angular_radius(&backdrop.system.star),
                     p.orientation(backdrop.t),
                 )
             }
-            crate::space::render::GalaxyContent::Everything => (0.0, glam::Quat::IDENTITY),
+            crate::space::render::SpaceContent::Everything => (0.0, glam::Quat::IDENTITY),
         };
         let mut biome_data = BiomeUniform::from_def(
             &planet.planet_type.def(),
-            &backdrop.galaxy.star,
+            &backdrop.system.star,
             angular_radius,
             star_frame,
         );
@@ -2644,7 +2644,7 @@ impl Renderer {
         biome_data.weather_rule = kind.rule();
         biome_data.weather_cover = kind.cover();
         // lens flare: the sun projected far along its direction; none once the sun is below the planet's
-        // geometric horizon (high up that's below the local horizontal, as in galaxy mode) or under
+        // geometric horizon (high up that's below the local horizontal, as in Space mode) or under
         // water, dimmed by clouds and terrain on the GPU
         let flare = {
             let sun_far = mvp * (cam_pos + sun_dir.normalize() * 1000.0).extend(1.0);
@@ -2670,7 +2670,7 @@ impl Renderer {
                 angular_radius,
                 controller.fov_y(),
                 daylight * above_water * (1.0 - overcast), // storm clouds hide the sun
-                backdrop.galaxy.star.star_type.def(),
+                backdrop.system.star.star_type.def(),
                 true,
                 [
                     cam_pos.x,
@@ -2942,7 +2942,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // the galaxy backdrop is already in the swapchain; fs_light blends over it
+                        // the space backdrop is already in the swapchain; fs_light blends over it
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
@@ -3024,16 +3024,16 @@ impl Renderer {
             }
         }
 
-        // the landing handover's cross-fade: the galaxy's near impostor alpha-blended over the finished
+        // the landing handover's cross-fade: the solar system's near impostor alpha-blended over the finished
         // voxel frame, fading out; Deferred::depth is free again now (the passes above were its last use)
         if let Some((index, opacity)) = backdrop.handover_overlay {
-            self.galaxy.draw_handover_overlay(
+            self.system.draw_handover_overlay(
                 &self.queue,
                 &mut enc,
                 &view,
                 &self.deferred.depth,
                 &backdrop.camera,
-                backdrop.galaxy,
+                backdrop.system,
                 index,
                 backdrop.t,
                 screen,
@@ -3412,19 +3412,19 @@ impl Renderer {
         self.env_reset = true;
     }
 
-    pub fn render_galaxy(
+    pub fn render_space(
         &mut self,
-        camera: &crate::space::render::GalaxyCamera,
-        galaxy: &crate::space::solar_system::Galaxy,
+        camera: &crate::space::render::SpaceCamera,
+        system: &crate::space::solar_system::SolarSystem,
         t: f64,
         console: &Console,
     ) {
-        self.perf_tick("galaxy");
+        self.perf_tick("system");
         // the impostors share the voxel terrain's plastic look (plastic.rs)
-        self.galaxy.plastic = self.plastic.impostor_uniform();
-        self.galaxy.light = self.light.uniform();
+        self.system.plastic = self.plastic.impostor_uniform();
+        self.system.light = self.light.uniform();
         self.update_sky_maps(t);
-        self.env_reset = true; // the first planet frame after galaxy mode bakes the map whole
+        self.env_reset = true; // the first planet frame after Space mode bakes the map whole
         self.precip.reset(); // the landing starts the particles over
         self.precip_clock = None;
         let out = match self.surface.get_current_texture() {
@@ -3440,35 +3440,35 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let screen = (self.config.width as f32, self.config.height as f32);
-        self.galaxy.render(
+        self.system.render(
             &self.device,
             &self.queue,
             &view,
             &self.deferred.depth,
             camera,
-            crate::space::render::GalaxyContent::Everything,
-            galaxy,
+            crate::space::render::SpaceContent::Everything,
+            system,
             t,
             screen,
         );
         self.update_fps();
         let heat = crate::space::solar_system::star_heat(
-            camera.position.distance(galaxy.star.position()),
-            galaxy.star.radius,
+            camera.position.distance(system.star.position()),
+            system.star.radius,
         );
-        let on_screen = crate::space::render::star_on_screen(camera, galaxy, screen.0 / screen.1);
+        let on_screen = crate::space::render::star_on_screen(camera, system, screen.0 / screen.1);
         let flare = self.update_flare(
             on_screen.map(|s| s.0),
             on_screen.map_or(0.0, |s| s.1),
             on_screen.map_or(0.0, |s| s.2),
             camera.fov_y,
             1.0 - heat, // the heat glow already dominates near the star
-            galaxy.star.star_type.def(),
+            system.star.star_type.def(),
             false,
             [0.0; 4],
             [0.0; 4],
         );
-        self.render_galaxy_overlay(&view, camera, galaxy, t, heat, flare, console);
+        self.render_space_overlay(&view, camera, system, t, heat, flare, console);
         if let Some(path) = self.screenshot_request.take() {
             crate::app::screenshot::capture(
                 &self.device,
@@ -3484,17 +3484,17 @@ impl Renderer {
         self.queue.present(out);
     }
 
-    // Galaxy-mode HUD, drawn over the finished galaxy frame: the same FPS readout as planet mode,
+    // SolarSystem-mode HUD, drawn over the finished system frame: the same FPS readout as planet mode,
     // plus a compass strip across the top showing where the star and each planet are relative to
     // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
     #[allow(clippy::too_many_arguments)]
-    fn render_galaxy_overlay(
+    fn render_space_overlay(
         &mut self,
         view: &wgpu::TextureView,
-        camera: &crate::space::render::GalaxyCamera,
-        galaxy: &crate::space::solar_system::Galaxy,
+        camera: &crate::space::render::SpaceCamera,
+        system: &crate::space::solar_system::SolarSystem,
         t: f64,
-        heat: f32,   // the star's heat at the camera (galaxy::star_heat): glow and warning
+        heat: f32, // the star's heat at the camera (solar_system::star_heat): glow and warning
         flare: bool, // draw the lens flare (update_flare wrote its uniform)
         console: &Console,
     ) {
@@ -3564,10 +3564,10 @@ impl Renderer {
         add_marker(
             "Sun".to_string(),
             glam::DVec3::ZERO,
-            galaxy.star.radius,
+            system.star.radius,
             [1.0, 0.9, 0.4],
         );
-        for (i, p) in galaxy.planets.iter().enumerate() {
+        for (i, p) in system.planets.iter().enumerate() {
             let def = p.planet_type.def();
             add_marker(
                 format!("#{} {}", i + 1, def.name),
@@ -3682,11 +3682,11 @@ impl Renderer {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Galaxy HUD"),
+                label: Some("SolarSystem HUD"),
             });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Galaxy HUD Pass"),
+                label: Some("SolarSystem HUD Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     depth_slice: None,
                     view,
@@ -3824,8 +3824,8 @@ pub(crate) fn chunks_to_refresh(id: BlockId, planet: &PlanetData) -> HashSet<Chu
 pub(crate) mod tests {
     use super::*;
 
-    // every generated planet (radius 40..=250, galaxy.rs) is streamed whole as voxel chunks; the
-    // bigger ones /galaxy add makes (up to radius 500) keep the LOD quadtree
+    // every generated planet (radius 40..=250, solar_system.rs) is streamed whole as voxel chunks; the
+    // bigger ones /system add makes (up to radius 500) keep the LOD quadtree
     #[test]
     fn generated_planets_are_all_voxel() {
         assert!(all_voxel(2 * 250));
@@ -3983,12 +3983,12 @@ pub(crate) mod tests {
     #[test]
     fn yellow_sunlight_is_todays_sun_color() {
         let def = crate::planet::biome::PlanetType::EarthLike.def();
-        let galaxy = crate::space::solar_system::Galaxy::generate(1);
+        let system = crate::space::solar_system::SolarSystem::generate(1);
         assert_eq!(
-            galaxy.star.star_type,
+            system.star.star_type,
             crate::space::solar_system::StarType::Yellow
         );
-        let u = BiomeUniform::from_def(&def, &galaxy.star, 0.3, glam::Quat::IDENTITY);
+        let u = BiomeUniform::from_def(&def, &system.star, 0.3, glam::Quat::IDENTITY);
         assert_eq!(&u.sun[..3], &[1.6, 1.5, 1.3]);
         assert_eq!(u.sun[3], 0.3, "the star's angular radius");
     }
@@ -4034,14 +4034,14 @@ pub(crate) mod tests {
         // rustfmt may break the chain across lines
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         assert!(squash(render).contains("self.update_sky_maps("));
-        let galaxy = &r[r.find("pub fn render_galaxy(").unwrap()..];
-        let galaxy = &galaxy[..galaxy.find("\n    pub fn ").unwrap_or(galaxy.len())];
-        assert!(squash(galaxy).contains("self.update_sky_maps("));
+        let system = &r[r.find("pub fn render_space(").unwrap()..];
+        let system = &system[..system.find("\n    pub fn ").unwrap_or(system.len())];
+        assert!(squash(system).contains("self.update_sky_maps("));
         let sky = &r[r.find("fn update_sky_maps(").unwrap()..];
         let sky = &sky[..sky.find("\n    }\n").unwrap()];
         assert!(squash(sky).contains("self.weather_map.update("));
         assert!(SCENE_SHADER.contains("fn weather_at("));
-        assert!(crate::space::render::GALAXY_SHADER.contains("fn weather_at("));
+        assert!(crate::space::render::SPACE_SHADER.contains("fn weather_at("));
         let bake = include_str!("cloud_bake.wgsl");
         assert!(bake.contains("weather_storm(dir, t, bake.force) * STORM_COVER"));
     }

@@ -1,7 +1,7 @@
 // flare.rs
-// Screen-space lens flares for the visible sun (galaxy mode and planet mode): layout and intensity
+// Screen-space lens flares for the visible sun (Space mode and planet mode): layout and intensity
 // (pure, tested here) and the uniform flare.wgsl reads. Occlusion is measured on the GPU from depth
-// (galaxy) or G-buffer distance (planet) taps around the sun in flare.wgsl's vertex shader.
+// (system) or G-buffer distance (planet) taps around the sun in flare.wgsl's vertex shader.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
@@ -49,7 +49,7 @@ pub fn tap_radius_px(angular_radius: f32, fov_y: f32, height: f32) -> f32 {
 
 // how much of the sun stands above the planet's geometric horizon (sphere of `horizon_r` around the
 // origin) seen from `cam_pos`: 1 above, 0 below, fading across the sun's own disc. High up the horizon
-// dips below the local horizontal, so the sun stays up over the limb, as in galaxy mode at the handover
+// dips below the local horizontal, so the sun stays up over the limb, as in Space mode at the handover
 pub fn horizon_visibility(
     sun_dir: glam::Vec3,
     cam_pos: glam::Vec3,
@@ -69,10 +69,10 @@ pub fn horizon_visibility(
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct FlareUniform {
-    pub sun: [f32; 4], // xy: sun NDC, z: galaxy mode: the star's expected reversed-Z depth, w: intensity before occlusion
+    pub sun: [f32; 4], // xy: sun NDC, z: Space mode: the star's expected reversed-Z depth, w: intensity before occlusion
     pub tint: [f32; 4], // corona colour
     pub tint2: [f32; 4], // surface colour
-    pub mode: [f32; 4], // x: 0 = galaxy depth taps, 1 = G-buffer taps; y: tap radius px; zw: screen size
+    pub mode: [f32; 4], // x: 0 = system depth taps, 1 = G-buffer taps; y: tap radius px; zw: screen size
     pub camera: [f32; 4], // planet mode: camera position in the planet frame (xyz), planet radius (w)
     pub light: [f32; 4],  // planet mode: direction to the sun (xyz), cloud time (w)
 }

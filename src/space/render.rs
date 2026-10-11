@@ -1,17 +1,17 @@
-// galaxy_render.rs
-// Sub-project #1 (galaxy foundation): a deliberately separate, minimal forward-rendering pass for
-// galaxy mode (a starfield background plus flat-shaded icosphere placeholders for the star and
+// render.rs
+// Sub-project #1 (system foundation): a deliberately separate, minimal forward-rendering pass for
+// Space mode (a starfield background plus flat-shaded icosphere placeholders for the star and
 // each planet). Does not touch the existing deferred G-buffer/shadow pipeline in deferred.rs —
 // sub-project #2 replaces these placeholder spheres with real terrain-shaped impostors.
 
 use crate::render::deferred::DEPTH_FORMAT;
-use crate::space::solar_system::{Galaxy, GalaxyFlight, GalaxyPlanet};
+use crate::space::solar_system::{Planet, SolarSystem, SpaceFlight};
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
-// galaxy mode's shader: the shared atmosphere maths (atmosphere.wgsl) followed by galaxy.wgsl
-pub(crate) const GALAXY_SHADER: &str = concat!(
+// Space mode's shader: the shared atmosphere maths (atmosphere.wgsl) followed by space.wgsl
+pub(crate) const SPACE_SHADER: &str = concat!(
     include_str!("../render/atmosphere.wgsl"),
     "\n",
     include_str!("../weather/weather.wgsl"),
@@ -31,7 +31,7 @@ const FOV_Y_RADIANS: f32 = 80.0 * std::f32::consts::PI / 180.0;
 const NEAR_PLANE: f32 = 1.0;
 
 // reversed-Z with no far plane (depth 1 at the near plane, toward 0 at infinity, compare Greater, clear
-// 0): /galaxy add puts planets on orbits millions of units out, and a Depth32Float buffer keeps about
+// 0): /system add puts planets on orbits millions of units out, and a Depth32Float buffer keeps about
 // the same relative precision at every distance this way, so every body is drawn at its real distance
 // and size and far bodies still sort correctly. (A far plane with far bodies pulled in to it sorted
 // them by their shrunk size instead, and couldn't tell a far planet's front from its back.)
@@ -43,7 +43,7 @@ const DEPTH_CLEAR: f32 = 0.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct GalaxyCameraUniform {
+struct SpaceCameraUniform {
     view_proj: [f32; 16],
     screen: [f32; 4],
     ray_dirs: [[f32; 4]; 3],
@@ -51,10 +51,10 @@ struct GalaxyCameraUniform {
     pixel: [f32; 4],   // x: radians per screen pixel (cloud map level of detail)
 }
 
-// the star's uniform for vs_star/fs_star (must match StarUniform in galaxy.wgsl)
+// the star's uniform for vs_star/fs_star (must match StarUniform in space.wgsl)
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct GalaxyStarUniform {
+struct StarUniform {
     offset: [f32; 4],  // camera-relative centre (xyz), radius (w)
     surface: [f32; 4], // StarTypeDef.surface_color
     limb: [f32; 4],    // StarTypeDef.limb_color
@@ -70,11 +70,11 @@ fn star_depth(distance: f32) -> f32 {
 // the star for the lens flare (flare.rs): its screen position (NDC), the reversed-Z depth of its nearest
 // point as the star pipeline writes it, and its angular radius; None when it's behind the camera
 pub(crate) fn star_on_screen(
-    camera: &GalaxyCamera,
-    galaxy: &Galaxy,
+    camera: &SpaceCamera,
+    system: &SolarSystem,
     aspect: f32,
 ) -> Option<(glam::Vec2, f32, f32)> {
-    let offset = (galaxy.star.position() - camera.position).as_vec3();
+    let offset = (system.star.position() - camera.position).as_vec3();
     let view = Mat4::from_quat(camera.rotation).inverse();
     let clip = projection(camera.fov_y, aspect) * view * offset.extend(1.0);
     if clip.w <= 0.0 {
@@ -84,7 +84,7 @@ pub(crate) fn star_on_screen(
     // the radius fs_star draws (at least the minimum angular size); its nearest point along the view
     // axis is `along - r` for a star anywhere on screen (an off-axis star's edge is nearer than the
     // point on its centre's line of sight)
-    let r = (galaxy.star.radius as f32).max(dist * STAR_MIN_ANGULAR_RADIUS);
+    let r = (system.star.radius as f32).max(dist * STAR_MIN_ANGULAR_RADIUS);
     let along = offset.dot(camera.rotation * Vec3::NEG_Z);
     let nearest = (along - r).max(NEAR_PLANE);
     Some((
@@ -99,22 +99,22 @@ const STAR_MIN_ANGULAR_RADIUS: f32 = 0.0025; // ~0.14 degrees, a few pixels at 1
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct GalaxyPlanetUniform {
+struct PlanetUniform {
     offset: [f32; 4], // xyz: camera-relative planet centre, w: planet radius (voxel_resolution / 2)
-    light_dir: [f32; 4], // xyz: direction from this planet toward the star (galaxy space), w unused
+    light_dir: [f32; 4], // xyz: direction from this planet toward the star (space), w unused
     sky_zenith: [f32; 4], // the planet type's AtmosphereDef colours (rgb), as the engine's BiomeUniform
     sky_horizon: [f32; 4],
     space_color: [f32; 4],
     cloud_light: [f32; 4],
     cloud_dark: [f32; 4],
-    sun_color: [f32; 4],     // the galaxy star type's sunlight (rgb)
+    sun_color: [f32; 4],     // the solar system star type's sunlight (rgb)
     glow: [f32; 4],          // the planet type's glowing liquid colour (rgb), w = 1 if it has one
     glow_emission: [f32; 4], // what it emits (rgb): lava_emission
     plastic: [f32; 4], // base roughness, specular strength, reflection weight (plastic.rs impostor_uniform)
     light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
     weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: [f32; 4],
-    model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
+    model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 
 // what a glowing liquid emits on an impostor: the engine's fs_water look (the body, darkening from
@@ -139,9 +139,9 @@ struct PlanetMesh {
     num_indices: u32,
 }
 
-use crate::space::solar_system::MAX_PLANETS; // galaxy.rs caps generated + added planets at this many
+use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps generated + added planets at this many
 
-// starting points from the galaxy-terrain-impostors design discussion's faceting estimate
+// starting points from the solar system-terrain-impostors design discussion's faceting estimate
 // (~10-13x radius before individual facets become visually obvious at this project's FOV);
 // tune after a visual check, same as every other distance-based constant in this codebase
 const LOD_MEDIUM_DISTANCE_MULTIPLIER: f32 = 13.0;
@@ -165,18 +165,18 @@ fn subdivision_for_distance(distance: f32, radius: f32) -> u32 {
     }
 }
 
-// where the galaxy is seen from: a position in galaxy space, an orientation (looking down local -Z)
-// and a vertical field of view. Galaxy mode uses the flight; planet mode uses the planet camera
-// converted into galaxy space, so the backdrop behind the voxel world lines up with it exactly.
+// where the solar system is seen from: a position in space, an orientation (looking down local -Z)
+// and a vertical field of view. Space mode uses the flight; planet mode uses the planet camera
+// converted into space, so the backdrop behind the voxel world lines up with it exactly.
 #[derive(Clone, Copy, Debug)]
-pub struct GalaxyCamera {
+pub struct SpaceCamera {
     pub position: DVec3,
     pub rotation: Quat,
     pub fov_y: f32,
 }
 
-impl GalaxyCamera {
-    pub fn from_flight(flight: &GalaxyFlight) -> Self {
+impl SpaceCamera {
+    pub fn from_flight(flight: &SpaceFlight) -> Self {
         Self {
             position: flight.position,
             rotation: flight.rotation,
@@ -184,17 +184,17 @@ impl GalaxyCamera {
         }
     }
 
-    // galaxy mode's camera, whichever frame the flight is in (galaxy space, or captured by a planet)
+    // Space mode's camera, whichever frame the flight is in (space, or captured by a planet)
     pub fn from_flight_in_frame(
-        flight: &GalaxyFlight,
+        flight: &SpaceFlight,
         frame: crate::space::solar_system::FlightFrame,
-        galaxy: &Galaxy,
+        system: &SolarSystem,
         t: f64,
     ) -> Self {
         match frame {
             crate::space::solar_system::FlightFrame::Free => Self::from_flight(flight),
-            crate::space::solar_system::FlightFrame::Captured(i) => Self::on_galaxy_planet(
-                &galaxy.planets[i],
+            crate::space::solar_system::FlightFrame::Captured(i) => Self::on_system_planet(
+                &system.planets[i],
                 flight.position.as_vec3(),
                 flight.rotation,
                 FOV_Y_RADIANS,
@@ -203,9 +203,9 @@ impl GalaxyCamera {
         }
     }
 
-    // the planet camera (eye and orientation in the planet frame) on a galaxy planet
-    pub fn on_galaxy_planet(
-        planet: &GalaxyPlanet,
+    // the planet camera (eye and orientation in the planet frame) on a planet
+    pub fn on_system_planet(
+        planet: &Planet,
         eye: Vec3,
         rotation: Quat,
         fov_y: f32,
@@ -219,15 +219,15 @@ impl GalaxyCamera {
     }
 }
 
-// which parts of the galaxy to draw: everything in galaxy mode; behind a planet's voxel world
+// which parts of the solar system to draw: everything in Space mode; behind a planet's voxel world
 // everything except that planet (the voxel engine draws it)
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum GalaxyContent {
+pub enum SpaceContent {
     Everything,
     AllButPlanet(usize),
 }
 
-impl GalaxyContent {
+impl SpaceContent {
     pub fn draws_planet(self, i: usize) -> bool {
         match self {
             Self::Everything => true,
@@ -238,16 +238,16 @@ impl GalaxyContent {
 
 // what Renderer::render draws behind the voxel world before anything else
 pub struct Backdrop<'a> {
-    pub galaxy: &'a Galaxy,
-    pub camera: GalaxyCamera,
-    pub content: GalaxyContent,
+    pub system: &'a SolarSystem,
+    pub camera: SpaceCamera,
+    pub content: SpaceContent,
     pub t: f64,
     // the landing handover's cross-fade: (planet index, opacity) of the near impostor drawn over the
-    // voxel frame (GalaxyRenderer::draw_handover_overlay), None once it has faded out
+    // voxel frame (SpaceRenderer::draw_handover_overlay), None once it has faded out
     pub handover_overlay: Option<(usize, f32)>,
 }
 
-pub struct GalaxyRenderer {
+pub struct SpaceRenderer {
     pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
     pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
     camera_buf: wgpu::Buffer,
@@ -270,7 +270,7 @@ pub struct GalaxyRenderer {
     near_impostor: Option<(usize, PlanetMesh)>, // (planet index, mesh) — see set_near_impostor
 }
 
-impl GalaxyRenderer {
+impl SpaceRenderer {
     pub fn new(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -280,12 +280,12 @@ impl GalaxyRenderer {
         let (verts, indices) = crate::space::icosphere::generate(ICOSPHERE_SUBDIVISIONS);
         let vert_data: Vec<[f32; 3]> = verts.iter().map(|v| v.to_array()).collect();
         let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Icosphere Vertices"),
+            label: Some("SolarSystem Icosphere Vertices"),
             contents: bytemuck::cast_slice(&vert_data),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Icosphere Indices"),
+            label: Some("SolarSystem Icosphere Indices"),
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -295,7 +295,7 @@ impl GalaxyRenderer {
         let weather_layout = crate::weather::WeatherMap::layout_entries();
         let weather_entries = weather_map.bind_entries();
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("galaxy_camera_layout"),
+            label: Some("space_camera_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -315,13 +315,13 @@ impl GalaxyRenderer {
             ],
         });
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Galaxy Camera Uniform"),
-            size: std::mem::size_of::<GalaxyCameraUniform>() as u64,
+            label: Some("SolarSystem Camera Uniform"),
+            size: std::mem::size_of::<SpaceCameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("galaxy_camera_bind"),
+            label: Some("space_camera_bind"),
             layout: &camera_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -337,7 +337,7 @@ impl GalaxyRenderer {
         });
 
         let star_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("galaxy_star_layout"),
+            label: Some("space_star_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -350,13 +350,13 @@ impl GalaxyRenderer {
             }],
         });
         let star_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Galaxy Star Uniform"),
-            size: std::mem::size_of::<GalaxyStarUniform>() as u64,
+            label: Some("SolarSystem Star Uniform"),
+            size: std::mem::size_of::<StarUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let star_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("galaxy_star_bind"),
+            label: Some("space_star_bind"),
             layout: &star_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -365,17 +365,17 @@ impl GalaxyRenderer {
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("galaxy.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(GALAXY_SHADER.into()),
+            label: Some("space.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(SPACE_SHADER.into()),
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("galaxy_pipeline_layout"),
+            label: Some("space_pipeline_layout"),
             bind_group_layouts: &[Some(&camera_layout)],
             immediate_size: 0,
         });
         let star_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("galaxy_star_pipeline_layout"),
+            label: Some("space_star_pipeline_layout"),
             bind_group_layouts: &[Some(&camera_layout), Some(&star_layout)],
             immediate_size: 0,
         });
@@ -396,7 +396,7 @@ impl GalaxyRenderer {
         // the star: one camera-facing quad, ray-cast in fs_star (round at any size, its true sphere depth),
         // the corona blended around it (premultiplied)
         let star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Star Pipeline"),
+            label: Some("SolarSystem Star Pipeline"),
             layout: Some(&star_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -426,12 +426,12 @@ impl GalaxyRenderer {
 
         let planet_uniform_stride = {
             let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
-            let unaligned = std::mem::size_of::<GalaxyPlanetUniform>() as u64;
+            let unaligned = std::mem::size_of::<PlanetUniform>() as u64;
             unaligned.div_ceil(min_align) * min_align
         };
         let planet_uniform_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("galaxy_planet_uniform_layout"),
+                label: Some("space_planet_uniform_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -444,34 +444,32 @@ impl GalaxyRenderer {
                 }],
             });
         let planet_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Galaxy Planet Uniform"),
+            label: Some("SolarSystem Planet Uniform"),
             size: planet_uniform_stride * MAX_PLANETS as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let planet_uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("galaxy_planet_uniform_bind"),
+            label: Some("space_planet_uniform_bind"),
             layout: &planet_uniform_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &planet_uniform_buf,
                     offset: 0,
-                    size: std::num::NonZeroU64::new(
-                        std::mem::size_of::<GalaxyPlanetUniform>() as u64
-                    ),
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<PlanetUniform>() as u64),
                 }),
             }],
         });
 
         let planet_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("galaxy_planet_pipeline_layout"),
+            label: Some("space_planet_pipeline_layout"),
             bind_group_layouts: &[Some(&camera_layout), Some(&planet_uniform_layout)],
             immediate_size: 0,
         });
 
         let planet_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Planet Pipeline"),
+            label: Some("SolarSystem Planet Pipeline"),
             layout: Some(&planet_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -526,7 +524,7 @@ impl GalaxyRenderer {
         // (GreaterEqual, reversed-Z)
         let overlay_depth_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Galaxy Handover Overlay Depth Pipeline"),
+                label: Some("SolarSystem Handover Overlay Depth Pipeline"),
                 layout: Some(&planet_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -578,7 +576,7 @@ impl GalaxyRenderer {
                 cache: None,
             });
         let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Handover Overlay Pipeline"),
+            label: Some("SolarSystem Handover Overlay Pipeline"),
             layout: Some(&planet_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -638,7 +636,7 @@ impl GalaxyRenderer {
         // only (so it also renders with the camera inside it), depth-tested against the planets but not
         // writing depth, premultiplied over whatever is behind
         let atmosphere_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Atmosphere Pipeline"),
+            label: Some("SolarSystem Atmosphere Pipeline"),
             layout: Some(&planet_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -684,7 +682,7 @@ impl GalaxyRenderer {
         // background: depth test on but no depth write, drawn first so it never occludes bodies
         // and is itself never occluded by the depth clear (compare Always, matches a skybox)
         let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Galaxy Background Pipeline"),
+            label: Some("SolarSystem Background Pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -743,9 +741,9 @@ impl GalaxyRenderer {
         queue: &wgpu::Queue,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        camera: &GalaxyCamera,
-        content: GalaxyContent,
-        galaxy: &Galaxy,
+        camera: &SpaceCamera,
+        content: SpaceContent,
+        system: &SolarSystem,
         t: f64,
         screen: (f32, f32),
     ) {
@@ -753,14 +751,14 @@ impl GalaxyRenderer {
 
         // the star (always drawn: only planets can be left out)
         {
-            let star = galaxy.star.star_type.def();
-            let offset = (galaxy.star.position() - camera.position).as_vec3();
+            let star = system.star.star_type.def();
+            let offset = (system.star.position() - camera.position).as_vec3();
             let v4 = |c: [f32; 3], w: f32| [c[0], c[1], c[2], w];
             queue.write_buffer(
                 &self.star_buf,
                 0,
-                bytemuck::cast_slice(&[GalaxyStarUniform {
-                    offset: [offset.x, offset.y, offset.z, galaxy.star.radius as f32],
+                bytemuck::cast_slice(&[StarUniform {
+                    offset: [offset.x, offset.y, offset.z, system.star.radius as f32],
                     surface: v4(star.surface_color, 0.0),
                     limb: v4(star.limb_color, 0.0),
                     corona: v4(star.corona_color, star.corona_size),
@@ -774,8 +772,8 @@ impl GalaxyRenderer {
             );
         }
 
-        let mut planet_uniforms = Vec::with_capacity(galaxy.planets.len());
-        for (i, p) in galaxy.planets.iter().enumerate() {
+        let mut planet_uniforms = Vec::with_capacity(system.planets.len());
+        for (i, p) in system.planets.iter().enumerate() {
             let camera_relative = (p.position_at(t) - camera.position).as_vec3();
             // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
             if content.draws_planet(i) && !self.has_near_impostor(i) {
@@ -783,7 +781,7 @@ impl GalaxyRenderer {
                 self.ensure_planet_mesh(device, i, p, subdivision);
             }
             planet_uniforms.push(Self::planet_uniform(
-                galaxy,
+                system,
                 i,
                 camera,
                 t,
@@ -803,7 +801,7 @@ impl GalaxyRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Galaxy Pass"),
+                label: Some("SolarSystem Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     depth_slice: None,
                     view: color_view,
@@ -844,7 +842,7 @@ impl GalaxyRenderer {
 
             pass.set_pipeline(&self.planet_pipeline);
             pass.set_bind_group(0, &self.camera_bind, &[]);
-            for (i, p) in galaxy.planets.iter().enumerate() {
+            for (i, p) in system.planets.iter().enumerate() {
                 if !content.draws_planet(i) {
                     continue;
                 }
@@ -871,12 +869,12 @@ impl GalaxyRenderer {
             pass.set_pipeline(&self.atmosphere_pipeline);
             pass.set_vertex_buffer(0, self.v_buf.slice(..));
             pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-            let shells: Vec<(usize, f32)> = (0..galaxy.planets.len())
+            let shells: Vec<(usize, f32)> = (0..system.planets.len())
                 .filter(|&i| content.draws_planet(i))
                 .map(|i| {
                     (
                         i,
-                        (galaxy.planets[i].position_at(t) - camera.position).length() as f32,
+                        (system.planets[i].position_at(t) - camera.position).length() as f32,
                     )
                 })
                 .collect();
@@ -895,7 +893,7 @@ impl GalaxyRenderer {
     fn write_camera(
         &self,
         queue: &wgpu::Queue,
-        camera: &GalaxyCamera,
+        camera: &SpaceCamera,
         t: f64,
         screen: (f32, f32),
         overlay_opacity: f32,
@@ -908,7 +906,7 @@ impl GalaxyRenderer {
         queue.write_buffer(
             &self.camera_buf,
             0,
-            bytemuck::cast_slice(&[GalaxyCameraUniform {
+            bytemuck::cast_slice(&[SpaceCameraUniform {
                 view_proj: view_proj.to_cols_array(),
                 // z: cloud animation time, wrapped like the engine's GlobalUniform.screen.w;
                 // w: the handover overlay's opacity (fs_planet_overlay)
@@ -922,21 +920,21 @@ impl GalaxyRenderer {
 
     // planet i's uniform slot as seen from `camera`
     fn planet_uniform(
-        galaxy: &Galaxy,
+        system: &SolarSystem,
         i: usize,
-        camera: &GalaxyCamera,
+        camera: &SpaceCamera,
         t: f64,
         plastic: [f32; 4],
         light: [f32; 4],
-    ) -> GalaxyPlanetUniform {
-        let p = &galaxy.planets[i];
+    ) -> PlanetUniform {
+        let p = &system.planets[i];
         let body_pos = p.position_at(t);
         let camera_relative = (body_pos - camera.position).as_vec3();
         let light_dir = (-body_pos).normalize_or_zero().as_vec3();
         let atmosphere = p.planet_type.def().atmosphere;
         let model = glam::Mat3::from_quat(p.orientation(t));
         let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
-        GalaxyPlanetUniform {
+        PlanetUniform {
             offset: [
                 camera_relative.x,
                 camera_relative.y,
@@ -949,7 +947,7 @@ impl GalaxyRenderer {
             space_color: v4(atmosphere.space_color),
             cloud_light: v4(atmosphere.cloud_light),
             cloud_dark: v4(atmosphere.cloud_dark),
-            sun_color: v4(galaxy.star.star_type.def().sunlight),
+            sun_color: v4(system.star.star_type.def().sunlight),
             glow: match p.planet_type.def().liquid {
                 Some(l) if matches!(l.behavior, crate::planet::biome::LiquidBehavior::Glowing) => {
                     let c = l.shallow_color;
@@ -985,8 +983,8 @@ impl GalaxyRenderer {
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        camera: &GalaxyCamera,
-        galaxy: &Galaxy,
+        camera: &SpaceCamera,
+        system: &SolarSystem,
         index: usize,
         t: f64,
         screen: (f32, f32),
@@ -1001,7 +999,7 @@ impl GalaxyRenderer {
             &self.planet_uniform_buf,
             slot,
             bytemuck::cast_slice(&[Self::planet_uniform(
-                galaxy,
+                system,
                 index,
                 camera,
                 t,
@@ -1044,7 +1042,7 @@ impl GalaxyRenderer {
     }
 
     // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
-    // mesh (galaxy_terrain::near_impostor_mesh) once that planet is baked; one planet at a time
+    // mesh (impostor::near_impostor_mesh) once that planet is baked; one planet at a time
     pub fn set_near_impostor(
         &mut self,
         device: &wgpu::Device,
@@ -1053,12 +1051,12 @@ impl GalaxyRenderer {
         indices: &[u32],
     ) {
         let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Near Impostor Vertices"),
+            label: Some("SolarSystem Near Impostor Vertices"),
             contents: bytemuck::cast_slice(verts),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Near Impostor Indices"),
+            label: Some("SolarSystem Near Impostor Indices"),
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -1080,7 +1078,7 @@ impl GalaxyRenderer {
         &mut self,
         device: &wgpu::Device,
         index: usize,
-        planet: &crate::space::solar_system::GalaxyPlanet,
+        planet: &crate::space::solar_system::Planet,
         subdivision: u32,
     ) {
         if self.planet_meshes.contains_key(&(index, subdivision)) {
@@ -1088,12 +1086,12 @@ impl GalaxyRenderer {
         }
         let (verts, indices) = crate::space::impostor::generate_planet_mesh(planet, subdivision);
         let v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Planet Vertices"),
+            label: Some("SolarSystem Planet Vertices"),
             contents: bytemuck::cast_slice(&verts),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Galaxy Planet Indices"),
+            label: Some("SolarSystem Planet Indices"),
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -1133,41 +1131,41 @@ mod tests {
         let order = back_to_front(&[(0, 500.0), (1, 3000.0), (2, 1200.0)]);
         assert_eq!(order, vec![1, 2, 0]);
     }
-    use crate::space::solar_system::Galaxy;
+    use crate::space::solar_system::SolarSystem;
 
-    // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 14 vec4s + a mat3x3 (3 × 16 bytes)
+    // PlanetUniform must mirror space.wgsl's PlanetUniform: 14 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 14 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<PlanetUniform>(), 14 * 16 + 3 * 16);
         // + plastic
     }
 
     #[test]
-    fn galaxy_shader_is_valid_wgsl() {
-        crate::render::renderer::tests::assert_valid_wgsl(GALAXY_SHADER);
+    fn space_shader_is_valid_wgsl() {
+        crate::render::renderer::tests::assert_valid_wgsl(SPACE_SHADER);
         // the impostors are plastic like the voxel terrain (atmosphere.wgsl atmo_plastic)
         assert!(
-            GALAXY_SHADER.matches("atmo_plastic(").count() >= 2,
+            SPACE_SHADER.matches("atmo_plastic(").count() >= 2,
             "defined and called"
         );
     }
 
-    // the landing handover switches from galaxy mode's camera to the first-person planet camera:
+    // the landing handover switches from Space mode's camera to the first-person planet camera:
     // a different field of view would zoom the planet visibly at that moment
     #[test]
-    fn galaxy_mode_uses_the_first_person_planet_cameras_field_of_view() {
+    fn space_mode_uses_the_first_person_planet_cameras_field_of_view() {
         let mut controller = crate::player::controller::Controller::new();
         controller.first_person = true;
         assert!((FOV_Y_RADIANS - controller.fov_y()).abs() < 1e-6);
     }
 
     #[test]
-    fn camera_from_a_captured_flight_is_placed_in_galaxy_space() {
-        let g = Galaxy::generate(1);
-        let mut flight = GalaxyFlight::new(glam::DVec3::new(0.0, 600.0, 0.0)); // planet frame
+    fn camera_from_a_captured_flight_is_placed_in_space() {
+        let g = SolarSystem::generate(1);
+        let mut flight = SpaceFlight::new(glam::DVec3::new(0.0, 600.0, 0.0)); // planet frame
         flight.rotation = Quat::from_axis_angle(Vec3::X, -1.0);
         let t = 21.0;
-        let cam = GalaxyCamera::from_flight_in_frame(
+        let cam = SpaceCamera::from_flight_in_frame(
             &flight,
             crate::space::solar_system::FlightFrame::Captured(0),
             &g,
@@ -1182,7 +1180,7 @@ mod tests {
                 > 1.0 - 1e-6
         );
         assert_eq!(cam.fov_y, FOV_Y_RADIANS);
-        let free = GalaxyCamera::from_flight_in_frame(
+        let free = SpaceCamera::from_flight_in_frame(
             &flight,
             crate::space::solar_system::FlightFrame::Free,
             &g,
@@ -1193,30 +1191,30 @@ mod tests {
 
     #[test]
     fn content_selects_star_and_planets() {
-        assert!(GalaxyContent::Everything.draws_planet(3));
-        assert!(GalaxyContent::AllButPlanet(2).draws_planet(1));
-        assert!(!GalaxyContent::AllButPlanet(2).draws_planet(2));
+        assert!(SpaceContent::Everything.draws_planet(3));
+        assert!(SpaceContent::AllButPlanet(2).draws_planet(1));
+        assert!(!SpaceContent::AllButPlanet(2).draws_planet(2));
     }
 
-    // standing on a galaxy planet, the backdrop camera sits where the planet frame puts the eye in
-    // galaxy space, turned the same way
+    // standing on a planet, the backdrop camera sits where the planet frame puts the eye in
+    // space, turned the same way
     #[test]
-    fn camera_on_a_galaxy_planet_is_placed_in_galaxy_space() {
-        let g = Galaxy::generate(1);
+    fn camera_on_a_planet_is_placed_in_space() {
+        let g = SolarSystem::generate(1);
         let p = &g.planets[0];
         let eye = Vec3::new(0.0, 175.0, 0.0);
         let rot = Quat::from_axis_angle(Vec3::X, 0.4);
         let t = 42.0;
-        let cam = GalaxyCamera::on_galaxy_planet(p, eye, rot, 1.2, t);
+        let cam = SpaceCamera::on_system_planet(p, eye, rot, 1.2, t);
         assert!((cam.position - p.from_planet_frame(eye.as_dvec3(), t)).length() < 1e-6);
         assert!(cam.rotation.dot(p.rotation_from_planet_frame(rot, t)).abs() > 1.0 - 1e-6);
         assert_eq!(cam.fov_y, 1.2);
     }
 
     #[test]
-    fn camera_from_flight_uses_galaxy_modes_fov() {
-        let flight = GalaxyFlight::new(glam::DVec3::new(1.0, 2.0, 3.0));
-        let cam = GalaxyCamera::from_flight(&flight);
+    fn camera_from_flight_uses_space_modes_fov() {
+        let flight = SpaceFlight::new(glam::DVec3::new(1.0, 2.0, 3.0));
+        let cam = SpaceCamera::from_flight(&flight);
         assert_eq!(cam.position, flight.position);
         assert_eq!(cam.fov_y, FOV_Y_RADIANS);
     }
@@ -1227,24 +1225,24 @@ mod tests {
         clip.z / clip.w
     }
 
-    // integration: a galaxy filled to MAX_PLANETS (/galaxy add puts planets on ever wider orbits,
+    // integration: a system filled to MAX_PLANETS (/system add puts planets on ever wider orbits,
     // millions of units out), seen from just above its outermost planet: every body, the star
     // included, is in the depth range at its real distance with its near side in front of its far
     // side, and the body buffer holds the star plus every planet
     #[test]
-    fn a_full_galaxy_seen_from_its_outermost_planet_has_ordered_depths() {
-        let mut galaxy = Galaxy::generate(1);
-        while galaxy.planets.len() < MAX_PLANETS {
-            galaxy
+    fn a_full_solar_system_seen_from_its_outermost_planet_has_ordered_depths() {
+        let mut system = SolarSystem::generate(1);
+        while system.planets.len() < MAX_PLANETS {
+            system
                 .add_planet(crate::planet::biome::PlanetType::Ice, 100.0)
                 .unwrap();
         }
-        let outer = galaxy.planets[MAX_PLANETS - 1];
+        let outer = system.planets[MAX_PLANETS - 1];
         let t = 0.0;
         let camera = outer.position_at(t) + glam::DVec3::new(0.0, 3.0 * outer.radius as f64, 0.0);
         let mut bodies: Vec<(glam::DVec3, f32)> =
-            vec![(galaxy.star.position(), galaxy.star.radius as f32)];
-        bodies.extend(galaxy.planets.iter().map(|p| (p.position_at(t), p.radius)));
+            vec![(system.star.position(), system.star.radius as f32)];
+        bodies.extend(system.planets.iter().map(|p| (p.position_at(t), p.radius)));
         for (i, (pos, radius)) in bodies.into_iter().enumerate() {
             // looked at straight on: depth depends only on the distance along the view axis
             let distance = (pos - camera).length() as f32;
@@ -1276,15 +1274,15 @@ mod tests {
     // line of sight), or the star occludes its own flare
     #[test]
     fn the_flare_depth_covers_an_off_axis_star() {
-        let galaxy = Galaxy::generate(1);
-        let r = galaxy.star.radius;
+        let system = SolarSystem::generate(1);
+        let r = system.star.radius;
         for (dist, yaw) in [(2.2 * r, 0.25f32), (6.0 * r, 0.35), (30.0 * r, 0.5)] {
-            let camera = GalaxyCamera {
+            let camera = SpaceCamera {
                 position: DVec3::new(0.0, 0.0, dist),
                 rotation: Quat::from_rotation_y(yaw), // the star (at -Z) off to the side
                 fov_y: FOV_Y_RADIANS,
             };
-            let (_, expected, _) = star_on_screen(&camera, &galaxy, 16.0 / 9.0).unwrap();
+            let (_, expected, _) = star_on_screen(&camera, &system, 16.0 / 9.0).unwrap();
             let along = (dist as f32) * yaw.cos();
             let nearest_point_depth = star_depth(along - r as f32);
             assert!(
@@ -1296,7 +1294,7 @@ mod tests {
 
     #[test]
     fn star_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyStarUniform>(), 5 * 16);
+        assert_eq!(std::mem::size_of::<StarUniform>(), 5 * 16);
     }
 
     // the star writes its sphere's depth in reversed-Z, as the projection does for geometry
@@ -1314,7 +1312,7 @@ mod tests {
     // screen center (uv = 0.5, 0.5) that interpolation must reduce to the forward direction.
     #[test]
     fn ray_dirs_center_matches_forward_at_identity_rotation() {
-        let ray_dirs = GalaxyRenderer::ray_dirs(Quat::IDENTITY, 1.0, 16.0 / 9.0);
+        let ray_dirs = SpaceRenderer::ray_dirs(Quat::IDENTITY, 1.0, 16.0 / 9.0);
         let top_left = Vec3::from_slice(&ray_dirs[0][..3]);
         let col1 = Vec3::from_slice(&ray_dirs[1][..3]);
         let col2 = Vec3::from_slice(&ray_dirs[2][..3]);
@@ -1329,7 +1327,7 @@ mod tests {
     #[test]
     fn ray_dirs_center_matches_forward_under_rotation() {
         let rotation = Quat::from_axis_angle(Vec3::Y, 1.2) * Quat::from_axis_angle(Vec3::X, -0.4);
-        let ray_dirs = GalaxyRenderer::ray_dirs(rotation, 1.0, 16.0 / 9.0);
+        let ray_dirs = SpaceRenderer::ray_dirs(rotation, 1.0, 16.0 / 9.0);
         let top_left = Vec3::from_slice(&ray_dirs[0][..3]);
         let col1 = Vec3::from_slice(&ray_dirs[1][..3]);
         let col2 = Vec3::from_slice(&ray_dirs[2][..3]);
@@ -1365,14 +1363,14 @@ mod tests {
     }
 
     // composed regression: every link in noise_seed -> mesh -> cache -> LOD-tier has its own
-    // isolated test, but nothing exercised Galaxy::generate's *real* planets end to end before
+    // isolated test, but nothing exercised SolarSystem::generate's *real* planets end to end before
     // this — fixed tiers are used directly rather than going through distance mapping, since
     // subdivision_for_distance already has its own coverage above.
     #[test]
     fn seeded_planets_produce_distinct_geometry_across_tiers_and_planets() {
-        let galaxy = Galaxy::generate(1);
-        let p0 = &galaxy.planets[0];
-        let p1 = &galaxy.planets[1];
+        let system = SolarSystem::generate(1);
+        let p0 = &system.planets[0];
+        let p1 = &system.planets[1];
 
         let (v2, _) = crate::space::impostor::generate_planet_mesh(p0, 2);
         let (v4, _) = crate::space::impostor::generate_planet_mesh(p0, 4);

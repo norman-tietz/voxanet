@@ -2,7 +2,7 @@
 // The cloud field (atmosphere.wgsl fbm_clouds: noise over the direction from the planet centre and the
 // time) baked into a cube map, so the clouds cost a few filtered texture reads per pixel instead of ~160
 // noise hashes (atmo_cloud_shade in clouds.wgsl samples it). Every planet shares the field, so one map
-// serves the voxel engine and all galaxy impostors, and their clouds still match at the landing handover.
+// serves the voxel engine and all planet impostors, and their clouds still match at the landing handover.
 //
 // The wind changes the field over time, so it is baked as snapshots SNAPSHOT_SECS apart and the shaders
 // blend the two around the current time. A cube-map array holds SLOTS snapshots: the two being blended
@@ -270,7 +270,7 @@ impl CloudMap {
         }
     }
 
-    // the bindings the scene's group 0 and the galaxy camera's group 0 add (clouds.wgsl)
+    // the bindings the scene's group 0 and the space camera's group 0 add (clouds.wgsl)
     pub fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
         let fragment = wgpu::ShaderStages::FRAGMENT;
         [

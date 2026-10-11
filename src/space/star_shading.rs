@@ -27,13 +27,13 @@ pub fn sky_corona_distance(ray: glam::Vec3, l: glam::Vec3, angle: f32) -> f32 {
 }
 
 // the star's surface normal the sky's sun disc samples for a ray (planet frame), with `l` the direction
-// to the star and `angle` its angular radius, turned into galaxy space by `planet_to_galaxy` — the same
+// to the star and `angle` its angular radius, turned into space by `planet_to_space` — the same
 // point fs_star shades (mirror of atmosphere.wgsl atmo_sun_disc). None outside the disc.
 pub fn sky_disc_normal(
     ray: glam::Vec3,
     l: glam::Vec3,
     angle: f32,
-    planet_to_galaxy: glam::Quat,
+    planet_to_space: glam::Quat,
 ) -> Option<glam::Vec3> {
     // the star scaled to distance 1: centre at `l`, radius sin(angle); the near side's hit, as fs_star
     let r = angle.sin();
@@ -43,7 +43,7 @@ pub fn sky_disc_normal(
         return None;
     }
     let hit = along - (r * r - closest * closest).sqrt();
-    Some(planet_to_galaxy * ((ray * hit - l) / r).normalize())
+    Some(planet_to_space * ((ray * hit - l) / r).normalize())
 }
 
 #[cfg(test)]
@@ -68,11 +68,11 @@ mod tests {
         assert!(away <= sideways, "away {away} > sideways {sideways}");
     }
 
-    // the sky's sun disc (atmo_sun_disc) shows the same point of the star as the galaxy's star (fs_star):
-    // seen from a planet whose frame is turned by `q` (planet -> galaxy), a ray hits the star at the same
-    // galaxy-space surface normal
+    // the sky's sun disc (atmo_sun_disc) shows the same point of the star as the solar system's star (fs_star):
+    // seen from a planet whose frame is turned by `q` (planet -> system), a ray hits the star at the same
+    // space surface normal
     #[test]
-    fn the_sky_disc_samples_the_galaxy_stars_surface() {
+    fn the_sky_disc_samples_the_solar_system_stars_surface() {
         use glam::{Quat, Vec3};
         let (centre, radius) = (Vec3::ZERO, 3000.0f32);
         let cam = Vec3::new(2000.0, 500.0, 8000.0);
@@ -80,7 +80,7 @@ mod tests {
         let to_star = centre - cam;
         for (dx, dy) in [(0.0f32, 0.0f32), (0.15, 0.05), (-0.2, 0.25)] {
             let ray = (to_star.normalize() + Vec3::new(dx, dy, 0.0)).normalize();
-            // galaxy (fs_star): ray-sphere hit, outward normal
+            // system (fs_star): ray-sphere hit, outward normal
             let along = (centre - cam).dot(ray);
             let closest = (centre - cam - ray * along).length();
             if closest >= radius {
