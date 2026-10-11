@@ -12,6 +12,7 @@ struct Global {
     plastic: vec4<f32>, // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
     plastic_ext: vec4<f32>, // x: sky reflection weight (plastic.rs)
     light: vec4<f32>, // x: ground bounce, y: wrap lighting (light.rs)
+    weather: vec4<f32>, // x: overcast at the camera, y: storm there (weather.rs overcast)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -50,6 +51,8 @@ struct Biome {
     star_corona: vec4<f32>,  // rgb, w: corona_size
     star_params: vec4<f32>,  // granulation, granule_scale, sunspots, unused
     star_frame: vec4<f32>,   // quaternion: planet frame -> galaxy space (GalaxyPlanet::orientation)
+    weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
+    weather_cover: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
 
@@ -504,11 +507,13 @@ fn engine_atmosphere() -> Atmosphere {
         biome.sun.w,
         biome.star_frame,
         global.screen.w,
+        global.weather.x,
     );
 }
 
 fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32) -> f32 {
-    return atmo_cloud_shadow(world_pos, L, t, global.camera_pos.w);
+    // the visible clouds, storms included (clouds.wgsl); `t` is kept for the callers' symmetry
+    return atmo_cloud_shadow_map(world_pos, L, global.camera_pos.w);
 }
 
 // `dist`: from the camera to `hit` (picks the cloud map's level of detail)
@@ -547,14 +552,23 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     
     // Apply Detail Noise (Grain)
     let noise = triplanar_detail(world_pos, N);
-    let albedo = vert_color_linear * (1.0 + 0.03 * noise);
+    let albedo0 = vert_color_linear * (1.0 + 0.03 * noise);
+
+    // Shadow (ray-traced, see rt_blur.rs) and AO
+    // `sa`, not `rt`: the ray-march params are bound as the global `rt` (rt.enabled)
+    let sa = shadow_ao_at(frag_xy, world_pos);
+
+    // weather (weather_map.wgsl): wet plastic, puddles, snow/ash cover; sheltered by the AO
+    let ws = weather_at(normalize(world_pos));
+    let shelter = smoothstep(0.35, 0.75, sa.y);
+    let wm = weather_material(albedo0, roughness, global.plastic_ext.x, N, world_pos, shelter, ws,
+                              biome.weather_rule, biome.weather_cover);
+    let albedo = wm.albedo;
 
     // 3. Lighting Math
     let NdotL = max(dot(N, L), 0.0);
     
-    // Shadow (ray-traced, see rt_blur.rs); faces turned away from the sun are in their own shadow
-    // `sa`, not `rt`: the ray-march params are bound as the global `rt` (rt.enabled)
-    let sa = shadow_ao_at(frag_xy, world_pos);
+    // faces turned away from the sun are in their own shadow
     let shadow_raw = select(sa.x, 0.0, NdotL <= 0.0);
     // Smooth transition shadow
     let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_raw);
@@ -580,7 +594,8 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let sky_light = atmo_ambient_daylight(world_pos, L);
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
-    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y;
+    // storms are overcast: less fill light under them
+    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - 0.3 * ws.x);
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
@@ -607,15 +622,15 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
         let up_c = normalize(global.camera_pos.xyz);
         let v = cross(up_p, up_c);
         let Rc = R + cross(v, R) + cross(v, cross(v, R)) / (1.0 + dot(up_p, up_c));
-        let e = env_sample(Rc, roughness);
+        let e = env_sample(Rc, wm.roughness);
         env = (e.rgb + (1.0 - e.a) * ground) * map_w;
     }
     if (global.plastic.y > 0.0 && map_w < 1.0) {
-        env += atmo_env_analytic(R, world_pos, L, ground, ambient_light, roughness, engine_atmosphere())
+        env += atmo_env_analytic(R, world_pos, L, ground, ambient_light, wm.roughness, engine_atmosphere())
             * (1.0 - map_w);
     }
-    let pl = atmo_plastic(N, V, L, biome.sun.rgb * shadow_raw * clouded, env, roughness,
-                          global.plastic.y, global.plastic_ext.x, sa.y);
+    let pl = atmo_plastic(N, V, L, biome.sun.rgb * shadow_raw * clouded, env, wm.roughness,
+                          global.plastic.y, wm.reflection, sa.y);
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)

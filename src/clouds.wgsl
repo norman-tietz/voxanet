@@ -45,10 +45,12 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
         density += cloud_coverage(normalize(hit + ray_dir * (s * span)), lod);
     }
     density *= 0.25;
+    // storm clouds: darker, little silver lining (the weather map at the hit)
+    let storm = weather_at(up).x;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(a.cloud_dark, a.cloud_light, ndotl) * a.sun_color * 0.55;
-    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light;
+    let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * 0.4, storm * 0.8) * a.sun_color * 0.55;
+    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light * (1.0 - 0.7 * storm);
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
     let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
@@ -61,4 +63,17 @@ fn atmo_clouds(origin: vec3<f32>, ray_dir: vec3<f32>, pixel_angle: f32, L: vec3<
     let hit_t = sphere_hit(origin, ray_dir, a.planet_r * CLOUD_ALT);
     if (hit_t < 0.0) { return vec4<f32>(0.0); }
     return atmo_cloud_shade(origin + ray_dir * hit_t, ray_dir, pixel_angle * hit_t, L, a);
+}
+
+const CLOUD_SHADOW_LOD: f32 = 4.0; // a coarse level: the shadow is soft and one read
+const STORM_SHADOW: f32 = 0.25;    // extra sunlight blocked under storm clouds
+
+// how much direct sunlight survives the visible clouds (the cloud map, storms included) on the way to
+// the sun; the flare shader has no cloud map and keeps atmo_cloud_shadow's own noise
+fn atmo_cloud_shadow_map(world_pos: vec3<f32>, L: vec3<f32>, planet_r: f32) -> f32 {
+    let hit_t = sphere_hit(world_pos, L, planet_r * CLOUD_ALT);
+    if (hit_t < 0.0) { return 1.0; }
+    let dir = normalize(world_pos + L * hit_t);
+    let coverage = cloud_coverage(dir, CLOUD_SHADOW_LOD);
+    return 1.0 - coverage * (CLOUD_SHADOW_STRENGTH + weather_at(dir).x * STORM_SHADOW);
 }

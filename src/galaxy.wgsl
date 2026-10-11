@@ -114,6 +114,8 @@ struct PlanetUniform {
     glow_emission: vec4<f32>, // rgb: what that liquid emits (galaxy_render.rs lava_emission)
     plastic: vec4<f32>,       // x: base roughness, y: specular strength, z: reflection weight (plastic.rs)
     light: vec4<f32>,         // x: ground bounce, y: wrap lighting (light.rs)
+    weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
+    weather_cover: vec4<f32>,
     model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
@@ -133,6 +135,7 @@ fn planet_atmosphere() -> Atmosphere {
         0.0,
         vec4<f32>(0.0, 0.0, 0.0, 1.0),
         camera.screen.z,
+        0.0, // no overcast: seen from outside, not standing under a storm
     );
 }
 
@@ -200,21 +203,24 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let a = planet_atmosphere();
     let cam = planet_frame_camera();
     let L = planet_frame_light();
-    let t = camera.screen.z;
     let V = normalize(cam - in.local_pos);
 
-    let albedo = pow(in.flat_color, vec3<f32>(2.2));
-    let sun = a.sun_color * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
+    // the voxel terrain's weather (weather_map.wgsl): wet and covered land, no shelter out here
+    let ws = weather_at(normalize(in.local_pos));
+    let wm = weather_material(pow(in.flat_color, vec3<f32>(2.2)), planet.plastic.x, planet.plastic.z, N,
+                              in.local_pos, 1.0, ws, planet.weather_rule, planet.weather_cover);
+    let albedo = wm.albedo;
+    let sun = a.sun_color * atmo_cloud_shadow_map(in.local_pos, L, a.planet_r);
     let direct = sun * atmo_wrap_diffuse(dot(N, L), planet.light.y);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
     // the engine's fill light: the ground's bounce in the surface's colour below, sky above (shade())
     let ground = atmo_ground_bounce(albedo, in.local_pos, L, sun, planet.light.x);
-    let ambient = mix(ground, a.sky_zenith * sky_light, hemi);
+    let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - 0.3 * ws.x);
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     // the voxel terrain's plastic (atmosphere.wgsl), base roughness, no shadows or AO out here
-    let env = atmo_env_analytic(reflect(-V, N), in.local_pos, L, ground, ambient, planet.plastic.x, a);
-    let pl = atmo_plastic(N, V, L, sun, env, planet.plastic.x, planet.plastic.y, planet.plastic.z, 1.0);
+    let env = atmo_env_analytic(reflect(-V, N), in.local_pos, L, ground, ambient, wm.roughness, a);
+    let pl = atmo_plastic(N, V, L, sun, env, wm.roughness, planet.plastic.y, wm.reflection, 1.0);
     var lit = albedo * (direct + ambient + rim) * pl.diffuse_w + pl.spec;
     // a glowing liquid (lava) is emissive like the engine's (fs_water); impostor vertices carry the
     // liquid colour itself, so match on it, fading over shore blends

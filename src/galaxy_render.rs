@@ -112,6 +112,8 @@ struct GalaxyPlanetUniform {
     glow_emission: [f32; 4], // what it emits (rgb): lava_emission
     plastic: [f32; 4], // base roughness, specular strength, reflection weight (plastic.rs impostor_uniform)
     light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
+    weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
+    weather_cover: [f32; 4],
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
@@ -961,6 +963,8 @@ impl GalaxyRenderer {
             },
             plastic,
             light,
+            weather_rule: crate::weather::WeatherKind::for_planet(p.planet_type).rule(),
+            weather_cover: crate::weather::WeatherKind::for_planet(p.planet_type).cover(),
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1131,10 +1135,10 @@ mod tests {
     }
     use crate::galaxy::Galaxy;
 
-    // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
+    // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 14 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 12 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 14 * 16 + 3 * 16);
         // + plastic
     }
 

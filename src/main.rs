@@ -37,7 +37,6 @@ mod shadow;
 mod smoothing;
 mod star_shading;
 mod system_diagnostics;
-#[cfg_attr(not(test), allow(dead_code))] // the GPU map and shading (later tasks) use the rest
 mod weather;
 
 use crate::cmd::Console;

@@ -45,6 +45,7 @@ struct Atmosphere {
     star_angle: f32,      // the star's angular radius from this planet; 0 = no disc (impostor shells)
     star_frame: vec4<f32>, // quaternion: planet frame -> galaxy space, so the disc shows the star's own surface
     time: f32,            // seconds, for the star's boiling surface
+    overcast: f32,        // 0..1 storm overhead (weather.rs overcast): greys and dims the dome
 }
 
 // --- TONE MAPPING (ACES) ---
@@ -178,7 +179,10 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
     let limb = atmo_limb(ray_dir, cam_pos, a.planet_r);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
     let dome = mix(a.sky_zenith * 0.7, a.sky_horizon, sun_glow);
-    return mix(a.space_color, dome, limb);
+    // an overcast sky: greyer and darker under a storm (up to 40 %)
+    let grey = vec3<f32>(dot(dome, vec3<f32>(0.3, 0.59, 0.11)));
+    let dull = mix(dome, grey, 0.6 * a.overcast) * (1.0 - 0.4 * a.overcast);
+    return mix(a.space_color, dull, limb);
 }
 
 // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it out

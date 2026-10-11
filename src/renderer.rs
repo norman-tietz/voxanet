@@ -65,6 +65,7 @@ pub struct GlobalUniform {
     pub plastic: [f32; 4], // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
     pub plastic_ext: [f32; 4], // x: sky reflection weight (plastic.rs)
     pub light: [f32; 4],   // x: ground bounce, y: wrap lighting (light.rs)
+    pub weather: [f32; 4], // x: overcast at the camera, y: the storm there (weather.rs overcast)
 }
 
 #[repr(C)]
@@ -88,9 +89,11 @@ pub struct BiomeUniform {
     // the star type's look (star.wgsl StarLook) for the sky's sun disc (atmo_sun_disc)
     pub star_surface: [f32; 4],
     pub star_limb: [f32; 4],
-    pub star_corona: [f32; 4], // rgb, w: corona_size
-    pub star_params: [f32; 4], // granulation, granule_scale, sunspots, unused
+    pub star_corona: [f32; 4],  // rgb, w: corona_size
+    pub star_params: [f32; 4],  // granulation, granule_scale, sunspots, unused
     pub star_frame: [f32; 4], // quaternion planet frame -> galaxy space, so the sky disc shows the star's own surface
+    pub weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind), set by render
+    pub weather_cover: [f32; 4],
 }
 
 impl BiomeUniform {
@@ -129,6 +132,8 @@ impl BiomeUniform {
             star_corona: v4(look.corona_color, look.corona_size),
             star_params: [look.granulation, look.granule_scale, look.sunspots, 0.0],
             star_frame: star_frame.to_array(),
+            weather_rule: [0.0; 4],
+            weather_cover: [0.0; 4],
         }
     }
 }
@@ -1023,6 +1028,7 @@ impl Renderer {
             plastic: [0.0; 4], // nor glossy
             plastic_ext: [0.0; 4],
             light: crate::light::LightSettings::default().uniform(),
+            weather: [0.0; 4],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2529,6 +2535,14 @@ impl Renderer {
             / (MOTION_BLUR_MAX_SPEED - MOTION_BLUR_MIN_SPEED))
             .clamp(0.0, 1.0);
 
+        // the weather over the camera (weather.rs): the overcast sky and the flare under storms
+        let storm_here =
+            crate::weather::sample(cam_pos.normalize_or_zero(), time, &self.weather_force)[0];
+        let overcast = crate::weather::overcast(
+            storm_here,
+            cam_pos.length() / (planet.resolution as f32 * 0.5).max(1.0),
+        );
+
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
@@ -2563,6 +2577,7 @@ impl Renderer {
             plastic: self.plastic.uniform(),
             plastic_ext: self.plastic.uniform_ext(),
             light: self.light.uniform(),
+            weather: [overcast, storm_here, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -2578,12 +2593,15 @@ impl Renderer {
             }
             crate::galaxy_render::GalaxyContent::Everything => (0.0, glam::Quat::IDENTITY),
         };
-        let biome_data = BiomeUniform::from_def(
+        let mut biome_data = BiomeUniform::from_def(
             &planet.planet_type.def(),
             &backdrop.galaxy.star,
             angular_radius,
             star_frame,
         );
+        let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
+        biome_data.weather_rule = kind.rule();
+        biome_data.weather_cover = kind.cover();
         // lens flare: the sun projected far along its direction; none once the sun is below the planet's
         // geometric horizon (high up that's below the local horizontal, as in galaxy mode) or under
         // water, dimmed by clouds and terrain on the GPU
@@ -2606,7 +2624,7 @@ impl Renderer {
                 0.0,
                 angular_radius,
                 controller.fov_y(),
-                daylight * above_water,
+                daylight * above_water * (1.0 - storm_here), // storm clouds hide the sun
                 backdrop.galaxy.star.star_type.def(),
                 true,
                 [
@@ -3836,10 +3854,11 @@ pub(crate) mod tests {
         assert_valid_wgsl(FLARE_SHADER);
     }
 
-    // the Rust BiomeUniform must match the WGSL struct: 13 vec4s (the sun, the star's look and frame)
+    // the Rust BiomeUniform must match the WGSL struct: 15 vec4s (the sun, the star's look and frame,
+    // the weather rule and cover)
     #[test]
     fn biome_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<BiomeUniform>(), 13 * 16);
+        assert_eq!(std::mem::size_of::<BiomeUniform>(), 15 * 16);
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did
@@ -3901,6 +3920,23 @@ pub(crate) mod tests {
         assert!(crate::galaxy_render::GALAXY_SHADER.contains("fn weather_at("));
         let bake = include_str!("cloud_bake.wgsl");
         assert!(bake.contains("weather_storm(dir, t, bake.force) * STORM_COVER"));
+    }
+
+    #[test]
+    fn weather_reaches_the_shading() {
+        let s = include_str!("shader.wgsl");
+        let shade = &s[s.find("fn shade(").unwrap()..];
+        let shade = &shade[..shade.find("\n}\n").unwrap()];
+        assert!(shade.contains("weather_at(normalize(world_pos))"));
+        assert!(shade.contains("smoothstep(0.35, 0.75, sa.y)"));
+        assert!(shade.contains("weather_material("));
+        let g = include_str!("galaxy.wgsl");
+        assert!(g.contains("weather_material("));
+        assert!(g.contains("atmo_cloud_shadow_map("));
+        assert!(s.contains("atmo_cloud_shadow_map("));
+        let c = include_str!("clouds.wgsl");
+        let shade_clouds = &c[c.find("fn atmo_cloud_shade(").unwrap()..];
+        assert!(shade_clouds[..shade_clouds.find("\n}\n").unwrap()].contains("weather_at("));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use wgpu::util::DeviceExt;
 
 use crate::biome::PlanetType;
 
+#[cfg(test)]
 pub(crate) const WEATHER_FN_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
     include_str!("star.wgsl"),
@@ -46,6 +47,7 @@ const WEATHER_AGE_LOOKBACK: f32 = 200.0;
 const FORCE_FADE_SECS: f32 = 4.0;
 const FORCE_EDGE_LO: f32 = 0.35;
 const FORCE_EDGE_HI: f32 = 0.65;
+#[cfg_attr(not(test), allow(dead_code))] // the cloud bake's copy (weather.wgsl) is the one in use
 pub const STORM_COVER: f32 = 0.35;
 
 #[cfg(test)]
@@ -197,6 +199,8 @@ pub fn overcast(storm_at_camera: f32, radius_ratio: f32) -> f32 {
 
 // what weather does to a planet type's surfaces
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// AcidRain, Dust and None await the planet types to come (Toxic; Desert; Shattered)
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum WeatherKind {
     Rain,     // rain, snow toward the poles
     AcidRain, // wet everywhere, no snow
