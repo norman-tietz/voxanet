@@ -3615,18 +3615,21 @@ pub(crate) mod tests {
     fn hex_cursors_fit_the_cursor_buffers() {
         let mut planet = PlanetData::new(16);
         planet.cells = crate::common::CellShape::Hex;
-        for v in 0..16 {
-            for u in 0..16 {
-                let id = BlockId {
-                    face: 3,
-                    layer: 9,
-                    u,
-                    v,
-                };
-                let (verts, inds) = hex_cursor(&planet, id);
-                let corners = crate::hex::outline(3, u, v, 16).len();
-                assert_eq!(verts.len(), corners * 3 * 6 * 4);
-                assert!(verts.len() <= CURSOR_MAX_VERTS && inds.len() <= CURSOR_MAX_INDS);
+        // every face: the ring faces' cells reach across seams, the widened 8-corner cells are on ±Z
+        for face in 0..6u8 {
+            for v in 0..16 {
+                for u in 0..16 {
+                    let id = BlockId {
+                        face,
+                        layer: 9,
+                        u,
+                        v,
+                    };
+                    let (verts, inds) = hex_cursor(&planet, id);
+                    let corners = crate::hex::outline(face, u, v, 16).len();
+                    assert_eq!(verts.len(), corners * 3 * 6 * 4);
+                    assert!(verts.len() <= CURSOR_MAX_VERTS && inds.len() <= CURSOR_MAX_INDS);
+                }
             }
         }
     }

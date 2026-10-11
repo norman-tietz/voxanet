@@ -2882,8 +2882,9 @@ mod hex_mesh_tests {
     fn edited_hex_planet_mesh_is_closed() {
         let mut planet = super::cube_fingerprint::edited_planet();
         planet.cells = CellShape::Hex;
-        // a pit and a tower on a cube-face seam too
-        for (face, u, v) in [(2u8, 63u32, 30u32), (2, 0, 7)] {
+        // a pit and a tower on cube-face seams too: an even row, a reaching cell (face 2, u 0, odd row),
+        // a gap-side column (face 2, u 63, odd row) and a reaching cell in the last row at a ±Z corner
+        for (face, u, v) in [(2u8, 63u32, 30u32), (2, 0, 7), (2, 63, 31), (0, 63, 63)] {
             let h = planet.surface(face, u, v);
             let _ = planet.remove_block(BlockId {
                 face,

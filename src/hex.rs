@@ -120,8 +120,11 @@ pub fn cell_at(face: u8, u: f64, v: f64, res: u32) -> (u8, u32, u32) {
         let (f, ..) = ring_neighbour(face, col >= n);
         let x = ring_extend(f, face, u, res) * 6.0;
         let col = ((x - shift6(f, row) as f64) / 6.0).floor() as i64;
+        // a point exactly on the gap's far edge lands on the reaching cell's open end where the seam
+        // reflects u (0 ↔ 2: u' = 2·res − u), one past it; boundary points may go either way, so the
+        // clamp keeps the reaching cell
         debug_assert!(
-            (0..n).contains(&col),
+            (-1..=n).contains(&col),
             "gap at {face} ({u}, {v}) not filled by {f}"
         );
         return (f, col.clamp(0, n - 1) as u32, row as u32);
@@ -331,6 +334,24 @@ mod tests {
                     assert!([true, false]
                         .iter()
                         .any(|&h| ring_neighbour(f, h).0 == face));
+                }
+            }
+        }
+    }
+
+    // points exactly on a gap's edges belong to a cell next to them: the reflected seam 0 ↔ 2 maps the
+    // gap's far edge onto the reaching cell's open end (u' = 2·res − u)
+    #[test]
+    fn gap_edges_have_an_owner() {
+        for res in [8u32, 9] {
+            let r = res as f64;
+            for face in 0..4u8 {
+                for u in [0.0, 0.5, r - 0.5, r, -0.5, r + 0.5] {
+                    let (f, cu, cv) = cell_at(face, u, 5.5, res);
+                    assert!(
+                        ring(f) && cu < res && cv == 5,
+                        "{face} {u} -> {f} {cu} {cv}"
+                    );
                 }
             }
         }
