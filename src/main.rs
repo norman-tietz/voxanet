@@ -111,6 +111,7 @@ fn enter_space_controls(controller: &mut Controller, map: &mut Option<crate::spa
 
 // a planet baked on a background thread: its voxel world plus the near impostor built from it
 struct BakedPlanet {
+    system: usize, // the solar system it belongs to (Universe::current when the bake started)
     index: usize,
     data: PlanetData,
     near_verts: Vec<crate::planet::data::Vertex>,
@@ -122,12 +123,14 @@ struct BakedPlanet {
 // /system home, on a background thread on capture (start_bake)
 fn bake_planet(
     system: &crate::space::solar_system::SolarSystem,
+    system_index: usize,
     index: usize,
     edits: Option<crate::planet::data::PlanetEdits>,
 ) -> BakedPlanet {
     let data = system.planets[index].bake_with_edits(edits);
     let (near_verts, near_indices) = crate::space::impostor::near_impostor_mesh(&data);
     BakedPlanet {
+        system: system_index,
         index,
         impostor_generation: data.edit_generation(),
         data,
@@ -138,6 +141,7 @@ fn bake_planet(
 
 fn start_bake(
     system: &crate::space::solar_system::SolarSystem,
+    system_index: usize,
     index: usize,
     edits: Option<crate::planet::data::PlanetEdits>,
 ) -> std::sync::mpsc::Receiver<BakedPlanet> {
@@ -147,6 +151,7 @@ fn start_bake(
         let data = target.bake_with_edits(edits);
         let (near_verts, near_indices) = crate::space::impostor::near_impostor_mesh(&data);
         let _ = tx.send(BakedPlanet {
+            system: system_index,
             index,
             impostor_generation: data.edit_generation(),
             data,
@@ -159,10 +164,10 @@ fn start_bake(
 
 // before planet `incoming` is installed, keeps the installed planet's edits for its next visit (nothing
 // to keep at start-up, when re-installing the same planet, or when it's unedited)
-fn stash_edits(
-    store: &mut std::collections::HashMap<usize, crate::planet::data::PlanetEdits>,
-    installed: Option<usize>,
-    incoming: usize,
+fn stash_edits<K: std::hash::Hash + Eq + Copy>(
+    store: &mut std::collections::HashMap<K, crate::planet::data::PlanetEdits>,
+    installed: Option<K>,
+    incoming: K,
     planet: &mut PlanetData,
 ) {
     let Some(installed) = installed.filter(|&i| i != incoming) else {
@@ -237,8 +242,15 @@ fn noon_spawn(
 // mode) or been captured by another planet; having merely left orbit again keeps it (spec §1:
 // re-capturing the same planet doesn't re-bake). Capturing another planet also replaces bake_rx,
 // so an older bake can't arrive after that.
-fn bake_still_wanted(mode: GameMode, frame: FlightFrame, index: usize) -> bool {
-    mode == GameMode::Space
+fn bake_still_wanted(
+    mode: GameMode,
+    frame: FlightFrame,
+    index: usize,
+    bake_system: usize,
+    current_system: usize,
+) -> bool {
+    bake_system == current_system
+        && mode == GameMode::Space
         && match frame {
             FlightFrame::Free => true,
             FlightFrame::Captured(i) => i == index,
@@ -264,16 +276,50 @@ struct Game {
     bench: Option<Bench>,      // a --bench run in progress (perf.rs)
     pub quit: bool,            // the bench run is done: about_to_wait exits
     loaded_world: usize,       // the planet the voxel engine holds (always one)
-    start_planet: usize,       // where the game starts and /system home returns to
+    loaded_system: usize, // ... and the solar system it belongs to (a jump leaves it installed)
+    universe: crate::space::universe::Universe, // the galaxy and the systems visited (Game.system: the current one)
+    jump: Option<Jump>, // a jump to another solar system in progress (fade, switch, fade)
+    start_planet: usize, // where the game starts and /system home returns to
     // each planet's edits while another planet is installed (stash_edits), handed to its next bake
-    edits_by_planet: std::collections::HashMap<usize, crate::planet::data::PlanetEdits>,
+    edits_by_planet: std::collections::HashMap<(usize, usize), crate::planet::data::PlanetEdits>, // (system, planet)
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
     travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
     trip_mouse: TripMouse,  // mouse motion during a trip, toward cancelling it
-    visited: std::collections::HashSet<usize>, // planets whose voxel world has been installed this session
+    visited: std::collections::HashSet<(usize, usize)>, // (system, planet) whose voxel world has been installed
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
+}
+
+// a jump to another solar system (spec docs/superpowers/specs/2026-10-12-galaxy-design.md §2): the frame
+// fades to black, the systems switch, it fades back in (sub-project 3 replaces the fade with the flight)
+const JUMP_FADE_SECS: f32 = 0.4;
+
+struct Jump {
+    target: usize,
+    started: Instant,
+    switched: bool,
+    then_home: bool, // /system home from another system: home runs right after the switch
+}
+
+impl Jump {
+    fn new(target: usize, then_home: bool) -> Self {
+        Self {
+            target,
+            started: Instant::now(),
+            switched: false,
+            then_home,
+        }
+    }
+
+    // the black fade's opacity `elapsed` seconds in: rising before the switch, falling after it
+    fn fade(elapsed: f32) -> f32 {
+        if elapsed < JUMP_FADE_SECS {
+            elapsed / JUMP_FADE_SECS
+        } else {
+            (1.0 - (elapsed - JUMP_FADE_SECS) / JUMP_FADE_SECS).clamp(0.0, 1.0)
+        }
+    }
 }
 
 // an automatic flight to a planet's orbit (space/travel.rs): climbing from the surface (planet mode), or
@@ -429,16 +475,22 @@ impl Game {
         let mut renderer = pollster::block_on(Renderer::new(window));
         let mut controller = Controller::new();
         let mut player = Player::new();
-        let system = crate::space::solar_system::SolarSystem::generate(seed);
+        // --seed picks the galaxy; its start system (entry 0) has the galaxy seed, so it is the solar
+        // system this seed always gave
+        let universe =
+            crate::space::universe::Universe::new(crate::space::galaxy::Galaxy::generate(seed));
+        let system =
+            crate::space::solar_system::SolarSystem::generate(universe.galaxy.systems[0].seed);
         println!(
-            "Solar system seed {seed}: {} star",
+            "Galaxy seed {seed}: start system {}, {} star",
+            universe.galaxy.systems[0].name,
             system.star.star_type.def().name
         );
         let start_planet = system.start_planet_index(initial_biome);
 
         // every planet lives in the solar system: start on one of them, standing at local noon
         let mut planet = PlanetData::new(8); // placeholder, replaced right below
-        let baked = bake_planet(&system, start_planet, None);
+        let baked = bake_planet(&system, 0, start_planet, None);
         let impostor_generation = baked.impostor_generation;
         // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
         // turned on past noon while baking
@@ -511,6 +563,9 @@ impl Game {
             }),
             quit: false,
             loaded_world: start_planet,
+            loaded_system: 0,
+            universe,
+            jump: None,
             start_planet,
             edits_by_planet: std::collections::HashMap::new(),
             impostor_generation,
@@ -542,6 +597,9 @@ impl Game {
             trip_mouse,
             clock,
             loaded_world,
+            loaded_system,
+            universe,
+            jump,
             start_planet,
             edits_by_planet,
             impostor_generation,
@@ -640,11 +698,13 @@ impl Game {
                         t,
                     );
                     *travel = Some(Travel::Cruise(trip));
-                    if *loaded_world != target && *baking != Some(target) {
+                    let loaded_here = *loaded_system == universe.current && *loaded_world == target;
+                    if !loaded_here && *baking != Some(target) {
                         *bake_rx = Some(start_bake(
                             system,
+                            universe.current,
                             target,
-                            edits_by_planet.get(&target).cloned(),
+                            edits_by_planet.get(&(universe.current, target)).cloned(),
                         ));
                         *baking = Some(target);
                     }
@@ -749,15 +809,22 @@ impl Game {
                         system.planets[i].radius as f64,
                     );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
-                    if *loaded_world != i && *baking != Some(i) {
+                    // (the loaded world counts only if it belongs to this solar system)
+                    let loaded_here = *loaded_system == universe.current && *loaded_world == i;
+                    if !loaded_here && *baking != Some(i) {
                         // the stored edits stay in the store until this bake is installed, so a
                         // dropped bake loses nothing
-                        *bake_rx = Some(start_bake(system, i, edits_by_planet.get(&i).cloned()));
+                        *bake_rx = Some(start_bake(
+                            system,
+                            universe.current,
+                            i,
+                            edits_by_planet.get(&(universe.current, i)).cloned(),
+                        ));
                         *baking = Some(i);
                     }
                     // once loaded, the voxel engine streams from the flight's planet-frame position,
                     // so its meshes are ready by the time the landing handover needs them
-                    if *loaded_world == i {
+                    if loaded_here {
                         renderer.update_view(space_flight.position.as_vec3(), planet);
                         if !*voxel_ready_announced && renderer.view_covered() {
                             println!("Voxel world for #{} ready", i + 1);
@@ -828,7 +895,13 @@ impl Game {
         if let Some(baked) = finished {
             *bake_rx = None;
             *baking = None;
-            if bake_still_wanted(*mode, *flight_frame, baked.index) {
+            if bake_still_wanted(
+                *mode,
+                *flight_frame,
+                baked.index,
+                baked.system,
+                universe.current,
+            ) {
                 // the engine streams in the planet frame; free flight is in space
                 let local = match *flight_frame {
                     FlightFrame::Captured(_) => space_flight.position,
@@ -838,10 +911,17 @@ impl Game {
                 let index = baked.index;
                 let generation = baked.impostor_generation;
                 // the installed planet keeps its edits for its next visit; the new one has its own now
-                stash_edits(edits_by_planet, Some(*loaded_world), index, planet);
-                edits_by_planet.remove(&index);
+                let key = (baked.system, index);
+                stash_edits(
+                    edits_by_planet,
+                    Some((*loaded_system, *loaded_world)),
+                    key,
+                    planet,
+                );
+                edits_by_planet.remove(&key);
                 install_world(renderer, controller, planet, baked, local.as_vec3());
                 *loaded_world = index;
+                *loaded_system = key.0;
                 *impostor_generation = generation;
                 *voxel_ready_announced = false;
                 println!("Baked #{} (res {})", index + 1, planet.resolution);
@@ -851,6 +931,7 @@ impl Game {
         // the solar system shows the installed planet's near impostor: rebuild it in the background when the
         // planet was edited since it was built (after liftoff, or leaving by /system goto)
         if *mode == GameMode::Space
+            && *loaded_system == universe.current
             && impostor_rx.is_none()
             && near_impostor_outdated(*impostor_generation, planet)
         {
@@ -870,7 +951,7 @@ impl Game {
         if let Some(Ok((index, generation, v, i))) = rebuilt {
             *impostor_rx = None;
             // dropped if another planet was installed meanwhile
-            if index == *loaded_world {
+            if index == *loaded_world && *loaded_system == universe.current {
                 renderer.set_near_impostor(index, &v, &i);
                 *impostor_generation = generation;
             }
@@ -894,6 +975,76 @@ impl Game {
             };
             console.log(&format!("View: {view}"), [0.0, 1.0, 0.0]);
         }
+        // a jump to another solar system: start (/jump), then fade out, switch, fade in
+        if let Some(n) = console.jump_request.take() {
+            if n >= universe.galaxy.systems.len() {
+                console.log(
+                    &format!(
+                        "No system #{}: this galaxy has 1..={}",
+                        n + 1,
+                        universe.galaxy.systems.len()
+                    ),
+                    [1.0, 0.5, 0.0],
+                );
+            } else if n == universe.current {
+                renderer.show_status("You are here.");
+            } else if jump.is_none() {
+                close_map(map, controller);
+                *jump = Some(Jump::new(n, false));
+            }
+        }
+        if let Some(j) = jump {
+            let elapsed = j.started.elapsed().as_secs_f32();
+            if !j.switched && elapsed >= JUMP_FADE_SECS {
+                j.switched = true;
+                let from = universe.galaxy.systems[universe.current].position;
+                let to = universe.galaxy.systems[j.target].position;
+                // park the current system, take the target (generated on its first visit); the voxel
+                // world stays installed with its edits until a planet here is baked
+                let placeholder = crate::space::solar_system::SolarSystem::generate(0);
+                let old = std::mem::replace(system, placeholder);
+                *system = match universe.switch(j.target, old) {
+                    Ok(next) => next,
+                    Err((back, _)) => back,
+                };
+                renderer.clear_system_caches();
+                if *loaded_system == universe.current {
+                    // back where the voxel world is installed: rebuild its near impostor
+                    *impostor_generation = u64::MAX;
+                }
+                *bake_rx = None;
+                *baking = None;
+                *travel = None;
+                renderer.travel_hud = None;
+                let (pos, rot) = crate::space::universe::Universe::arrival_pose(
+                    system,
+                    (from - to).normalize_or(glam::DVec3::Z),
+                );
+                *space_flight = crate::space::solar_system::SpaceFlight::new(pos);
+                space_flight.rotation = rot;
+                *flight_frame = FlightFrame::Free;
+                *mode = GameMode::Space;
+                controller.fly_mode = false;
+                enter_space_controls(controller, map);
+                let entry = &universe.galaxy.systems[universe.current];
+                console.log(
+                    &format!(
+                        "Arrived in {} ({} star).",
+                        entry.name,
+                        system.star.star_type.def().name
+                    ),
+                    [1.0, 1.0, 1.0],
+                );
+                if j.then_home {
+                    console.system_request = Some(crate::app::cmd::SystemRequest::Home);
+                }
+            }
+            renderer.set_fade(Jump::fade(elapsed));
+            if elapsed >= 2.0 * JUMP_FADE_SECS {
+                *jump = None;
+                renderer.set_fade(0.0);
+            }
+        }
         if let Some(request) = console.system_request.take() {
             use crate::app::cmd::SystemRequest;
             let say = |console: &mut Console, text: &str| {
@@ -901,6 +1052,10 @@ impl Game {
                 println!("{text}");
             };
             match request {
+                SystemRequest::Home if universe.current != 0 => {
+                    // home is in the start system: jump there first, then home (Jump::then_home)
+                    *jump = Some(Jump::new(0, true));
+                }
                 SystemRequest::Home => {
                     // a running bake was for wherever the player was flying: drop it, and the trip too
                     *bake_rx = None;
@@ -908,16 +1063,22 @@ impl Game {
                     *travel = None;
                     renderer.travel_hud = None;
                     let i = *start_planet;
-                    if *loaded_world != i {
-                        let baked = bake_planet(system, i, edits_by_planet.remove(&i));
+                    if !(*loaded_system == 0 && *loaded_world == i) {
+                        let baked = bake_planet(system, 0, i, edits_by_planet.remove(&(0, i)));
                         let generation = baked.impostor_generation;
                         // the time after the bake: the planet keeps turning while it bakes
                         let t = clock.now();
                         let spawn = noon_spawn(&baked.data, system, i, t);
-                        stash_edits(edits_by_planet, Some(*loaded_world), i, planet);
+                        stash_edits(
+                            edits_by_planet,
+                            Some((*loaded_system, *loaded_world)),
+                            (0, i),
+                            planet,
+                        );
                         install_world(renderer, controller, planet, baked, spawn);
                         *impostor_generation = generation;
                         *loaded_world = i;
+                        *loaded_system = 0;
                     }
                     let t = clock.now();
                     player.spawn(noon_spawn(planet, system, i, t));
@@ -1036,7 +1197,7 @@ impl Game {
             let msg = renderer.plastic.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
-        visited.insert(*loaded_world);
+        visited.insert((*loaded_system, *loaded_world));
         if let Some(request) = console.map_request.take() {
             match (request, map.is_some()) {
                 (None, true) => close_map(map, controller),
@@ -1508,7 +1669,12 @@ impl Game {
                         m,
                         here,
                         ship,
-                        &self.visited,
+                        &self
+                            .visited
+                            .iter()
+                            .filter(|(s, _)| *s == self.universe.current)
+                            .map(|(_, p)| *p)
+                            .collect(),
                         &line,
                         &self.console,
                     );
@@ -1718,6 +1884,26 @@ mod tests {
         assert!(planet.edits.is_empty());
     }
 
+    #[test]
+    fn the_jump_fades_out_then_in() {
+        assert_eq!(Jump::fade(0.0), 0.0);
+        assert!((Jump::fade(JUMP_FADE_SECS * 0.5) - 0.5).abs() < 1e-6);
+        assert!((Jump::fade(JUMP_FADE_SECS) - 1.0).abs() < 1e-6);
+        assert!((Jump::fade(JUMP_FADE_SECS * 1.5) - 0.5).abs() < 1e-6);
+        assert_eq!(Jump::fade(JUMP_FADE_SECS * 3.0), 0.0);
+    }
+
+    // Review Focus 2: edits are kept per (system, planet): A#3's edits come back for A#3, never for B#3
+    #[test]
+    fn edits_are_kept_per_system_and_planet() {
+        let mut store = std::collections::HashMap::new();
+        let mut planet = mined_planet();
+        // A#3 installed, B#3 comes in: A#3's edits go to the store under (A, 3)
+        stash_edits(&mut store, Some((0usize, 3usize)), (4, 3), &mut planet);
+        assert!(store.contains_key(&(0, 3)));
+        assert!(!store.contains_key(&(4, 3)), "B#3 has none");
+    }
+
     // re-installing the planet that's already installed (or the first install at start-up) stores nothing
     #[test]
     fn stash_is_a_no_op_for_the_installed_planet() {
@@ -1782,20 +1968,40 @@ mod tests {
         assert!(bake_still_wanted(
             GameMode::Space,
             FlightFrame::Captured(2),
-            2
+            2,
+            0,
+            0
         ));
         assert!(!bake_still_wanted(
             GameMode::Space,
             FlightFrame::Captured(3),
-            2
+            2,
+            0,
+            0
         ));
         assert!(!bake_still_wanted(
             GameMode::Planet,
             FlightFrame::Captured(2),
-            2
+            2,
+            0,
+            0
+        ));
+        // Review Focus 3: a bake for the solar system left by a jump is dropped
+        assert!(!bake_still_wanted(
+            GameMode::Space,
+            FlightFrame::Captured(2),
+            2,
+            0,
+            5
         ));
         // spec §1: leaving orbit before landing keeps the bake — a bake finishing while flight is
         // free again (nobody else captured it meanwhile) is still installed, so re-capture won't re-bake
-        assert!(bake_still_wanted(GameMode::Space, FlightFrame::Free, 2));
+        assert!(bake_still_wanted(
+            GameMode::Space,
+            FlightFrame::Free,
+            2,
+            0,
+            0
+        ));
     }
 }

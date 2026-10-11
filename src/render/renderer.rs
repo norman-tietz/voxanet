@@ -284,6 +284,9 @@ pub struct Renderer {
     film_buf: wgpu::Buffer,
     film_bind: wgpu::BindGroup,
     film_clock: std::time::Instant, // grain animation time
+    fade_buf: wgpu::Buffer, // the jump's black fade (set_fade), drawn with flash_pipeline last in every frame
+    fade_bind: wgpu::BindGroup,
+    fade: f32,
     heat_buf: wgpu::Buffer, // the star heat glow (update_heat_glow), drawn with flash_pipeline
     heat_bind: wgpu::BindGroup,
     console_panel_bind: wgpu::BindGroup, // the console's background in Space mode, drawn with flash_pipeline
@@ -661,6 +664,19 @@ impl Renderer {
             label: None,
         });
 
+        let fade_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Jump Fade Uniform"),
+            contents: bytemuck::cast_slice(&[default_local]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let fade_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &local_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: fade_buf.as_entire_binding(),
+            }],
+            label: None,
+        });
         let heat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Heat Glow Uniform"),
             contents: bytemuck::cast_slice(&[default_local]),
@@ -1146,6 +1162,9 @@ impl Renderer {
             film_buf,
             film_bind,
             film_clock: std::time::Instant::now(),
+            fade_buf,
+            fade_bind,
+            fade: 0.0,
             heat_buf,
             heat_bind,
             console_panel_bind,
@@ -2386,6 +2405,30 @@ impl Renderer {
 
     // the star's heat glow in Space mode (solar_system::star_heat): a warm full-screen tint over the view,
     // drawn under the HUD text; uploads this frame's opacity and returns it
+    // the jump's black fade over the whole frame, 0..1 (main.rs Jump)
+    pub fn set_fade(&mut self, alpha: f32) {
+        self.fade = alpha.clamp(0.0, 1.0);
+        self.queue.write_buffer(
+            &self.fade_buf,
+            0,
+            bytemuck::cast_slice(&[LocalUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array(),
+                params: [self.fade, 0.0, 0.0, 0.0],
+            }]),
+        );
+    }
+
+    // drawn last (over the HUD too) in every frame path
+    fn draw_fade(&self, pass: &mut wgpu::RenderPass) {
+        if self.fade > 0.0 {
+            self.draw_full_screen(pass, &self.fade_bind, self.fade);
+        }
+    }
+
+    pub fn clear_system_caches(&mut self) {
+        self.system.clear_system_caches();
+    }
+
     fn update_heat_glow(&mut self, heat: f32) -> f32 {
         let alpha = HEAT_GLOW_OPACITY * heat;
         self.queue.write_buffer(
@@ -3312,6 +3355,7 @@ impl Renderer {
             // screenshot flash: drawn last (over the text too), so it's visible feedback on screen but,
             // since it's timed to start only after this frame's capture (below), never in the PNG itself
             self.draw_flash(&mut pass, flash_alpha);
+            self.draw_fade(&mut pass);
         }
 
         if let Some(timer) = &mut self.gpu_timer {
@@ -3864,6 +3908,7 @@ impl Renderer {
                 .render(&self.text_atlas, &self.text_viewport, &mut pass)
                 .unwrap();
             self.draw_flash(&mut pass, flash_alpha);
+            self.draw_fade(&mut pass);
         }
         self.queue.submit(std::iter::once(enc.finish()));
     }
@@ -4111,6 +4156,7 @@ impl Renderer {
                 .unwrap();
             // drawn last, over the HUD text too, same as planet mode
             self.draw_flash(&mut pass, flash_alpha);
+            self.draw_fade(&mut pass);
         }
         self.queue.submit(std::iter::once(enc.finish()));
     }

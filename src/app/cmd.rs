@@ -84,6 +84,7 @@ pub struct Console {
     pub ao_request: Option<crate::render::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::render::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
     pub perf_request: Option<(f32, String)>, // set by /perf: seconds and label (perf.rs)
+    pub jump_request: Option<usize>,         // set by /jump <n>: jump to solar system n (0-based)
     pub travel_request: Option<usize>, // set by /travel <n>: fly to planet n's orbit (0-based)
     pub map_request: Option<Option<usize>>, // set by /map [n]: toggle the map, or open it with planet n selected
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
@@ -112,6 +113,7 @@ impl Console {
             ao_request: None,
             plastic_request: None,
             perf_request: None,
+            jump_request: None,
             travel_request: None,
             map_request: None,
             weather_request: None,
@@ -293,6 +295,11 @@ impl Console {
             "/light" => match crate::render::light::LightCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.light_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
+            "/jump" => match parts.get(1).map(|n| n.parse::<usize>()) {
+                Some(Ok(n)) if n >= 1 => self.jump_request = Some(n - 1),
+                _ => self.log("Usage: /jump <system number>", [1.0, 0.5, 0.0]),
             },
 
             "/travel" => match parts.get(1).map(|n| n.parse::<usize>()) {

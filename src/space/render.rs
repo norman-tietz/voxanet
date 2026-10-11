@@ -1186,6 +1186,13 @@ impl SpaceRenderer {
 
     // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
     // mesh (impostor::near_impostor_mesh) once that planet is baked; one planet at a time
+    // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
+    // belong to the old one
+    pub fn clear_system_caches(&mut self) {
+        self.planet_meshes.clear();
+        self.near_impostor = None;
+    }
+
     pub fn set_near_impostor(
         &mut self,
         device: &wgpu::Device,
