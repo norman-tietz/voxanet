@@ -9,6 +9,7 @@ mod common;
 mod controller;
 mod deferred;
 mod entity;
+mod env_map;
 mod film;
 mod flare;
 mod galaxy;

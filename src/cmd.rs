@@ -23,7 +23,7 @@ const HELP_LINES: [&str; 11] = [
     "  /hw_shadows [true|false]       /style [hex|lowpoly|cubes]",
     "  /bevel [on|off|width <v>|cavity <v>]  /film [on|off|grain <v>|vignette <v>]",
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
-    "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>]",
+    "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",

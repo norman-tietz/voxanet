@@ -11,7 +11,7 @@ pub const DEFAULT_SCRATCH: f32 = 0.2; // roughness added along scratches
                                       // reflects ~13 % at typical viewing angles, which under a bright bluish sky washed the block colours out
 pub const DEFAULT_REFLECTION: f32 = 0.15;
 pub const PLASTIC_USAGE: &str =
-    "Usage: /plastic [on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>|reflection <0-1>]";
+    "Usage: /plastic [on|off|roughness <0.05-1>|specular <0-2>|smudge <0-1>|scratch <0-1>|reflection <0-1>|env [on|off]]";
 
 // the plastic look, tuned with /plastic (cmd.rs); GlobalUniform.plastic = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,6 +22,7 @@ pub struct PlasticSettings {
     pub scratch: f32,
     pub reflection: f32, // weight of the sky reflection
     pub enabled: bool,   // off: no specular (the old diffuse look), the values kept for /plastic on
+    pub env: bool, // reflect the pre-filtered environment map (env_map.rs); off: the analytic sky, today's look
 }
 
 impl Default for PlasticSettings {
@@ -33,6 +34,7 @@ impl Default for PlasticSettings {
             scratch: DEFAULT_SCRATCH,
             reflection: DEFAULT_REFLECTION,
             enabled: true,
+            env: true,
         }
     }
 }
@@ -51,9 +53,9 @@ impl PlasticSettings {
         [u[0], u[1], self.reflection, 0.0]
     }
 
-    // shader.wgsl Global.plastic_ext: x = sky reflection weight
+    // shader.wgsl Global.plastic_ext: x = sky reflection weight, y = 1 when the environment map is reflected
     pub fn uniform_ext(&self) -> [f32; 4] {
-        [self.reflection, 0.0, 0.0, 0.0]
+        [self.reflection, if self.env { 1.0 } else { 0.0 }, 0.0, 0.0]
     }
 
     // applies a /plastic command; returns the line to log
@@ -67,15 +69,17 @@ impl PlasticSettings {
             PlasticCommand::Smudge(v) => (self.smudge, self.enabled) = (v, true),
             PlasticCommand::Scratch(v) => (self.scratch, self.enabled) = (v, true),
             PlasticCommand::Reflection(v) => (self.reflection, self.enabled) = (v, true),
+            PlasticCommand::Env(v) => self.env = v,
         }
         format!(
-            "Plastic: {}, roughness {:.2}, specular {:.2}, smudge {:.2}, scratch {:.2}, reflection {:.2}",
+            "Plastic: {}, roughness {:.2}, specular {:.2}, smudge {:.2}, scratch {:.2}, reflection {:.2}, env {}",
             if self.enabled { "on" } else { "off" },
             self.roughness,
             self.specular,
             self.smudge,
             self.scratch,
-            self.reflection
+            self.reflection,
+            if self.env { "on" } else { "off" }
         )
     }
 }
@@ -90,6 +94,7 @@ pub enum PlasticCommand {
     Smudge(f32),
     Scratch(f32),
     Reflection(f32),
+    Env(bool),
 }
 
 impl PlasticCommand {
@@ -110,6 +115,8 @@ impl PlasticCommand {
             ["smudge", v] => value(v, 0.0, 1.0).map(PlasticCommand::Smudge),
             ["scratch", v] => value(v, 0.0, 1.0).map(PlasticCommand::Scratch),
             ["reflection", v] => value(v, 0.0, 1.0).map(PlasticCommand::Reflection),
+            ["env", "on"] => Ok(PlasticCommand::Env(true)),
+            ["env", "off"] => Ok(PlasticCommand::Env(false)),
             _ => Err(PLASTIC_USAGE),
         }
     }
@@ -290,7 +297,7 @@ mod tests {
     fn reflection_has_its_own_weight() {
         let mut s = PlasticSettings::default();
         assert_eq!(DEFAULT_REFLECTION, 0.15);
-        assert_eq!(s.uniform_ext(), [DEFAULT_REFLECTION, 0.0, 0.0, 0.0]);
+        assert_eq!(s.uniform_ext(), [DEFAULT_REFLECTION, 1.0, 0.0, 0.0]);
         assert_eq!(
             PlasticCommand::parse(&["reflection", "0.5"]),
             Ok(PlasticCommand::Reflection(0.5))
@@ -351,5 +358,24 @@ mod tests {
         let r = &shader[shader.find("fn plastic_roughness(").unwrap()..];
         assert!(r.contains("edge1"), "polygons pick sides 0 and 1");
         assert!(!r.contains("floor(world_pos"), "seed from the world grid");
+    }
+
+    #[test]
+    fn env_toggle_parses_and_rides_in_the_uniform() {
+        assert_eq!(
+            PlasticCommand::parse(&["env", "off"]),
+            Ok(PlasticCommand::Env(false))
+        );
+        assert_eq!(
+            PlasticCommand::parse(&["env", "on"]),
+            Ok(PlasticCommand::Env(true))
+        );
+        assert_eq!(PlasticCommand::parse(&["env", "maybe"]), Err(PLASTIC_USAGE));
+        let mut s = PlasticSettings::default();
+        assert!(s.env);
+        assert_eq!(s.uniform_ext()[1], 1.0);
+        s.apply(PlasticCommand::Env(false));
+        assert_eq!(s.uniform_ext()[1], 0.0);
+        assert!(PLASTIC_USAGE.contains("env [on|off]"));
     }
 }
