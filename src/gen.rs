@@ -457,9 +457,16 @@ impl CoordSystem {
         Self::cube_to_sphere(cx, cy, cz).normalize()
     }
 
+    // get_direction_f for hex geometry: on the ring faces a hex cell can reach half a column beyond the
+    // face's u border (hex.rs), and such a point lies on the neighbouring face
+    pub fn get_direction_hex(face: u8, u: f64, v: f64, res: u32) -> Vec3 {
+        let (face, u) = crate::hex::ring_wrap(face, u, res);
+        Self::get_direction_f(face, u, v, res)
+    }
+
     // a hex corner (face space in sixths of a column, hex.rs) at the bottom of `layer`
     pub fn get_vertex_pos_six(face: u8, u6: i64, v6: i64, layer: u32, res: u32) -> Vec3 {
-        Self::get_direction_f(face, u6 as f64 / 6.0, v6 as f64 / 6.0, res)
+        Self::get_direction_hex(face, u6 as f64 / 6.0, v6 as f64 / 6.0, res)
             * Self::get_layer_radius(layer, res)
     }
 }

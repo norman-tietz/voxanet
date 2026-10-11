@@ -1440,6 +1440,40 @@ mod hex_tests {
         )
     }
 
+    // the ring wrap follows the cube: a seam point is the same world point from both faces, and a point
+    // beyond the seam continues the step that led up to it onto the neighbouring face
+    #[test]
+    fn ring_wrap_matches_the_cube() {
+        for res in [16u32, 15] {
+            let r = res as f64;
+            for face in 0..4u8 {
+                for hi in [false, true] {
+                    for v in [0.0, 0.5, 7.25, r] {
+                        let edge = if hi { r } else { 0.0 };
+                        let out = |d: f64| if hi { r + d } else { -d };
+                        let (f, w) = crate::hex::ring_wrap(face, out(1e-9), res);
+                        let seam_here = CoordSystem::get_direction_f(face, edge, v, res);
+                        let seam_there = CoordSystem::get_direction_f(f, w, v, res);
+                        assert!(seam_here.distance(seam_there) < 1e-5, "{face} {hi} {v}");
+                        // a quarter column beyond continues the step from a quarter column inside
+                        // (not near the ±Z edges, where the mapping bends the path around the corner)
+                        if v < 4.0 || v > r - 4.0 {
+                            continue;
+                        }
+                        let inside = CoordSystem::get_direction_f(face, out(-0.25), v, res);
+                        let beyond = CoordSystem::get_direction_hex(face, out(0.25), v, res);
+                        let (a, b) = (seam_here - inside, beyond - seam_here);
+                        assert!(a.normalize().dot(b.normalize()) > 0.95, "{face} {hi} {v}");
+                        assert!(
+                            (a.length() / b.length() - 1.0).abs() < 0.2,
+                            "{face} {hi} {v}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn fractional_directions_match_the_grid_corners() {
         let res = 16;

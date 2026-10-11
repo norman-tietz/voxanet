@@ -31,6 +31,49 @@ fn zig6_at(row: i64, x: i64) -> i64 {
     6 * row - 1 + 2 * (t - 3).abs() / 3
 }
 
+// the ring: the four faces around the Z axis (+Y, −Y, +X, −X). Their v runs along Z in the same
+// direction, so their rows meet across the four seams between them with the same row index, and the
+// honeycomb continues across those seams (faces 1 and 2 mirrored, see shift6)
+pub fn ring(face: u8) -> bool {
+    face < 4
+}
+
+// the ring face across `face`'s u border (hi: beyond u = res, else below u = 0) and how its u follows
+// from this face's: u' = a·u + b·res (exact in sixths with 6·res), from CoordSystem's face layout
+pub fn ring_neighbour(face: u8, hi: bool) -> (u8, i64, i64) {
+    match (face, hi) {
+        (0, true) => (2, -1, 2),
+        (0, false) => (3, 1, 1),
+        (1, true) => (2, 1, -1),
+        (1, false) => (3, -1, 0),
+        (2, true) => (0, -1, 2),
+        (2, false) => (1, 1, 1),
+        (3, true) => (0, 1, -1),
+        (3, false) => (1, -1, 0),
+        _ => unreachable!("face {face} is not on the ring"),
+    }
+}
+
+// a ring-face u beyond its border (by at most a column) on the face it lies on; v is unchanged. In
+// range, or off the ring: unchanged
+pub fn ring_wrap(face: u8, u: f64, res: u32) -> (u8, f64) {
+    let r = res as f64;
+    if !ring(face) || (0.0..=r).contains(&u) {
+        return (face, u);
+    }
+    let (f, a, b) = ring_neighbour(face, u > r);
+    (f, a as f64 * u + b as f64 * r)
+}
+
+// u of a point on `face` in the extended coordinates of the neighbouring ring face `owner` (the
+// inverse of ring_wrap: u = a·(u' − b·res), a = ±1)
+pub fn ring_extend(owner: u8, face: u8, u: f64, res: u32) -> f64 {
+    let hi = ring_neighbour(owner, true).0 == face;
+    let (f, a, b) = ring_neighbour(owner, hi);
+    debug_assert_eq!(f, face, "faces {owner} and {face} don't share a ring seam");
+    a as f64 * (u - b as f64 * res as f64)
+}
+
 // the cell containing face-space point (u, v) (both in columns, the face is [0, res]²; points outside
 // are clamped onto the border cells)
 pub fn cell_at(u: f64, v: f64, res: u32) -> (u32, u32) {
@@ -376,5 +419,33 @@ mod tests {
             }
         }
         assert_eq!(border_len, 4 * n6);
+    }
+
+    // the ring table undoes itself: a point beyond a ring border, wrapped to its face and extended back
+    #[test]
+    fn ring_wrap_and_extend_undo_each_other() {
+        for res in [8u32, 9] {
+            let r = res as f64;
+            for face in 0..4u8 {
+                for u in [-0.5, -0.25, -0.01, r + 0.01, r + 0.25, r + 0.5] {
+                    let (f, w) = ring_wrap(face, u, res);
+                    assert_ne!(f, face);
+                    assert!((0.0..=r).contains(&w), "{face} {u} -> {f} {w}");
+                    assert!((ring_extend(face, f, w, res) - u).abs() < 1e-12);
+                }
+                // in range: unchanged
+                assert_eq!(ring_wrap(face, 3.5, res), (face, 3.5));
+            }
+            assert_eq!(ring_wrap(4, -0.5, res), (4, -0.5));
+            // the table is symmetric: crossing back over the same seam
+            for face in 0..4u8 {
+                for hi in [false, true] {
+                    let (f, ..) = ring_neighbour(face, hi);
+                    assert!([true, false]
+                        .iter()
+                        .any(|&h| ring_neighbour(f, h).0 == face));
+                }
+            }
+        }
     }
 }
