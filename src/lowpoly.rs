@@ -1212,6 +1212,28 @@ mod tests {
         assert!(max < 2.0 && p99 < 1.0 && mean < 0.25, "{max} {p99} {mean}");
     }
 
+    // per planet type, res 64, seed HOME_SEED. Bounds = measured + 20 % (rounded up to 0.1), measured on
+    // 2026-10-11; they pin regressions, they are not a quality bar. (type, max bound, p99 bound)
+    #[test]
+    fn smooth_surface_stays_near_the_blocks_on_every_type() {
+        use crate::biome::PlanetType as T;
+        let bounds = [
+            (T::EarthLike, 2.1, 1.0),
+            (T::Volcanic, 3.0, 1.4),
+            (T::Ice, 1.1, 0.6),
+            (T::Desert, 2.2, 1.5),
+            (T::Toxic, 1.2, 0.8),
+            (T::Ocean, 2.7, 1.2),
+            (T::Shattered, 2.4, 1.1),
+        ];
+        for (t, max_bound, p99_bound) in bounds {
+            let planet = PlanetData::new_for_type(64, crate::noise::HOME_SEED, t);
+            let (max, p99, mean, over) = smooth_mismatch(&planet);
+            println!("{t:?}: max {max} p99 {p99} mean {mean} share>1 {over}");
+            assert!(max <= max_bound && p99 <= p99_bound, "{t:?}: {max} {p99}");
+        }
+    }
+
     // the same on the game's start planet (res 337): measured max 2.78, p99 0.56, mean 0.16 layers —
     // up to ~3 layers on crests and valleys (cargo test --release start_planet_smooth -- --ignored)
     #[test]

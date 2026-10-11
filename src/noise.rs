@@ -224,10 +224,163 @@ impl TerrainShape {
 
     // height above (or below) sea level for a direction on the unit sphere, before lakes are carved
     pub(crate) fn natural_height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
-        #[allow(clippy::match_single_binding)]
         match self.planet_type {
-            _ => self.earth_like(g, dir),
+            PlanetType::EarthLike => self.earth_like(g, dir),
+            PlanetType::Volcanic => self.volcanic(g, dir),
+            PlanetType::Ice => self.ice(g, dir),
+            PlanetType::Desert => self.desert(g, dir),
+            PlanetType::Toxic => self.toxic(g, dir),
+            PlanetType::Ocean => self.ocean(g, dir),
+            PlanetType::Shattered => self.shattered(g, dir),
         }
+    }
+
+    // the ocean floor / lowland base Earth-like uses, for continent mask `c`
+    fn base(&self, c: f32) -> f32 {
+        if c < 0.0 {
+            -0.4 * self.relief * smoothstep(0.0, 0.12, -c)
+        } else {
+            0.12 * self.relief * smoothstep(0.0, 0.12, c)
+        }
+    }
+
+    // a smooth ceiling at 1.2R: heights below ~0.8R unchanged, never above 1.2R
+    fn soft_cap(&self, h: f32) -> f32 {
+        let cap = 1.2 * self.relief;
+        let knee = 0.8 * self.relief;
+        if h <= knee {
+            h
+        } else {
+            knee + (cap - knee) * ((h - knee) / (cap - knee)).tanh()
+        }
+    }
+
+    // cellular noise at a feature size of `blocks` columns (constant in blocks on every planet size)
+    fn cells(&self, g: &NoiseGenerator, dir: Vec3, blocks: f32, salt: Vec3) -> (f32, f32, f32) {
+        g.cellular(dir * (self.resolution as f32 / 2.0 / blocks) + salt)
+    }
+
+    // jagged ridges on all land, calderas with lava-filled bowls, narrow fissures
+    fn volcanic(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        let land = smoothstep(-0.02, 0.12, c);
+        if land == 0.0 {
+            return self.soft_cap(self.base(c)); // every other term is scaled by `land`: skip the noise
+        }
+        let ridges = g
+            .ridged(dir * self.ridge_freq * 1.5 + Vec3::new(3.1, -8.2, 5.5), 5)
+            .powi(2)
+            * 0.8
+            * r
+            * land;
+        let (f1, _, h) = self.cells(g, dir, 60.0, Vec3::new(-4.4, 2.2, 9.9));
+        let caldera = if h < 0.5 {
+            let rim = (-((f1 - 0.45) / 0.08).powi(2)).exp() * 0.5 * r;
+            let bowl = smoothstep(0.4, 0.2, f1) * 1.0 * r;
+            (rim - bowl) * land
+        } else {
+            0.0
+        };
+        let fissure = smoothstep(
+            0.9,
+            0.97,
+            g.ridged(dir * self.hill_freq * 0.7 + Vec3::new(12.0, 1.0, -3.0), 3),
+        ) * 0.4
+            * r
+            * land;
+        self.soft_cap(self.base(c) + ridges + caldera - fissure)
+    }
+
+    // smooth billow land, frozen seas (the fill), rare wide ice spikes
+    fn ice(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        let land = smoothstep(-0.02, 0.12, c);
+        let hills =
+            g.billow(dir * self.hill_freq * 0.6 + Vec3::new(7.7, 0.3, -2.9), 2) * 0.15 * r * land;
+        // a spike per lucky cell (cells of 40 columns): a flat top ~2.4 columns across, sloping out to a
+        // 10-column radius, so neighbouring columns differ by <= ~0.2R (the width test) and the low-poly
+        // smoothing keeps it
+        let (f1, _, h) = self.cells(g, dir, 40.0, Vec3::new(1.5, 6.6, -7.1));
+        let spike = if h < 0.15 {
+            smoothstep(0.25, 0.03, f1) * 1.0 * r
+        } else {
+            0.0
+        };
+        self.soft_cap(self.base(c) * 0.5 + hills + spike)
+    }
+
+    // terraced mesas, canyons ending just above the flats, low dunes
+    fn desert(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        let land = smoothstep(-0.02, 0.12, c);
+        let mesa =
+            g.ridged(dir * self.range_freq * 2.0 + Vec3::new(-6.0, 4.0, 2.0), 4) * 0.7 * r * land;
+        let stepped = terrace(self.base(c) + mesa, (r / 8.0).max(2.0), 0.15);
+        let dunes =
+            g.billow(dir * self.hill_freq * 1.5 + Vec3::new(2.0, -9.0, 4.4), 3) * 0.05 * r * land;
+        let h = stepped + dunes;
+        let canyon = smoothstep(
+            0.88,
+            0.96,
+            g.ridged(dir * self.hill_freq * 0.5 + Vec3::new(9.1, 9.2, 9.3), 3),
+        ) * land;
+        // canyons cut toward sea level + 1, never below (the fill would flatten them)
+        let h = if h > 1.0 { h - canyon * (h - 1.0) } else { h };
+        self.soft_cap(h)
+    }
+
+    // flat land pocked with craters whose floors lie below sea level
+    fn toxic(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        let land = smoothstep(-0.02, 0.12, c);
+        let flat = if c < 0.0 {
+            self.base(c)
+        } else {
+            0.05 * r * smoothstep(0.0, 0.12, c)
+        } + g.fbm(dir * self.hill_freq + Vec3::new(0.7, -0.7, 3.3), 3) * 0.03 * r * land;
+        let (f1, _, h) = self.cells(g, dir, 30.0, Vec3::new(-2.2, -5.5, 8.8));
+        let rc = 0.15 + 0.2 * h; // crater radius in cell units, by the cell's hash
+        let bowl = smoothstep(rc, rc * 0.4, f1) * 0.4 * r;
+        let rim = (-((f1 - rc) / 0.05).powi(2)).exp() * 0.1 * r;
+        self.soft_cap(flat + (rim - bowl) * land)
+    }
+
+    // deep sea, steep rocky islands where the mask breaks through
+    fn ocean(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        if c < 0.0 {
+            return -0.6 * r * smoothstep(0.0, 0.15, -c);
+        }
+        let rise = smoothstep(0.0, 0.03, c);
+        let hills = g.fbm(dir * self.hill_freq + Vec3::new(4.0, 4.0, -1.0), 4) * 0.3 * r;
+        self.soft_cap(rise * (0.5 * r + hills))
+    }
+
+    // tectonic plates at their own heights, deep cracks between them, shard ridges on top
+    fn shattered(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let c = self.continent(g, dir);
+        if c < 0.0 {
+            return self.base(c);
+        }
+        let land = smoothstep(-0.02, 0.12, c);
+        let (f1, f2, h) = self.cells(g, dir, 50.0, Vec3::new(5.0, -1.0, 7.0));
+        let tilt = g.fbm(
+            dir * self.range_freq * 4.0 + Vec3::new(h * 10.0, 0.0, 0.0),
+            2,
+        ) * 0.1
+            * r;
+        let plate = (-0.3 + 0.9 * h) * r + tilt;
+        let shards = g.ridged(dir * self.hill_freq + Vec3::new(-8.0, 3.0, 1.0), 3) * 0.2 * r;
+        let top = self.base(c) + (plate + shards) * land;
+        // the crack: where the two nearest cells are about equally near (>= 2 columns wide at 50-column cells)
+        let crack = smoothstep(0.06, 0.0, f2 - f1) * land;
+        self.soft_cap(top + crack * (-0.3 * r - top))
     }
 
     pub(crate) fn earth_like(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
@@ -276,7 +429,6 @@ fn lake_hash(seed: u32, k: u32, salt: u32) -> f32 {
 
 // a height quantised into steps of `step` with the step edges rounded over the last `softness` of each
 // step (0..1): flat treads, steep risers — mesas and strata
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn terrace(h: f32, step: f32, softness: f32) -> f32 {
     let k = h / step;
     let f = k.floor();
@@ -287,7 +439,7 @@ pub(crate) fn terrace(h: f32, step: f32, softness: f32) -> f32 {
 pub(crate) fn land_offset(t: PlanetType) -> f32 {
     match t {
         PlanetType::Desert => 0.5,
-        PlanetType::Ocean => -0.35,
+        PlanetType::Ocean => -0.25,
         _ => 0.08,
     }
 }
@@ -438,7 +590,6 @@ impl NoiseGenerator {
     }
 
     // billow noise, 0..1: soft rounded mounds (1 − |perlin| per octave)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn billow(&self, p: Vec3, octaves: u32) -> f32 {
         let (mut sum, mut amp, mut norm, mut freq) = (0.0, 1.0, 0.0, 1.0);
         for _ in 0..octaves {
@@ -454,7 +605,6 @@ impl NoiseGenerator {
     // hash of the cell and the seed. Returns the distances to the nearest (f1) and second-nearest (f2)
     // feature point and the nearest cell's own hash in 0..1 (per-cell choices: which cells get a
     // caldera, how high a plate sits)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cellular(&self, p: Vec3) -> (f32, f32, f32) {
         let base = p.floor();
         let (mut f1, mut f2, mut h1) = (f32::MAX, f32::MAX, 0.0);
@@ -478,7 +628,6 @@ impl NoiseGenerator {
     }
 
     // four values in 0..1 for an integer cell (splitmix64 over the seed and the cell coordinates)
-    #[cfg_attr(not(test), allow(dead_code))]
     fn cell_hash(&self, c: Vec3) -> [f32; 4] {
         let (x, y, z) = (
             c.x as i32 as u32 as u64,
@@ -869,6 +1018,177 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn fib_dirs(n: usize) -> Vec<Vec3> {
+        (0..n)
+            .map(|i| {
+                let y = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
+                let r = (1.0 - y * y).sqrt();
+                let a = i as f32 * 2.399_963;
+                Vec3::new(r * a.cos(), y, r * a.sin())
+            })
+            .collect()
+    }
+
+    fn shape_of(t: PlanetType, res: u32, seed: u32) -> (TerrainShape, NoiseGenerator) {
+        let g = NoiseGenerator::new(seed);
+        (TerrainShape::new(res, &g, t, false), g)
+    }
+
+    // share of sampled directions whose natural height satisfies `f`
+    fn share(
+        t: PlanetType,
+        res: u32,
+        f: impl Fn(&TerrainShape, &NoiseGenerator, Vec3, f32) -> bool,
+    ) -> f32 {
+        let (s, g) = shape_of(t, res, 11);
+        let dirs = fib_dirs(20000);
+        dirs.iter()
+            .filter(|&&d| f(&s, &g, d, s.natural_height(&g, d)))
+            .count() as f32
+            / dirs.len() as f32
+    }
+
+    #[test]
+    fn ocean_is_mostly_water() {
+        let land = share(PlanetType::Ocean, 256, |_, _, _, h| h > 0.0);
+        println!("ocean land {land}");
+        assert!((0.02..0.10).contains(&land), "{land}");
+    }
+
+    #[test]
+    fn desert_is_land_with_canyons_above_the_flats() {
+        let land = share(PlanetType::Desert, 256, |_, _, _, h| h > 0.0);
+        let thin = share(PlanetType::Desert, 256, |_, _, _, h| h > 0.0 && h < 0.99);
+        println!("desert land {land} thin {thin}");
+        assert!(land >= 0.85);
+        // canyon floors stop at sea level + 1: almost nothing lies just above sea level
+        assert!(thin < 0.01);
+    }
+
+    #[test]
+    fn ice_spikes_are_rare_and_wide() {
+        let res = 256;
+        let (s, g) = shape_of(PlanetType::Ice, res, 11);
+        let r = s.relief;
+        let high = share(PlanetType::Ice, res, |_, _, _, h| h > 0.6 * r);
+        println!("ice spikes {high}");
+        assert!(high > 0.0 && high < 0.03, "{high}");
+        // every spike column has high neighbours one column away along two tangent axes
+        let step = 1.0 / (res as f32 / 2.0);
+        for d in fib_dirs(20000) {
+            if s.natural_height(&g, d) > 0.6 * r {
+                let a = d.cross(Vec3::Y).normalize_or_zero();
+                let a = if a == Vec3::ZERO { Vec3::X } else { a };
+                let b = d.cross(a);
+                for o in [a, -a, b, -b] {
+                    let n = (d + o * step).normalize();
+                    assert!(s.natural_height(&g, n) > 0.4 * r, "narrow spike at {d}");
+                }
+            }
+        }
+    }
+
+    // calderas, craters and cracks: land interior below sea level (Earth has almost none)
+    #[test]
+    fn hollows_reach_below_sea_level() {
+        let inland_low = |t| share(t, 256, |s, g, d, h| s.continent(g, d) > 0.15 && h < 0.0);
+        assert!(inland_low(PlanetType::EarthLike) < 0.005);
+        for t in [
+            PlanetType::Volcanic,
+            PlanetType::Toxic,
+            PlanetType::Shattered,
+        ] {
+            println!("{t:?} hollows {}", inland_low(t));
+            assert!(inland_low(t) > 0.01, "{t:?}: {}", inland_low(t));
+        }
+    }
+
+    #[test]
+    fn toxic_land_is_flat_and_shattered_is_not() {
+        let (s, _) = shape_of(PlanetType::Toxic, 256, 11);
+        let r = s.relief;
+        let dry = share(PlanetType::Toxic, 256, |s, g, d, h| {
+            s.continent(g, d) > 0.15 && h >= 0.0
+        });
+        let flat = share(PlanetType::Toxic, 256, |s, g, d, h| {
+            s.continent(g, d) > 0.15 && h >= 0.0 && h <= 0.25 * r
+        });
+        println!("toxic flat {flat} of dry {dry}");
+        assert!(flat >= 0.8 * dry, "{flat} of {dry}");
+        // Shattered: plates at different heights (spread of inland heights)
+        let (s, g) = shape_of(PlanetType::Shattered, 256, 11);
+        let hs: Vec<f32> = fib_dirs(20000)
+            .into_iter()
+            .filter(|&d| s.continent(&g, d) > 0.15)
+            .map(|d| s.natural_height(&g, d))
+            .collect();
+        let mean = hs.iter().sum::<f32>() / hs.len() as f32;
+        let sd = (hs.iter().map(|h| (h - mean).powi(2)).sum::<f32>() / hs.len() as f32).sqrt();
+        println!("shattered sd {sd} relief {}", s.relief);
+        assert!(sd > 0.15 * s.relief, "{sd}");
+    }
+
+    // Review Focus 5 and 1
+    #[test]
+    fn profiles_stay_within_the_relief_cap() {
+        for res in [64, 500] {
+            for t in [
+                PlanetType::Volcanic,
+                PlanetType::Ice,
+                PlanetType::Desert,
+                PlanetType::Toxic,
+                PlanetType::Ocean,
+                PlanetType::Shattered,
+            ] {
+                let (s, g) = shape_of(t, res, 3);
+                let max = fib_dirs(20000)
+                    .into_iter()
+                    .map(|d| s.natural_height(&g, d))
+                    .fold(f32::MIN, f32::max);
+                assert!(
+                    max <= 1.2 * s.relief + 1e-3,
+                    "{t:?} res {res}: {max} > 1.2 × {}",
+                    s.relief
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_differ_and_are_deterministic() {
+        let d = Vec3::new(0.3, 0.2, 0.93).normalize();
+        let heights: Vec<f32> = PlanetType::ALL
+            .iter()
+            .map(|&t| {
+                let (s, g) = shape_of(t, 128, 9);
+                s.natural_height(&g, d)
+            })
+            .collect();
+        let (s, g) = shape_of(PlanetType::Desert, 128, 9);
+        assert_eq!(
+            s.natural_height(&g, d),
+            heights[PlanetType::ALL
+                .iter()
+                .position(|&t| t == PlanetType::Desert)
+                .unwrap()]
+        );
+        let distinct = heights
+            .iter()
+            .enumerate()
+            .all(|(i, a)| heights.iter().skip(i + 1).all(|b| a != b));
+        assert!(distinct, "{heights:?}");
+    }
+
+    #[test]
+    #[ignore] // cargo test --release terrain_bake_bench -- --ignored --nocapture
+    fn terrain_bake_bench() {
+        for t in PlanetType::ALL {
+            let start = std::time::Instant::now();
+            let _ = PlanetTerrain::for_type(500, 3, t, t.def().liquid.is_some());
+            println!("{t:?}: {:?}", start.elapsed());
         }
     }
 }

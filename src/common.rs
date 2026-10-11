@@ -412,13 +412,13 @@ impl PlanetData {
         layer // below the floor everything is bedrock
     }
 
-    // picks a spawn direction: `preferred` unless the active liquid is damaging and `preferred`'s
-    // column is underwater (an unescapable death loop, since floating alone still ticks damage), in
-    // which case it searches a dense, evenly-spread set of directions over the whole sphere for a dry
-    // one
+    // picks a spawn direction: on liquid planets `preferred` unless its column holds liquid, in which
+    // case it searches a dense, evenly-spread set of directions over the whole sphere for a dry one
+    // (dry land preferred everywhere; required where the liquid is damaging, an unescapable death loop
+    // since floating alone still ticks damage)
     pub fn safe_spawn_direction(&self, preferred: glam::Vec3) -> glam::Vec3 {
-        let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging());
-        if !damaging {
+        let liquid = self.planet_type.def().liquid.is_some();
+        if !liquid {
             return preferred;
         }
         // whether the column under `dir` holds the liquid (a lake or the sea)
@@ -1431,6 +1431,30 @@ pub(crate) mod tests {
             let r = crate::gen::CoordSystem::get_layer_radius_f(layer, 32);
             assert!((crate::gen::CoordSystem::layer_of_radius(r, 32) - layer).abs() < 1e-3);
         }
+    }
+
+    // Review Focus 4
+    #[test]
+    fn ocean_spawn_prefers_dry_land() {
+        let planet = PlanetData::new_for_type(128, 11, PlanetType::Ocean);
+        // a wet preferred direction: the first wet one on a coarse sweep
+        let wet = (0..200)
+            .map(|k| {
+                let a = k as f32 * 0.31;
+                glam::Vec3::new(a.cos(), (k as f32 * 0.17).sin(), a.sin()).normalize()
+            })
+            .find(|&d| {
+                planet
+                    .cell_at(d * 64.0)
+                    .is_some_and(|id| planet.holds_water(id.face, id.u, id.v))
+            })
+            .expect("an Ocean planet has water");
+        let dir = planet.safe_spawn_direction(wet);
+        let id = planet.cell_at(dir * 64.0).unwrap();
+        assert!(
+            !planet.holds_water(id.face, id.u, id.v),
+            "spawned in the water"
+        );
     }
 }
 
