@@ -130,6 +130,7 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/view [first\|third]` | Show or switch camera mode from the console |
 | `/style [hex\|lowpoly\|cubes]` | Show or switch the terrain style (hex is the default) |
 | `/shadow [on\|off\|sun <0-10>]` | Show or set the sun's size (degrees) for soft shadows; `off` = a fixed edge width |
+| `/weather [on\|off\|auto\|clear\|rain\|storm\|snow]` | Show the weather where you stand, force a weather around you for testing (`auto` returns to the natural weather; `snow` falls as ash on volcanic planets), or turn weather off |
 | `/galaxy home` | Return to the start planet, standing at local noon |
 | `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
 | `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`) and radius (20–500) on the next orbit outward (up to 15 planets) |
