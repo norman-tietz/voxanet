@@ -138,7 +138,7 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/jump <n>` | Jump to solar system `n` of the galaxy |
 | `/map [n]` | Toggle the solar-system map, or open it with planet `n` selected |
 | `/travel <n>` | Fly to planet `n`'s orbit (as from the map) |
-| `/system home` | Return to the start planet, standing at local noon |
+| `/system home` | Return to the start planet, standing at local noon; from another solar system, jump back to the start system first |
 | `/system goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
 | `/system add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`, `desert`, `toxic`, `ocean`, `shattered`) and radius (20–500) on the next orbit outward (up to 15 planets) |
 

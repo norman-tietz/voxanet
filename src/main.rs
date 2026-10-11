@@ -184,8 +184,20 @@ fn near_impostor_outdated(built_at: u64, planet: &PlanetData) -> bool {
     planet.edit_generation() != built_at
 }
 
-// a near impostor rebuilt in the background: (planet index, edit generation it shows, mesh)
-type ImpostorRebuild = (usize, u64, Vec<crate::planet::data::Vertex>, Vec<u32>);
+// a near impostor rebuilt in the background: (solar system, planet index, edit generation it shows, mesh)
+type ImpostorRebuild = (
+    usize,
+    usize,
+    u64,
+    Vec<crate::planet::data::Vertex>,
+    Vec<u32>,
+);
+
+// whether the voxel world `loaded` (system, planet) is planet `i` of the current solar system: a planet
+// index alone names a different planet in every system
+fn loaded_here(loaded: (usize, usize), current: usize, i: usize) -> bool {
+    loaded == (current, i)
+}
 
 // makes a baked planet the voxel engine's world: palette, full mesh reload streaming from
 // `stream_from` (planet frame), near impostor for the space renderer
@@ -311,6 +323,25 @@ impl Jump {
             switched: false,
             then_home,
         }
+    }
+
+    // the fade back in starts now, from black: after the switch's work (and a synchronous home bake),
+    // which can outlast the fade out and would otherwise skip the fade in
+    fn begin_fade_in(&mut self) {
+        let fade_out = std::time::Duration::from_secs_f32(JUMP_FADE_SECS);
+        self.started = Instant::now()
+            .checked_sub(fade_out)
+            .unwrap_or_else(Instant::now);
+    }
+
+    // `/system home` from another system while this jump runs: one still on its way to the start system
+    // goes home on arrival (true); any other is left alone (false: "Jump in progress.")
+    fn queue_home(&mut self) -> bool {
+        let goes_home = !self.switched && self.target == 0;
+        if goes_home {
+            self.then_home = true;
+        }
+        goes_home
     }
 
     // the black fade's opacity `elapsed` seconds in: rising before the switch, falling after it
@@ -716,8 +747,9 @@ impl Game {
                         t,
                     );
                     *travel = Some(Travel::Cruise(trip));
-                    let loaded_here = *loaded_system == universe.current && *loaded_world == target;
-                    if !loaded_here && *baking != Some(target) {
+                    let here =
+                        loaded_here((*loaded_system, *loaded_world), universe.current, target);
+                    if !here && *baking != Some(target) {
                         *bake_rx = Some(start_bake(
                             system,
                             universe.current,
@@ -828,8 +860,8 @@ impl Game {
                     );
                     // capture bakes the planet's voxel world in the background, unless it's loaded
                     // (the loaded world counts only if it belongs to this solar system)
-                    let loaded_here = *loaded_system == universe.current && *loaded_world == i;
-                    if !loaded_here && *baking != Some(i) {
+                    let here = loaded_here((*loaded_system, *loaded_world), universe.current, i);
+                    if !here && *baking != Some(i) {
                         // the stored edits stay in the store until this bake is installed, so a
                         // dropped bake loses nothing
                         *bake_rx = Some(start_bake(
@@ -842,7 +874,7 @@ impl Game {
                     }
                     // once loaded, the voxel engine streams from the flight's planet-frame position,
                     // so its meshes are ready by the time the landing handover needs them
-                    if loaded_here {
+                    if here {
                         renderer.update_view(space_flight.position.as_vec3(), planet);
                         if !*voxel_ready_announced && renderer.view_covered() {
                             println!("Voxel world for #{} ready", i + 1);
@@ -954,11 +986,15 @@ impl Game {
             && near_impostor_outdated(*impostor_generation, planet)
         {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (index, generation, data) =
-                (*loaded_world, planet.edit_generation(), planet.clone());
+            let (system_index, index, generation, data) = (
+                *loaded_system,
+                *loaded_world,
+                planet.edit_generation(),
+                planet.clone(),
+            );
             std::thread::spawn(move || {
                 let (v, i) = crate::space::impostor::near_impostor_mesh(&data);
-                let _ = tx.send((index, generation, v, i));
+                let _ = tx.send((system_index, index, generation, v, i));
             });
             *impostor_rx = Some(rx);
         }
@@ -966,10 +1002,13 @@ impl Game {
         if let Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) = rebuilt {
             *impostor_rx = None; // the rebuild thread died: allow a new one
         }
-        if let Some(Ok((index, generation, v, i))) = rebuilt {
+        if let Some(Ok((built_system, index, generation, v, i))) = rebuilt {
             *impostor_rx = None;
-            // dropped if another planet was installed meanwhile
-            if index == *loaded_world && *loaded_system == universe.current {
+            // dropped if another planet (the same index in another system too) was installed meanwhile,
+            // or the player is in another system
+            if built_system == universe.current
+                && loaded_here((*loaded_system, *loaded_world), built_system, index)
+            {
                 renderer.set_near_impostor(index, &v, &i);
                 *impostor_generation = generation;
             }
@@ -1006,7 +1045,9 @@ impl Game {
                 );
             } else if n == universe.current {
                 renderer.show_status("You are here.");
-            } else if jump.is_none() {
+            } else if jump.is_some() {
+                renderer.show_status("Jump in progress.");
+            } else {
                 close_map(map, controller);
                 close_map(galaxy_view, controller);
                 *jump = Some(Jump::new(n, false));
@@ -1044,6 +1085,10 @@ impl Game {
                 *flight_frame = FlightFrame::Free;
                 *mode = GameMode::Space;
                 controller.fly_mode = false;
+                // arrival: "mode Space, map closed" — whatever was opened during the fade out (or
+                // before /system home) closes, restoring the mouse, before the controls are set
+                close_map(map, controller);
+                close_map(galaxy_view, controller);
                 enter_space_controls(controller, map);
                 let entry = &universe.galaxy.systems[universe.current];
                 console.log(
@@ -1057,7 +1102,9 @@ impl Game {
                 if j.then_home {
                     console.system_request = Some(crate::app::cmd::SystemRequest::Home);
                 }
+                j.begin_fade_in();
             }
+            let elapsed = j.started.elapsed().as_secs_f32();
             renderer.set_fade(Jump::fade(elapsed));
             if elapsed >= 2.0 * JUMP_FADE_SECS {
                 *jump = None;
@@ -1073,7 +1120,14 @@ impl Game {
             match request {
                 SystemRequest::Home if universe.current != 0 => {
                     // home is in the start system: jump there first, then home (Jump::then_home)
-                    *jump = Some(Jump::new(0, true));
+                    match jump {
+                        Some(j) => {
+                            if !j.queue_home() {
+                                renderer.show_status("Jump in progress.");
+                            }
+                        }
+                        None => *jump = Some(Jump::new(0, true)),
+                    }
                 }
                 SystemRequest::Home => {
                     // a running bake was for wherever the player was flying: drop it, and the trip too
@@ -1082,7 +1136,7 @@ impl Game {
                     *travel = None;
                     renderer.travel_hud = None;
                     let i = *start_planet;
-                    if !(*loaded_system == 0 && *loaded_world == i) {
+                    if !loaded_here((*loaded_system, *loaded_world), 0, i) {
                         let baked = bake_planet(system, 0, i, edits_by_planet.remove(&(0, i)));
                         let generation = baked.impostor_generation;
                         // the time after the bake: the planet keeps turning while it bakes
@@ -1098,6 +1152,11 @@ impl Game {
                         *impostor_generation = generation;
                         *loaded_world = i;
                         *loaded_system = 0;
+                        // the bake ran under the black frame of the jump home: fade in from black now
+                        if let Some(j) = jump.as_mut().filter(|j| j.switched && j.then_home) {
+                            j.begin_fade_in();
+                            renderer.set_fade(1.0);
+                        }
                     }
                     let t = clock.now();
                     player.spawn(noon_spawn(planet, system, i, t));
@@ -1221,6 +1280,8 @@ impl Game {
             match (request, map.is_some()) {
                 (None, true) => close_map(map, controller),
                 (selected, _) => {
+                    // one overlay at a time: the galaxy view closes, as /galaxy closes the map
+                    close_map(galaxy_view, controller);
                     let m = map.get_or_insert_with(|| open_map(controller));
                     if let Some(i) = selected.filter(|&i| i < system.planets.len()) {
                         m.selected = Some(i);
@@ -1970,6 +2031,40 @@ mod tests {
         stash_edits(&mut store, Some(2), 5, &mut planet);
         assert!(store.get(&2).is_some_and(|e| !e.is_empty()));
         assert!(planet.edits.is_empty());
+    }
+
+    #[test]
+    fn the_loaded_world_compares_as_system_and_planet() {
+        assert!(loaded_here((0, 3), 0, 3));
+        assert!(!loaded_here((0, 3), 1, 3)); // planet #4 of another system
+        assert!(!loaded_here((1, 3), 0, 3));
+        assert!(!loaded_here((0, 3), 0, 2));
+    }
+
+    #[test]
+    fn the_fade_in_restarts_from_black_after_the_switch() {
+        let mut j = Jump::new(1, true);
+        j.started = Instant::now() - std::time::Duration::from_secs(5); // a slow switch / home bake
+        assert_eq!(Jump::fade(j.started.elapsed().as_secs_f32()), 0.0);
+        j.begin_fade_in();
+        let f = Jump::fade(j.started.elapsed().as_secs_f32());
+        assert!(f > 0.9, "fade {f}");
+    }
+
+    #[test]
+    fn home_during_a_jump_waits_for_it() {
+        // on its way to the start system: home on arrival
+        let mut j = Jump::new(0, false);
+        assert!(j.queue_home());
+        assert!(j.then_home);
+        // anywhere else, or already switched: left alone
+        let mut j = Jump::new(4, false);
+        assert!(!j.queue_home());
+        assert!(!j.then_home);
+        let mut j = Jump::new(0, false);
+        j.switched = true;
+        assert!(!j.queue_home());
+        assert!(!j.then_home);
     }
 
     #[test]

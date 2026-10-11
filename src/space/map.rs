@@ -67,9 +67,12 @@ impl MapLayout {
     }
 }
 
-// the nearest sphere a ray hits (index, centre, radius); None if it misses all
+// the sphere (index, centre, radius) a ray hits most centrally: the smallest distance between the ray and
+// the centre relative to the radius, so among the overlapping pick spheres of screen-sized markers (each
+// the same pixel radius) the one closest to the cursor wins, not the one nearest the camera; ties (a ray
+// through two centres) go to the front one. None if it misses all
 pub fn pick(origin: Vec3, dir: Vec3, spheres: &[(usize, Vec3, f32)]) -> Option<usize> {
-    let mut best: Option<(f32, usize)> = None;
+    let mut best: Option<(f32, f32, usize)> = None;
     for &(i, c, r) in spheres {
         let oc = origin - c;
         let b = oc.dot(dir);
@@ -78,12 +81,39 @@ pub fn pick(origin: Vec3, dir: Vec3, spheres: &[(usize, Vec3, f32)]) -> Option<u
             continue;
         }
         let t = -b - disc.sqrt();
-        if t > 0.0 && best.is_none_or(|(bt, _)| t < bt) {
-            best = Some((t, i));
+        if t <= 0.0 {
+            continue;
+        }
+        let off = (oc - dir * oc.dot(dir)).length() / r.max(1e-9);
+        if best.is_none_or(|(bo, bt, _)| off < bo || (off == bo && t < bt)) {
+            best = Some((off, t, i));
         }
     }
-    best.map(|(_, i)| i)
+    best.map(|(_, _, i)| i)
 }
+
+// the planet types of a system for the galaxy view's info panel, each named once, in orbit order
+pub fn distinct_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    for k in kinds {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+// an info panel's width in pixels for its lines (text, font size) in the HUD's monospace font (an
+// advance of 0.6 × the size), plus `padding` on each side
+pub fn panel_width_px<'a>(lines: impl IntoIterator<Item = (&'a str, f32)>, padding: f32) -> f32 {
+    lines
+        .into_iter()
+        .map(|(text, size)| text.chars().count() as f32 * size * MONO_ADVANCE)
+        .fold(0.0, f32::max)
+        + 2.0 * padding
+}
+
+const MONO_ADVANCE: f32 = 0.6; // the monospace font's advance per character, × its size
 
 pub struct MapCamera {
     pub yaw: f32,
@@ -385,6 +415,33 @@ mod tests {
             Some(1)
         );
         assert_eq!(pick(Vec3::new(0.0, 9.0, 0.0), Vec3::NEG_Z, &spheres), None);
+    }
+
+    #[test]
+    fn picking_prefers_the_sphere_closest_to_the_cursor() {
+        // two equal-sized markers overlapping on screen: the ray passes 0.8 r from the front one's centre
+        // and 0.1 r from the back one's, so the back one (under the cursor) wins
+        let spheres = [
+            (0, Vec3::new(0.8, 0.0, -10.0), 1.0),
+            (1, Vec3::new(0.2, 0.0, -20.0), 2.0),
+        ];
+        assert_eq!(pick(Vec3::ZERO, Vec3::NEG_Z, &spheres), Some(1));
+        // a big sphere hit through its centre stays ahead of a small one it hides
+        let spheres = [
+            (0, Vec3::new(0.0, 0.0, -10.0), 3.0),
+            (1, Vec3::new(0.5, 0.0, -30.0), 1.0),
+        ];
+        assert_eq!(pick(Vec3::ZERO, Vec3::NEG_Z, &spheres), Some(0));
+    }
+
+    #[test]
+    fn the_info_panel_fits_its_longest_line() {
+        let kinds = distinct_kinds(["Ice", "Desert", "Ice", "Toxic", "Desert"]);
+        assert_eq!(kinds, vec!["Ice", "Desert", "Toxic"]);
+        let long = "7 planets: Earth-like, Volcanic, Ice, Desert, Toxic, Ocean, Shattered";
+        let w = panel_width_px([("Name (#1)", 18.0), (long, 15.0)], 10.0);
+        assert!((w - (long.len() as f32 * 15.0 * 0.6 + 20.0)).abs() < 1e-3);
+        assert!(w > 420.0, "the old fixed width was too narrow: {w}");
     }
 
     #[test]

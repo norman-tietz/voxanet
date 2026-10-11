@@ -2403,8 +2403,6 @@ impl Renderer {
         alpha
     }
 
-    // the star's heat glow in Space mode (solar_system::star_heat): a warm full-screen tint over the view,
-    // drawn under the HUD text; uploads this frame's opacity and returns it
     // the jump's black fade over the whole frame, 0..1 (main.rs Jump)
     pub fn set_fade(&mut self, alpha: f32) {
         self.fade = alpha.clamp(0.0, 1.0);
@@ -2429,6 +2427,8 @@ impl Renderer {
         self.system.clear_system_caches();
     }
 
+    // the star's heat glow in Space mode (solar_system::star_heat): a warm full-screen tint over the view,
+    // drawn under the HUD text; uploads this frame's opacity and returns it
     fn update_heat_glow(&mut self, heat: f32) -> f32 {
         let alpha = HEAT_GLOW_OPACITY * heat;
         self.queue.write_buffer(
@@ -3923,9 +3923,9 @@ impl Renderer {
             };
             let planets = match planets {
                 Some(s) => {
-                    let mut kinds: Vec<&str> =
-                        s.planets.iter().map(|p| p.planet_type.def().name).collect();
-                    kinds.dedup();
+                    let kinds = crate::space::map::distinct_kinds(
+                        s.planets.iter().map(|p| p.planet_type.def().name),
+                    );
                     format!("{} planets: {}", s.planets.len(), kinds.join(", "))
                 }
                 None => "planets: unexplored".to_string(),
@@ -3947,19 +3947,26 @@ impl Renderer {
                 },
             ];
             let (x0, y0) = (20.0, screen.1 - 20.0 - lines.len() as f32 * 20.0 - 16.0);
+            let size = |k: usize| if k == 0 { 18.0 } else { 15.0 };
+            // as wide as the longest line (a system's planet list can be long), within the screen
+            let width = crate::space::map::panel_width_px(
+                lines.iter().enumerate().map(|(k, l)| (l.as_str(), size(k))),
+                10.0,
+            )
+            .max(420.0)
+            .min(screen.0 - 20.0);
             panel = Some([
                 (x0 - 10.0) as u32,
                 (y0 - 8.0) as u32,
-                420,
+                width as u32,
                 (lines.len() as f32 * 20.0 + 24.0) as u32,
             ]);
             for (k, line) in lines.into_iter().enumerate() {
-                let size = if k == 0 { 18.0 } else { 15.0 };
                 texts.push((
                     line,
                     x0,
                     y0 + k as f32 * 20.0,
-                    size,
+                    size(k),
                     glyphon::Color::rgb(230, 230, 235),
                 ));
             }

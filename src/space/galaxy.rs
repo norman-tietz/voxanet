@@ -90,7 +90,8 @@ impl Galaxy {
                 let y = (unit(seed, k, 4) * 2.0 - 1.0) * CORE_RADIUS_LY * 0.35;
                 DVec3::new(r * theta.cos(), y, r * theta.sin())
             } else {
-                // an arm: a logarithmic-looking spiral, scattered around it, thinner toward the rim
+                // an arm: an Archimedean-like spiral (the angle linear in the radius), scattered around it,
+                // thinner toward the rim
                 let arm = (unit(seed, k, 5) * ARMS as f64) as usize % ARMS;
                 let t = CORE_RADIUS_LY / GALAXY_RADIUS_LY
                     + (1.0 - CORE_RADIUS_LY / GALAXY_RADIUS_LY) * unit(seed, k, 6).sqrt();

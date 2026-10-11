@@ -374,7 +374,10 @@ fn fs_galaxy_star(in: GalaxyStarOut) -> @location(0) vec4<f32> {
     let d = length(in.uv);
     let disc = 1.0 - smoothstep(0.35, 0.5, d);
     let glow = exp(-d * 4.0) * 0.6 * (1.0 - smoothstep(0.8, 1.0, d));
-    let c = in.color * (disc * 0.9 + glow * 0.7) + vec3<f32>(disc * 0.15);
-    let a = clamp(disc + glow, 0.0, 1.0);
-    return vec4<f32>(c * a, a); // premultiplied, blended additively
+    // one falloff, applied once: the disc in the type's colour with a white core and an inner glow, and
+    // outside it a faint halo (glow², the profile the sprites were tuned with when the colour was
+    // weighted by the coverage a second time)
+    let halo = 0.49 * glow * glow * (1.0 - disc);
+    let c = in.color * (disc * (0.9 + 0.7 * glow) + halo) + vec3<f32>(disc * 0.15);
+    return vec4<f32>(c, clamp(disc + glow, 0.0, 1.0)); // blended additively (One/One)
 }

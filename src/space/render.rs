@@ -1249,10 +1249,6 @@ impl SpaceRenderer {
         }
     }
 
-    // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
-    // mesh (impostor::near_impostor_mesh) once that planet is baked; one planet at a time
-    // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
-    // belong to the old one
     // the galaxy view: the systems as star sprites and the marker rings, on black
     #[allow(clippy::too_many_arguments)]
     pub fn render_galaxy_view(
@@ -1315,11 +1311,15 @@ impl SpaceRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
+    // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
+    // belong to the old one
     pub fn clear_system_caches(&mut self) {
         self.planet_meshes.clear();
         self.near_impostor = None;
     }
 
+    // replaces planet `planet_index`'s noise impostor with the voxel engine's own distant-terrain
+    // mesh (impostor::near_impostor_mesh) once that planet is baked; one planet at a time
     pub fn set_near_impostor(
         &mut self,
         device: &wgpu::Device,
