@@ -1,9 +1,9 @@
 pub mod icosphere;
 pub mod impostor;
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)] // until the map and travel are wired in
 pub mod map;
 pub mod render;
 pub mod solar_system;
 pub mod star_shading;
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)] // until the map and travel are wired in
 pub mod travel;

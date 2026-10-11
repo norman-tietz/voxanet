@@ -134,7 +134,7 @@ impl MapCamera {
 mod tests {
     use super::*;
     use crate::space::solar_system::SolarSystem;
-    use glam::{DVec3, Vec2, Vec3};
+    use glam::{Vec2, Vec3};
 
     #[test]
     fn outermost_orbit_maps_to_d_max_and_order_is_kept() {
