@@ -2721,8 +2721,12 @@ impl Renderer {
         // the shadow-resolution G-buffer comes from pass 1, then one compute invocation per shadow texel
         {
             let fov: f32 = if controller.first_person { 80.0 } else { 45.0 }; // Controller::get_matrix
-                                                                              // soft shadows need the hardware rays' blocker distances (shadow.rs)
-            let soft_shadows = self.hw_shadows && self.hw_rt.is_some() && self.shadow.soft;
+                                                                              // soft shadows need the hardware rays' blocker distances (shadow.rs); a sun of size 0 gives
+                                                                              // MIN_WIDTH everywhere, so the search would change nothing
+            let soft_shadows = self.hw_shadows
+                && self.hw_rt.is_some()
+                && self.shadow.soft
+                && self.shadow.sun_deg > 0.0;
             let soft = soft_shadows.then_some(&self.shadow);
             self.rt_blur.set_params(&self.queue, fov.to_radians(), soft);
             self.deferred.downsample(
@@ -3927,6 +3931,10 @@ pub(crate) mod tests {
         let blur = include_str!("blur.wgsl");
         let v = &blur[blur.find("fn fs_search_v").unwrap()..blur.find("fn fs_blur").unwrap()];
         assert!(v.contains("select(bp.min_width"), "{v}");
+        // the vertical pass sums the horizontal sums (a 2D mean), not their means
+        assert!(v.contains("sum += s.r;") && v.contains("n += s.g;"), "{v}");
+        // fixed mode never takes the target's blocker distance for a width
+        assert!(blur.contains("select(bp.width, c.b, bp.mode == 1u)"));
     }
 
     // landing messages (F) must be seen without opening the console: a short HUD status line

@@ -61,7 +61,8 @@ fn fs_search_h(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let q = clamp(pc + vec2<i32>(i32(round(f32(k) * step)), 0), vec2<i32>(0), size - 1);
         let s = textureLoad(src, q, 0);
         if (s.b > 0.0 && same_surface(c.g, s.g, k, SEARCH_TAPS)) {
-            sum += s.b;
+            // capped per sample: one far blocker (a distant ridge) mustn't wash out a contact edge
+            sum += min(s.b, bp.max_blocker);
             n += 1.0;
         }
     }
