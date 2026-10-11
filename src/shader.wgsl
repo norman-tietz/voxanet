@@ -593,7 +593,14 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let R = reflect(-V, N);
     var env: vec3<f32>;
     if (global.plastic_ext.y > 0.5) {
-        let e = env_sample(R, roughness);
+        // the map is baked around the camera: read it relative to this point's horizon, rotating R by
+        // the turn from this point's up to the camera's (on a small planet they differ by ~10° only 30
+        // blocks away, and far ground reflected the map's below-horizon part: a green band)
+        let up_p = normalize(world_pos);
+        let up_c = normalize(global.camera_pos.xyz);
+        let v = cross(up_p, up_c);
+        let Rc = R + cross(v, R) + cross(v, cross(v, R)) / (1.0 + dot(up_p, up_c));
+        let e = env_sample(Rc, roughness);
         env = e.rgb + (1.0 - e.a) * ground;
     } else {
         env = atmo_env_analytic(R, world_pos, L, ground, ambient_light, roughness, engine_atmosphere());
