@@ -206,7 +206,8 @@ pub struct Renderer {
     precip_gpu: crate::weather::precipitation::PrecipGpu, // and its draw (precip.wgsl)
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
-    perf_message: Option<String>, // its finished summary, for the console
+    perf_message: Option<String>,
+    pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs) // its finished summary, for the console
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
@@ -1160,6 +1161,7 @@ impl Renderer {
             precip_clock: None,
             perf: None,
             perf_message: None,
+            travel_hud: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -3980,6 +3982,16 @@ impl Renderer {
             20.0,
             glyphon::Color::rgb(0, 255, 0),
         ));
+        if let Some(hud) = &self.travel_hud {
+            // a running trip: under the compass's label rows
+            texts.push((
+                hud.clone(),
+                (width - hud.chars().count() as f32 * 10.0) / 2.0,
+                MARKER_ROW_TOP + 4.0 * MARKER_ROW_HEIGHT,
+                18.0,
+                glyphon::Color::rgb(255, 220, 90),
+            ));
+        }
         if heat >= HEAT_WARNING {
             // centred below the compass, dark red so it reads against the glow
             let text = "Too close to the star";

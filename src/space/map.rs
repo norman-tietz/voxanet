@@ -121,6 +121,7 @@ impl MapCamera {
         self.distance = (self.distance * 0.9f32.powf(steps)).clamp(D_MAX * 0.05, D_MAX * 4.0);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // the renderer builds its own; tests check the rays against it
     pub fn view_proj(&self, aspect: f32, fov_y: f32) -> Mat4 {
         let proj = glam::camera::rh::proj::directx::perspective(fov_y, aspect, 0.1, D_MAX * 20.0);
         proj * glam::camera::rh::view::look_at_mat4(self.eye(), Vec3::ZERO, Vec3::Y)

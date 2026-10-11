@@ -52,6 +52,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
 | `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground and levels your roll; `F` again cancels it; refused over lava or toxic sludge). During the automatic climb or descent `A` / `D` and `Q` / `E` are ignored |
+| `M` | Open/close the solar-system map: the star and all planets with their orbits; drag to rotate, wheel to zoom, click or `1`–`9` to select a planet (info panel), click again or `Enter` to fly there. The flight climbs from the surface into space and travels to the planet's orbit in 6–12 s; a movement key, `Esc` or turning the view takes over |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
@@ -132,6 +133,8 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/shadow [on\|off\|sun <0-10>]` | Show or set the sun's size (degrees) for soft shadows; `off` = a fixed edge width |
 | `/perf <seconds> [label]` | Record frame and GPU times for that many seconds and append a summary (median, mean, 95th percentile, maximum per render pass) as one JSON line to `perf.log`; `--bench <seconds>` does the same from a frozen, reproducible start and quits |
 | `/weather [on\|off\|auto\|clear\|rain\|storm\|snow\|particles [on\|off]]` | Show the weather where you stand, force a weather around you for testing (`auto` returns to the natural weather; `snow` falls as ash on volcanic planets), turn the falling rain, snow, ash and dust on or off, or turn weather off |
+| `/map [n]` | Toggle the solar-system map, or open it with planet `n` selected |
+| `/travel <n>` | Fly to planet `n`'s orbit (as from the map) |
 | `/system home` | Return to the start planet, standing at local noon |
 | `/system goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
 | `/system add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`, `desert`, `toxic`, `ocean`, `shattered`) and radius (20–500) on the next orbit outward (up to 15 planets) |

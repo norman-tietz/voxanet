@@ -26,7 +26,7 @@ const HELP_LINES: [&str; 12] = [
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]   /perf <seconds> [label]",
-    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
+    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>   /map [n]   /travel <n>",
     "  /screenshot <path>             help",
 ];
 const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
@@ -84,6 +84,7 @@ pub struct Console {
     pub ao_request: Option<crate::render::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::render::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
     pub perf_request: Option<(f32, String)>, // set by /perf: seconds and label (perf.rs)
+    pub travel_request: Option<usize>, // set by /travel <n>: fly to planet n's orbit (0-based)
     pub map_request: Option<Option<usize>>, // set by /map [n]: toggle the map, or open it with planet n selected
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::render::light::LightCommand>, // set by /light, applied by the game loop (renderer)
@@ -111,6 +112,7 @@ impl Console {
             ao_request: None,
             plastic_request: None,
             perf_request: None,
+            travel_request: None,
             map_request: None,
             weather_request: None,
             light_request: None,
@@ -291,6 +293,11 @@ impl Console {
             "/light" => match crate::render::light::LightCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.light_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
+            "/travel" => match parts.get(1).map(|n| n.parse::<usize>()) {
+                Some(Ok(n)) if n >= 1 => self.travel_request = Some(n - 1),
+                _ => self.log("Usage: /travel <planet number>", [1.0, 0.5, 0.0]),
             },
 
             "/map" => match parts.get(1).map(|n| n.parse::<usize>()) {

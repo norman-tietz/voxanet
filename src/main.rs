@@ -266,8 +266,22 @@ struct Game {
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
+    travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
     visited: std::collections::HashSet<usize>, // planets whose voxel world has been installed this session
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
+}
+
+// an automatic flight to a planet's orbit (space/travel.rs): climbing from the surface (planet mode), or
+// about to plan the cruise (the first space frame), then the cruise itself
+enum Travel {
+    Climb { target: usize },
+    Cruise(crate::space::travel::Trip),
+}
+
+// while the autopilot flies it owns the flight: no capture or release by the planets it passes, no heat
+// push, no manual flight (the space-mode autopilot arm in Game::tick)
+fn travel_owns_frame(travel: &Option<Travel>) -> bool {
+    travel.is_some()
 }
 
 // 1..9 from the number row or the keypad
@@ -339,6 +353,17 @@ enum BenchStage {
 }
 
 impl Game {
+    // the player takes over a running trip: from the cruise into free flight at boost speed at most, from
+    // the climb into hovering fly mode
+    fn cancel_travel(&mut self) {
+        if let Some(Travel::Cruise(trip)) = self.travel.take() {
+            let t = self.clock.now();
+            self.space_flight.velocity = crate::space::travel::cancel_velocity(trip.velocity(t));
+        }
+        self.renderer.travel_hud = None;
+        self.renderer.show_status("Travel cancelled.");
+    }
+
     fn new(
         window: Arc<Window>,
         initial_biome: crate::planet::biome::PlanetType,
@@ -418,6 +443,7 @@ impl Game {
             baking: None,
             voxel_ready_announced: false,
             map: None,
+            travel: None,
             visited: std::collections::HashSet::new(),
             landed_at: None,
             clock,
@@ -454,6 +480,7 @@ impl Game {
             landed_at,
             map,
             visited,
+            travel,
             clock,
             loaded_world,
             start_planet,
@@ -489,6 +516,14 @@ impl Game {
         match mode {
             GameMode::Planet => {
                 controller.update_player(player, planet, dt);
+                // the trip's climb: straight up, faster with altitude, until the liftoff handover below
+                if let Some(Travel::Climb { .. }) = travel {
+                    let up = player.position.normalize_or_zero();
+                    let altitude = player.position.length() - planet.resolution as f32 / 2.0;
+                    let speed = crate::space::travel::climb_speed(altitude);
+                    player.position += up * speed * dt;
+                    player.velocity = up * speed;
+                }
 
                 // raycast & cursor Update
                 let width = renderer.config.width as f32;
@@ -504,6 +539,63 @@ impl Game {
                 let radius = system.planets[*loaded_world].radius;
                 if crate::player::landing::should_lift_off(player.position.length() / radius) {
                     lift_off_from = Some(*loaded_world);
+                }
+            }
+            GameMode::Space if travel_owns_frame(travel) => {
+                let t = clock.now();
+                // the first space frame of a trip: plan the cruise from here, in space (Free frame), and
+                // bake the target's voxel world meanwhile
+                if let Some(Travel::Climb { target }) = *travel {
+                    if let FlightFrame::Captured(_) = *flight_frame {
+                        space_flight.change_frame(*flight_frame, FlightFrame::Free, system, t);
+                        *flight_frame = FlightFrame::Free;
+                    }
+                    let fwd = (space_flight.rotation * glam::Vec3::NEG_Z).as_dvec3();
+                    let dir = space_flight.velocity.try_normalize().unwrap_or(fwd);
+                    let trip = crate::space::travel::Trip::plan(
+                        system,
+                        target,
+                        space_flight.position,
+                        dir,
+                        t,
+                    );
+                    *travel = Some(Travel::Cruise(trip));
+                    if *loaded_world != target && *baking != Some(target) {
+                        *bake_rx = Some(start_bake(
+                            system,
+                            target,
+                            edits_by_planet.get(&target).cloned(),
+                        ));
+                        *baking = Some(target);
+                    }
+                }
+                if let Some(Travel::Cruise(trip)) = travel {
+                    let n = trip.target;
+                    let name = system.planets[n].planet_type.def().name;
+                    if trip.done(t) {
+                        // in the target's orbit, at rest relative to it, looking at its centre
+                        *flight_frame = FlightFrame::Captured(n);
+                        space_flight.position = trip.arrival_local;
+                        space_flight.velocity = glam::DVec3::ZERO;
+                        space_flight.rotation = glam::Quat::from_rotation_arc(
+                            glam::Vec3::NEG_Z,
+                            -trip.arrival_local.normalize().as_vec3(),
+                        );
+                        space_flight.roll_rate = 0.0;
+                        space_flight.turn_rate = 0.0;
+                        renderer.travel_hud = None;
+                        renderer.show_status(&format!("Arrived at #{} {name}.", n + 1));
+                        *travel = None;
+                    } else {
+                        space_flight.position = trip.position(t);
+                        space_flight.velocity = trip.velocity(t);
+                        space_flight.rotation = trip.view_rotation(system, t);
+                        renderer.travel_hud = Some(format!(
+                            "-> #{} {name}  {:.0} s",
+                            n + 1,
+                            trip.remaining(t).ceil()
+                        ));
+                    }
                 }
             }
             GameMode::Space => {
@@ -870,6 +962,35 @@ impl Game {
                 }
             }
         }
+        // a trip picked on the map or with /travel
+        let request = console
+            .travel_request
+            .take()
+            .or_else(|| map.as_mut().and_then(|m| m.travel_request.take()));
+        if let Some(n) = request {
+            if n >= system.planets.len() {
+                console.log(
+                    &format!(
+                        "No planet #{}: this solar system has 1..={}",
+                        n + 1,
+                        system.planets.len()
+                    ),
+                    [1.0, 0.5, 0.0],
+                );
+            } else if *mode == GameMode::Planet && *loaded_world == n {
+                renderer.show_status("You are here.");
+            } else {
+                close_map(map, controller);
+                if *mode == GameMode::Planet {
+                    controller.fly_mode = true;
+                    player.landing = false;
+                    player.taking_off = None;
+                }
+                *travel = Some(Travel::Climb { target: n });
+                let name = system.planets[n].planet_type.def().name;
+                renderer.show_status(&format!("Travelling to #{} {name}...", n + 1));
+            }
+        }
         if let Some((secs, label)) = console.perf_request.take() {
             renderer.start_perf(secs, &label);
             console.log(
@@ -990,6 +1111,8 @@ impl Game {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         if self.map.is_some() {
                             close_map(&mut self.map, controller);
+                        } else if self.travel.is_some() {
+                            self.cancel_travel();
                         } else {
                             controller.toggle_mouse_release();
                         }
@@ -1099,11 +1222,23 @@ impl Game {
             event: key_event, ..
         } = &event
         {
+            use KeyCode::*;
             if key_event.state == ElementState::Pressed
                 && !key_event.repeat
-                && key_event.physical_key == PhysicalKey::Code(KeyCode::KeyM)
+                && key_event.physical_key == PhysicalKey::Code(KeyM)
             {
                 self.map = Some(open_map(controller));
+                return;
+            }
+            // a movement key takes over a running trip (the key acts from its next press)
+            if self.travel.is_some()
+                && key_event.state == ElementState::Pressed
+                && matches!(
+                    key_event.physical_key,
+                    PhysicalKey::Code(KeyW | KeyA | KeyS | KeyD | KeyQ | KeyE | Space | ShiftLeft)
+                )
+            {
+                self.cancel_travel();
                 return;
             }
         }
@@ -1265,6 +1400,13 @@ impl Game {
                             }),
                         ),
                     };
+                    // a running trip's path, drawn on the map
+                    let line: Vec<glam::DVec3> = match &self.travel {
+                        Some(Travel::Cruise(trip)) => (0..=64)
+                            .map(|k| trip.position(trip.t0 + trip.duration * k as f64 / 64.0))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                     renderer.render_map(
                         &self.system,
                         t,
@@ -1272,7 +1414,7 @@ impl Game {
                         here,
                         ship,
                         &self.visited,
-                        &[],
+                        &line,
                         &self.console,
                     );
                     return;
@@ -1370,6 +1512,10 @@ impl ApplicationHandler for App {
         let Some(game) = &mut self.game else { return };
         game.tick();
         if let DeviceEvent::MouseMotion { delta } = event {
+            // turning the view takes over a running trip (not while the map has the mouse)
+            if game.travel.is_some() && game.map.is_none() && delta.0.hypot(delta.1) > 3.0 {
+                game.cancel_travel();
+            }
             game.controller.process_mouse_motion(delta);
         }
     }
@@ -1388,6 +1534,27 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Review Focus 5: the autopilot owns the flight frame while it runs, so the planets it passes can't
+    // capture it mid-trip (the guarded match arm comes before the manual space-mode arm)
+    #[test]
+    fn travel_owns_the_flight_frame() {
+        assert!(!travel_owns_frame(&None));
+        assert!(travel_owns_frame(&Some(Travel::Climb { target: 2 })));
+        let src = include_str!("main.rs");
+        let guarded = src
+            .find("GameMode::Space if travel_owns_frame(travel) =>")
+            .unwrap();
+        let manual = src[guarded..].find("next_flight_frame(").unwrap() + guarded;
+        let manual_arm = src[guarded..]
+            .find("            GameMode::Space => {")
+            .unwrap()
+            + guarded;
+        assert!(
+            manual_arm < manual,
+            "next_flight_frame only in the manual arm"
+        );
+    }
 
     // no block targeted (no selection box, no mining, placing or picking) while flying
     #[test]
