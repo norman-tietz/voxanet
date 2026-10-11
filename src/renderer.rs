@@ -251,6 +251,7 @@ pub struct Renderer {
     pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
     pub plastic: crate::plastic::PlasticSettings, // specular plastic look (console: /plastic)
     pub light: crate::light::LightSettings, // ground bounce and wrap lighting (console: /light)
+    pub shadow: crate::shadow::ShadowSettings, // soft sun shadows (console: /shadow)
     ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
     edit_epoch: u64, // bumped by block edits and full reloads: the progressive AO starts over
     prev_ao_view: Option<(glam::Mat4, Vec3)>, // last frame's view-projection and camera (AO reprojection)
@@ -1077,6 +1078,7 @@ impl Renderer {
             ao: crate::ao::AoSettings::default(),
             plastic: crate::plastic::PlasticSettings::default(),
             light: crate::light::LightSettings::default(),
+            shadow: crate::shadow::ShadowSettings::default(),
             ao_progress: Default::default(),
             edit_epoch: 0,
             prev_ao_view: None,

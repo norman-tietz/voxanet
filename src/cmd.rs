@@ -24,7 +24,7 @@ const HELP_LINES: [&str; 11] = [
     "  /bevel [on|off|width <v>|cavity <v>]  /film [on|off|grain <v>|vignette <v>]",
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>]",
-    "  /light [bounce <0-1>|wrap <0-0.5>]",
+    "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -81,6 +81,7 @@ pub struct Console {
     pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
     pub light_request: Option<crate::light::LightCommand>, // set by /light, applied by the game loop (renderer)
+    pub shadow_request: Option<crate::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -104,6 +105,7 @@ impl Console {
             ao_request: None,
             plastic_request: None,
             light_request: None,
+            shadow_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -282,6 +284,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/shadow" => match crate::shadow::ShadowCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.shadow_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/ao" => match crate::ao::AoCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.ao_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
@@ -397,6 +404,18 @@ mod tests {
         assert_eq!(c.plastic_request, Some(crate::plastic::PlasticCommand::Get));
         c.exec("/light", &mut player);
         assert_eq!(c.light_request, Some(crate::light::LightCommand::Get));
+    }
+
+    #[test]
+    fn shadow_command_sets_a_request() {
+        let c = console_with(&["/shadow sun 4"]);
+        assert_eq!(
+            c.shadow_request,
+            Some(crate::shadow::ShadowCommand::Sun(4.0))
+        );
+        let c = console_with(&["/shadow sun 40"]);
+        assert_eq!(c.shadow_request, None);
+        assert_eq!(c.history.last().unwrap().0, crate::shadow::SHADOW_USAGE);
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod renderer;
 mod rt_blur;
 mod rt_shadow;
 mod screenshot;
+mod shadow;
 mod smoothing;
 mod star_shading;
 mod system_diagnostics;
@@ -754,6 +755,10 @@ impl Game {
         }
         if let Some(cmd) = console.light_request.take() {
             let msg = renderer.light.apply(cmd);
+            console.log(&msg, [0.0, 1.0, 0.0]);
+        }
+        if let Some(cmd) = console.shadow_request.take() {
+            let msg = renderer.shadow.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
         if let Some(cmd) = console.film_request.take() {
