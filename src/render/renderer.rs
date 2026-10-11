@@ -3788,6 +3788,221 @@ impl Renderer {
         self.text_atlas.trim();
     }
 
+    // the galaxy view (space/galaxy.rs): every system as a star sprite in its star type's colour and
+    // relative size, rings around the hovered, selected and current systems, labels per shows_label, and the
+    // selection's info panel ("unexplored" for systems not generated yet)
+    pub fn render_galaxy_map(
+        &mut self,
+        universe: &crate::space::universe::Universe,
+        current_system: &crate::space::solar_system::SolarSystem,
+        map_view: &crate::space::map::MapView,
+        t: f64,
+        console: &Console,
+    ) {
+        use crate::space::map::{galaxy_view_position, shows_label, MAP_FOV_Y};
+        use crate::space::render::{project, GalaxyStarInstance, RingVertex, SpaceCamera};
+        self.perf_tick("galaxy");
+        let out = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(o)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            _ => return,
+        };
+        let view = out
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let screen = (self.config.width as f32, self.config.height as f32);
+        let eye = map_view.camera.eye();
+        let fwd = (-eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        let camera = SpaceCamera {
+            position: glam::DVec3::ZERO,
+            rotation: glam::Quat::from_mat3(&glam::Mat3::from_cols(right, up, -fwd)),
+            fov_y: MAP_FOV_Y,
+        };
+        let galaxy = &universe.galaxy;
+        let current = universe.current;
+        let largest = crate::space::solar_system::StarType::ALL
+            .iter()
+            .map(|t| t.def().radius)
+            .fold(1.0, f64::max);
+        let px_angle = MAP_FOV_Y / screen.1;
+        let stars: Vec<GalaxyStarInstance> = galaxy
+            .systems
+            .iter()
+            .map(|e| {
+                let def = e.star_type.def();
+                // the star type's colour, normalised and saturated so the types tell apart at a glance
+                let c = Vec3::from(def.surface_color);
+                let c = c / c.max_element().max(1e-3);
+                let grey = Vec3::splat(c.dot(Vec3::new(0.3, 0.59, 0.11)));
+                let c = (grey + (c - grey) * 2.5).clamp(Vec3::ZERO, Vec3::ONE);
+                GalaxyStarInstance {
+                    pos: (galaxy_view_position(e.position) - eye).to_array(),
+                    color: c.to_array(),
+                    size_px: ((def.radius / largest) as f32 * 7.0).max(2.5),
+                }
+            })
+            .collect();
+        // marker rings around a system, a fixed size on screen
+        let mut rings: Vec<RingVertex> = Vec::new();
+        let mut ring = |i: usize, rgba: [f32; 4], px: f32| {
+            let c = galaxy_view_position(galaxy.systems[i].position);
+            let r = px * px_angle * (c - eye).length();
+            let to_eye = (eye - c).normalize();
+            let a = to_eye.cross(Vec3::Y).normalize_or(Vec3::X);
+            let b = to_eye.cross(a);
+            let col = [
+                rgba[0] * rgba[3],
+                rgba[1] * rgba[3],
+                rgba[2] * rgba[3],
+                rgba[3],
+            ];
+            for k in 0..32 {
+                for q in [k, (k + 1) % 32] {
+                    let ang = std::f32::consts::TAU * q as f32 / 32.0;
+                    let p = c + (a * ang.cos() + b * ang.sin()) * r - eye;
+                    rings.push(RingVertex {
+                        pos: p.to_array(),
+                        color: col,
+                    });
+                }
+            }
+        };
+        ring(current, [0.4, 1.0, 0.5, 0.9], 10.0);
+        if let Some(i) = map_view.selected {
+            ring(i, [1.0, 1.0, 1.0, 0.9], 13.0);
+        }
+        if let Some(i) = map_view.hover.filter(|h| Some(*h) != map_view.selected) {
+            ring(i, [1.0, 0.85, 0.3, 0.8], 12.0);
+        }
+        self.system.render_galaxy_view(
+            &self.device,
+            &self.queue,
+            &view,
+            &self.deferred.depth,
+            &camera,
+            t,
+            screen,
+            &stars,
+            &rings,
+        );
+        self.update_fps();
+
+        let visited = |i: usize| i == current || universe.known(i).is_some();
+        let mut texts: Vec<(String, f32, f32, f32, glyphon::Color)> = Vec::new();
+        for (i, e) in galaxy.systems.iter().enumerate() {
+            if !shows_label(i, current, map_view.hover, map_view.selected, visited(i)) {
+                continue;
+            }
+            let Some(px) = project(&camera, galaxy_view_position(e.position) - eye, screen) else {
+                continue;
+            };
+            let you = if i == current { "  <- you" } else { "" };
+            let bright = map_view.hover == Some(i) || map_view.selected == Some(i) || i == current;
+            let k = if bright { 255 } else { 170 };
+            texts.push((
+                format!("{}{you}", e.name),
+                px.x + 10.0,
+                px.y - 9.0,
+                14.0,
+                glyphon::Color::rgb(k, k, k),
+            ));
+        }
+        let mut panel: Option<[u32; 4]> = None;
+        if let Some(i) = map_view.selected {
+            let e = &galaxy.systems[i];
+            let planets = if i == current {
+                Some(current_system)
+            } else {
+                universe.known(i)
+            };
+            let planets = match planets {
+                Some(s) => {
+                    let mut kinds: Vec<&str> =
+                        s.planets.iter().map(|p| p.planet_type.def().name).collect();
+                    kinds.dedup();
+                    format!("{} planets: {}", s.planets.len(), kinds.join(", "))
+                }
+                None => "planets: unexplored".to_string(),
+            };
+            let lines = [
+                format!("{} (#{})", e.name, i + 1),
+                format!("{} star", e.star_type.def().name),
+                format!("distance {:.1} ly", galaxy.distance_ly(current, i)),
+                if visited(i) {
+                    "visited".into()
+                } else {
+                    "not visited".into()
+                },
+                planets,
+                if i == current {
+                    "you are here".into()
+                } else {
+                    "Enter / click again: jump".into()
+                },
+            ];
+            let (x0, y0) = (20.0, screen.1 - 20.0 - lines.len() as f32 * 20.0 - 16.0);
+            panel = Some([
+                (x0 - 10.0) as u32,
+                (y0 - 8.0) as u32,
+                420,
+                (lines.len() as f32 * 20.0 + 24.0) as u32,
+            ]);
+            for (k, line) in lines.into_iter().enumerate() {
+                let size = if k == 0 { 18.0 } else { 15.0 };
+                texts.push((
+                    line,
+                    x0,
+                    y0 + k as f32 * 20.0,
+                    size,
+                    glyphon::Color::rgb(230, 230, 235),
+                ));
+            }
+        }
+        texts.push((
+            format!("Galaxy {}  ({} systems)", galaxy.seed, galaxy.systems.len()),
+            20.0,
+            34.0,
+            16.0,
+            glyphon::Color::rgb(200, 200, 210),
+        ));
+        let help = "drag: rotate   wheel: zoom   click: select   Enter: jump   G / Esc: close";
+        texts.push((
+            help.into(),
+            (screen.0 - help.len() as f32 * 8.4) / 2.0,
+            12.0,
+            14.0,
+            glyphon::Color::rgb(170, 170, 180),
+        ));
+        texts.push((
+            format!("FPS: {}", self.current_fps),
+            screen.0 - 120.0,
+            34.0,
+            18.0,
+            glyphon::Color::rgb(0, 255, 0),
+        ));
+        self.draw_hud(&view, texts, panel, console);
+        if let Some(path) = self.screenshot_request.take() {
+            crate::app::screenshot::capture(
+                &self.device,
+                &self.queue,
+                &out.texture,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+                &path,
+            );
+            self.screenshot_flash = Some(std::time::Instant::now());
+        }
+        self.queue.present(out);
+        self.text_atlas.trim();
+    }
+
     // HUD text over the finished frame, with an optional dark panel under part of it and the console
     fn draw_hud(
         &mut self,

@@ -341,3 +341,40 @@ fn vs_ring(in: RingIn) -> RingOut {
 fn fs_ring(in: RingOut) -> @location(0) vec4<f32> {
     return in.color;
 }
+
+// --- the galaxy view's star sprites (space/galaxy.rs, Renderer::render_galaxy_map) ---
+
+struct GalaxyStarIn {
+    @location(0) pos: vec3<f32>,   // camera-relative, view units
+    @location(1) color: vec3<f32>, // the star type's colour (linear, normalised)
+    @location(2) size_px: f32,     // sprite diameter in pixels
+}
+
+struct GalaxyStarOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>, // -1..1 across the sprite
+    @location(1) color: vec3<f32>,
+}
+
+@vertex
+fn vs_galaxy_star(@builtin(vertex_index) vi: u32, in: GalaxyStarIn) -> GalaxyStarOut {
+    var out: GalaxyStarOut;
+    let corner = vec2<f32>(f32(vi & 1u) * 2.0 - 1.0, f32((vi >> 1u) & 1u) * 2.0 - 1.0);
+    var clip = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    // a screen-sized quad: the glow reaches twice the disc
+    clip = vec4<f32>(clip.xy + corner * in.size_px * 2.0 / camera.screen.xy * clip.w, clip.zw);
+    out.clip_pos = clip;
+    out.uv = corner;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_galaxy_star(in: GalaxyStarOut) -> @location(0) vec4<f32> {
+    let d = length(in.uv);
+    let disc = 1.0 - smoothstep(0.35, 0.5, d);
+    let glow = exp(-d * 4.0) * 0.6 * (1.0 - smoothstep(0.8, 1.0, d));
+    let c = in.color * (disc * 0.9 + glow * 0.7) + vec3<f32>(disc * 0.15);
+    let a = clamp(disc + glow, 0.0, 1.0);
+    return vec4<f32>(c * a, a); // premultiplied, blended additively
+}

@@ -1,10 +1,9 @@
-#![allow(dead_code)] // wired up by the galaxy map and jump tasks (Tasks 2-3)
-                     // galaxy.rs
-                     // The galaxy (spec docs/superpowers/specs/2026-10-12-galaxy-design.md §1): a seeded catalogue of solar
-                     // systems in a two-armed spiral with a core — position (light-years), system seed, star type and name per
-                     // entry, computed up front (tiny). A system's planets are only generated when you jump there
-                     // (universe.rs); entry 0, the start system, has the galaxy seed itself, so a seed's start system is the
-                     // solar system the game always had for it.
+// galaxy.rs
+// The galaxy (spec docs/superpowers/specs/2026-10-12-galaxy-design.md §1): a seeded catalogue of solar
+// systems in a two-armed spiral with a core — position (light-years), system seed, star type and name per
+// entry, computed up front (tiny). A system's planets are only generated when you jump there
+// (universe.rs); entry 0, the start system, has the galaxy seed itself, so a seed's start system is the
+// solar system the game always had for it.
 
 use glam::DVec3;
 

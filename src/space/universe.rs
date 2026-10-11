@@ -1,9 +1,8 @@
-#![allow(dead_code)] // wired up by the galaxy map and jump tasks (Tasks 2-3)
-                     // universe.rs
-                     // The solar systems you've been to (spec §2): the galaxy catalogue, the current system's index, and the
-                     // parked systems — generated on the first jump there and kept for the session. Game.system is the current
-                     // system itself; switch() parks it and hands back the target. Planet edits and visited flags live in
-                     // Game, keyed by (system, planet).
+// universe.rs
+// The solar systems you've been to (spec §2): the galaxy catalogue, the current system's index, and the
+// parked systems — generated on the first jump there and kept for the session. Game.system is the current
+// system itself; switch() parks it and hands back the target. Planet edits and visited flags live in
+// Game, keyed by (system, planet).
 
 use std::collections::HashMap;
 

@@ -285,6 +285,7 @@ struct Game {
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
+    galaxy_view: Option<crate::space::map::MapView>, // the galaxy view, while it's open (G)
     travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
     trip_mouse: TripMouse,  // mouse motion during a trip, toward cancelling it
     visited: std::collections::HashSet<(usize, usize)>, // (system, planet) whose voxel world has been installed
@@ -411,6 +412,18 @@ fn open_map(controller: &mut Controller) -> crate::space::map::MapView {
     view
 }
 
+// opens the galaxy view (space/galaxy.rs): like the map, with the galaxy camera
+fn open_galaxy(controller: &mut Controller) -> crate::space::map::MapView {
+    let view = crate::space::map::MapView::new(
+        controller.mouse_released,
+        crate::space::map::MapCamera::galaxy_view(),
+    );
+    controller.release_keys();
+    controller.mouse_released = true;
+    view
+}
+
+// closes the map or the galaxy view (both are MapViews), restoring the mouse
 fn close_map(map: &mut Option<crate::space::map::MapView>, controller: &mut Controller) {
     if let Some(m) = map.take() {
         controller.mouse_released = m.restore_mouse_released;
@@ -552,6 +565,7 @@ impl Game {
             baking: None,
             voxel_ready_announced: false,
             map: None,
+            galaxy_view: None,
             travel: None,
             trip_mouse: TripMouse::new(Instant::now()),
             visited: std::collections::HashSet::new(),
@@ -592,6 +606,7 @@ impl Game {
             voxel_ready_announced,
             landed_at,
             map,
+            galaxy_view,
             visited,
             travel,
             trip_mouse,
@@ -614,7 +629,10 @@ impl Game {
 
         // cursor locking logic: locked only in first person, and only while the mouse hasn't been
         // explicitly released (Escape) without leaving first person
-        let want_locked = controller.first_person && !controller.mouse_released && map.is_none();
+        let want_locked = controller.first_person
+            && !controller.mouse_released
+            && map.is_none()
+            && galaxy_view.is_none();
         if want_locked != *current_cursor_locked {
             *current_cursor_locked = want_locked;
             if *current_cursor_locked {
@@ -637,7 +655,7 @@ impl Game {
                 controller.first_person,
                 controller.mouse_released,
                 console.is_open,
-                map.is_some(),
+                map.is_some() || galaxy_view.is_some(),
             ) {
                 *trip_mouse = TripMouse::new(now);
             }
@@ -990,6 +1008,7 @@ impl Game {
                 renderer.show_status("You are here.");
             } else if jump.is_none() {
                 close_map(map, controller);
+                close_map(galaxy_view, controller);
                 *jump = Some(Jump::new(n, false));
             }
         }
@@ -1209,6 +1228,22 @@ impl Game {
                 }
             }
         }
+        if let Some(request) = console.galaxy_request.take() {
+            match (request, galaxy_view.is_some()) {
+                (None, true) => close_map(galaxy_view, controller),
+                (selected, _) => {
+                    close_map(map, controller);
+                    let g = galaxy_view.get_or_insert_with(|| open_galaxy(controller));
+                    if let Some(i) = selected.filter(|&i| i < universe.galaxy.systems.len()) {
+                        g.selected = Some(i);
+                    }
+                }
+            }
+        }
+        // a system picked in the galaxy view: jump there
+        if let Some(n) = galaxy_view.as_mut().and_then(|g| g.travel_request.take()) {
+            console.jump_request = Some(n);
+        }
         // a trip picked on the map or with /travel
         let request = console
             .travel_request
@@ -1359,6 +1394,8 @@ impl Game {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         if self.map.is_some() {
                             close_map(&mut self.map, controller);
+                        } else if self.galaxy_view.is_some() {
+                            close_map(&mut self.galaxy_view, controller);
                         } else if self.travel.is_some() {
                             self.cancel_travel();
                         } else {
@@ -1420,19 +1457,55 @@ impl Game {
             }
         }
 
-        // the open map takes the keyboard and mouse (space/map.rs MapView)
-        if let Some(m) = &mut self.map {
+        // the open map or galaxy view takes the keyboard and mouse (space/map.rs MapView)
+        let galaxy_open = self.galaxy_view.is_some();
+        if self.map.is_some() || galaxy_open {
+            // M and G switch between the two views or close the open one
+            if let WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } = &event
+            {
+                if key_event.state == ElementState::Pressed && !key_event.repeat {
+                    match key_event.physical_key {
+                        PhysicalKey::Code(KeyCode::KeyM) => {
+                            close_map(&mut self.galaxy_view, controller);
+                            if galaxy_open {
+                                self.map = Some(open_map(controller));
+                            } else {
+                                close_map(&mut self.map, controller);
+                            }
+                            return;
+                        }
+                        PhysicalKey::Code(KeyCode::KeyG) => {
+                            close_map(&mut self.map, controller);
+                            if galaxy_open {
+                                close_map(&mut self.galaxy_view, controller);
+                            } else {
+                                self.galaxy_view = Some(open_galaxy(controller));
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let count = if galaxy_open {
+                self.universe.galaxy.systems.len()
+            } else {
+                self.system.planets.len()
+            };
+            let m = match self.map.as_mut() {
+                Some(m) => m,
+                None => self.galaxy_view.as_mut().expect("an overlay is open"),
+            };
             match &event {
                 WindowEvent::KeyboardInput {
                     event: key_event, ..
                 } if key_event.state == ElementState::Pressed => {
                     match key_event.physical_key {
-                        PhysicalKey::Code(KeyCode::KeyM) => close_map(&mut self.map, controller),
                         PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => m.confirm(),
                         PhysicalKey::Code(code) => {
-                            if let Some(n) = digit_key(code)
-                                .filter(|&n| n >= 1 && n <= self.system.planets.len())
-                            {
+                            if let Some(n) = digit_key(code).filter(|&n| n >= 1 && n <= count) {
                                 m.selected = Some(n - 1);
                             }
                         }
@@ -1476,6 +1549,13 @@ impl Game {
                 && key_event.physical_key == PhysicalKey::Code(KeyM)
             {
                 self.map = Some(open_map(controller));
+                return;
+            }
+            if key_event.state == ElementState::Pressed
+                && !key_event.repeat
+                && key_event.physical_key == PhysicalKey::Code(KeyG)
+            {
+                self.galaxy_view = Some(open_galaxy(controller));
                 return;
             }
             // a movement key (or F, which would otherwise start a landing against the climb) takes over a
@@ -1627,6 +1707,14 @@ impl Game {
 
             WindowEvent::RedrawRequested => {
                 let t = self.clock.now();
+                if let Some(g) = &mut self.galaxy_view {
+                    let screen = (renderer.config.width as f32, renderer.config.height as f32);
+                    g.hover = g.cursor.and_then(|c| {
+                        crate::space::map::pick_system(&self.universe.galaxy, &g.camera, c, screen)
+                    });
+                    renderer.render_galaxy_map(&self.universe, &self.system, g, t, &self.console);
+                    return;
+                }
                 if let Some(m) = &mut self.map {
                     let screen = (renderer.config.width as f32, renderer.config.height as f32);
                     let layout = crate::space::map::MapLayout::new(&self.system);
@@ -1780,7 +1868,7 @@ impl ApplicationHandler for App {
                     game.controller.first_person,
                     game.controller.mouse_released,
                     game.console.is_open,
-                    game.map.is_some(),
+                    game.map.is_some() || game.galaxy_view.is_some(),
                 )
                 && game.trip_mouse.add(delta, Instant::now())
             {

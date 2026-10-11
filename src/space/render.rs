@@ -297,6 +297,17 @@ pub struct RingVertex {
     pub color: [f32; 4],
 }
 
+// one star of the galaxy view (fs_galaxy_star)
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct GalaxyStarInstance {
+    pub pos: [f32; 3],   // camera-relative, galaxy view units
+    pub color: [f32; 3], // linear, normalised to its largest component
+    pub size_px: f32,
+}
+
+const MAX_GALAXY_STARS: usize = 512;
+
 // the map's line budget: every orbit ring (RING_SEGMENTS each), the travel line (TRAVEL_LINE_POINTS
 // points) and three circles (selection, hover, ship; CIRCLE_SEGMENTS each), two vertices per segment
 pub const RING_SEGMENTS: usize = 128;
@@ -331,6 +342,8 @@ pub struct SpaceRenderer {
     star_pipeline: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     ring_pipeline: wgpu::RenderPipeline, // the map's orbit rings and travel line (line list)
+    galaxy_star_pipeline: wgpu::RenderPipeline, // the galaxy view's star sprites (instanced)
+    galaxy_star_buf: wgpu::Buffer,
     ring_buf: wgpu::Buffer,
     v_buf: wgpu::Buffer,
     i_buf: wgpu::Buffer,
@@ -822,6 +835,56 @@ impl SpaceRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // the galaxy view's stars: instanced screen-sized sprites, added over the background, no depth
+        let galaxy_star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Galaxy Star Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_galaxy_star"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GalaxyStarInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_galaxy_star"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                ..depth_stencil.clone()
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let galaxy_star_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Galaxy Stars"),
+            size: (MAX_GALAXY_STARS * std::mem::size_of::<GalaxyStarInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let ring_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Map Rings"),
             size: (MAX_RING_VERTS * std::mem::size_of::<RingVertex>()) as u64,
@@ -840,6 +903,8 @@ impl SpaceRenderer {
             background_pipeline,
             ring_pipeline,
             ring_buf,
+            galaxy_star_pipeline,
+            galaxy_star_buf,
             v_buf,
             i_buf,
             num_indices: indices.len() as u32,
@@ -1188,6 +1253,68 @@ impl SpaceRenderer {
     // mesh (impostor::near_impostor_mesh) once that planet is baked; one planet at a time
     // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
     // belong to the old one
+    // the galaxy view: the systems as star sprites and the marker rings, on black
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_galaxy_view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        camera: &SpaceCamera,
+        t: f64,
+        screen: (f32, f32),
+        stars: &[GalaxyStarInstance],
+        rings: &[RingVertex],
+    ) {
+        self.write_camera(queue, camera, t, screen, 0.0);
+        let stars = &stars[..stars.len().min(MAX_GALAXY_STARS)];
+        let rings = &rings[..rings.len().min(MAX_RING_VERTS)];
+        queue.write_buffer(&self.galaxy_star_buf, 0, bytemuck::cast_slice(stars));
+        if !rings.is_empty() {
+            queue.write_buffer(&self.ring_buf, 0, bytemuck::cast_slice(rings));
+        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Galaxy View Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // no starfield behind the galaxy: its own stars are the picture
+            pass.set_bind_group(0, &self.camera_bind, &[]);
+            if !stars.is_empty() {
+                pass.set_pipeline(&self.galaxy_star_pipeline);
+                pass.set_vertex_buffer(0, self.galaxy_star_buf.slice(..));
+                pass.draw(0..4, 0..stars.len() as u32);
+            }
+            if !rings.is_empty() {
+                pass.set_pipeline(&self.ring_pipeline);
+                pass.set_vertex_buffer(0, self.ring_buf.slice(..));
+                pass.draw(0..rings.len() as u32, 0..1);
+            }
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
     pub fn clear_system_caches(&mut self) {
         self.planet_meshes.clear();
         self.near_impostor = None;

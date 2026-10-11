@@ -108,7 +108,6 @@ impl MapCamera {
         }
     }
 
-    #[allow(dead_code)] // the galaxy map (Tasks 2-3)
     pub fn galaxy_view() -> Self {
         Self {
             yaw: 0.0,
@@ -164,17 +163,13 @@ const PICK_MIN_PX: f32 = 12.0;
 // mouse movement (pixels) after which a press is a drag, not a click
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
-#[allow(dead_code)] // the galaxy map (Tasks 2-3)
 pub const LY_TO_VIEW: f32 = D_MAX / 50.0; // galaxy view units: the galaxy's radius maps to D_MAX
-#[allow(dead_code)]
 const PICK_SYSTEM_MIN_PX: f32 = 10.0;
 
-#[allow(dead_code)]
 pub fn galaxy_view_position(p: DVec3) -> Vec3 {
     p.as_vec3() * LY_TO_VIEW
 }
 
-#[allow(dead_code)]
 pub fn pick_system(
     galaxy: &crate::space::galaxy::Galaxy,
     camera: &MapCamera,
@@ -203,7 +198,6 @@ pub fn pick_system(
     pick(origin, dir, &spheres)
 }
 
-#[allow(dead_code)]
 pub fn shows_label(
     i: usize,
     current: usize,
