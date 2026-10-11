@@ -7,6 +7,7 @@
 use crate::planet::biome::PlanetType;
 use glam::{DQuat, DVec3, Quat, Vec3};
 
+#[derive(Debug)]
 pub struct Star {
     pub radius: f64,
     pub star_type: StarType,
@@ -145,6 +146,7 @@ pub struct Planet {
                          // independent of planet_radius_for's hash so radius and terrain shape don't correlate
 }
 
+#[derive(Debug)]
 pub struct SolarSystem {
     pub star: Star,
     pub planets: Vec<Planet>,

@@ -89,6 +89,8 @@ pub struct MapCamera {
     pub yaw: f32,
     pub pitch: f32,    // above the orbital plane, 5°..85°
     pub distance: f32, // from the star
+    pub min_distance: f32,
+    pub max_distance: f32,
 }
 
 const PITCH_MIN: f32 = 5.0 * std::f32::consts::PI / 180.0;
@@ -101,6 +103,19 @@ impl MapCamera {
             yaw: 0.0,
             pitch: 35f32.to_radians(),
             distance: D_MAX * 2.6,
+            min_distance: ZOOM_MIN,
+            max_distance: D_MAX * 4.0,
+        }
+    }
+
+    #[allow(dead_code)] // the galaxy map (Tasks 2-3)
+    pub fn galaxy_view() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 45f32.to_radians(),
+            distance: D_MAX * 2.4,
+            min_distance: D_MAX * 0.08,
+            max_distance: D_MAX * 5.0,
         }
     }
 
@@ -120,7 +135,8 @@ impl MapCamera {
     // positive steps zoom in; the camera orbits the star, so the closest it gets keeps the eye
     // outside the star (ZOOM_MIN)
     pub fn zoom(&mut self, steps: f32) {
-        self.distance = (self.distance * 0.9f32.powf(steps)).clamp(ZOOM_MIN, D_MAX * 4.0);
+        self.distance =
+            (self.distance * 0.9f32.powf(steps)).clamp(self.min_distance, self.max_distance);
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // the renderer builds its own; tests check the rays against it
@@ -148,6 +164,56 @@ const PICK_MIN_PX: f32 = 12.0;
 // mouse movement (pixels) after which a press is a drag, not a click
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+#[allow(dead_code)] // the galaxy map (Tasks 2-3)
+pub const LY_TO_VIEW: f32 = D_MAX / 50.0; // galaxy view units: the galaxy's radius maps to D_MAX
+#[allow(dead_code)]
+const PICK_SYSTEM_MIN_PX: f32 = 10.0;
+
+#[allow(dead_code)]
+pub fn galaxy_view_position(p: DVec3) -> Vec3 {
+    p.as_vec3() * LY_TO_VIEW
+}
+
+#[allow(dead_code)]
+pub fn pick_system(
+    galaxy: &crate::space::galaxy::Galaxy,
+    camera: &MapCamera,
+    cursor: Vec2,
+    screen: (f32, f32),
+) -> Option<usize> {
+    let ndc = Vec2::new(
+        cursor.x / screen.0 * 2.0 - 1.0,
+        1.0 - cursor.y / screen.1 * 2.0,
+    );
+    let (origin, dir) = camera.ray(ndc, screen.0 / screen.1, MAP_FOV_Y);
+    let px_angle = MAP_FOV_Y / screen.1;
+    let spheres: Vec<(usize, Vec3, f32)> = galaxy
+        .systems
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let c = galaxy_view_position(s.position);
+            (
+                i,
+                c,
+                PICK_SYSTEM_MIN_PX * 0.5 * px_angle * (c - origin).length(),
+            )
+        })
+        .collect();
+    pick(origin, dir, &spheres)
+}
+
+#[allow(dead_code)]
+pub fn shows_label(
+    i: usize,
+    current: usize,
+    hover: Option<usize>,
+    selected: Option<usize>,
+    visited: bool,
+) -> bool {
+    i == current || hover == Some(i) || selected == Some(i) || visited
+}
+
 // the open map's state (main.rs): camera, mouse, hover and selection
 pub struct MapView {
     pub camera: MapCamera,
@@ -160,9 +226,9 @@ pub struct MapView {
 }
 
 impl MapView {
-    pub fn new(restore_mouse_released: bool) -> Self {
+    pub fn new(restore_mouse_released: bool, camera: MapCamera) -> Self {
         Self {
-            camera: MapCamera::default_view(),
+            camera,
             cursor: None,
             press: None,
             hover: None,
@@ -350,7 +416,7 @@ mod tests {
 
     #[test]
     fn a_click_selects_then_travels_and_a_drag_rotates() {
-        let mut v = MapView::new(false);
+        let mut v = MapView::new(false, MapCamera::default_view());
         v.cursor_moved(Vec2::new(100.0, 100.0));
         v.hover = Some(2);
         v.press();
@@ -360,7 +426,7 @@ mod tests {
         v.release();
         assert_eq!(v.travel_request, Some(2));
         // a drag doesn't click, it turns the camera
-        let mut v = MapView::new(false);
+        let mut v = MapView::new(false, MapCamera::default_view());
         v.cursor_moved(Vec2::new(100.0, 100.0));
         v.hover = Some(1);
         let yaw = v.camera.yaw;
@@ -400,5 +466,48 @@ mod tests {
         assert!(c.eye().length() >= 2.0 * STAR_MAP_RADIUS - 1e-4);
         c.zoom(-1000.0);
         assert!((c.distance - D_MAX * 4.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn galaxy_camera_has_its_own_range() {
+        let mut c = MapCamera::galaxy_view();
+        c.zoom(-1000.0);
+        assert!((c.distance - c.max_distance).abs() < 1e-3);
+        c.zoom(1000.0);
+        assert!((c.distance - c.min_distance).abs() < 1e-3);
+        let m = MapCamera::default_view();
+        assert!(
+            (m.max_distance - D_MAX * 4.0).abs() < 1e-3,
+            "system map range unchanged"
+        );
+    }
+
+    #[test]
+    fn the_system_under_the_cursor_is_picked() {
+        let g = crate::space::galaxy::Galaxy::generate(1);
+        let cam = MapCamera::galaxy_view();
+        let screen = (1600.0, 900.0);
+        let c = galaxy_view_position(g.systems[7].position);
+        let clip = cam.view_proj(screen.0 / screen.1, MAP_FOV_Y) * c.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        let px = Vec2::new(
+            (ndc.x * 0.5 + 0.5) * screen.0,
+            (0.5 - ndc.y * 0.5) * screen.1,
+        );
+        let hit = pick_system(&g, &cam, px, screen).expect("something under the cursor");
+        let ch = galaxy_view_position(g.systems[hit].position);
+        let clip = cam.view_proj(screen.0 / screen.1, MAP_FOV_Y) * ch.extend(1.0);
+        let n2 = clip.truncate() / clip.w;
+        let p2 = Vec2::new((n2.x * 0.5 + 0.5) * screen.0, (0.5 - n2.y * 0.5) * screen.1);
+        assert!((p2 - px).length() < 12.0);
+    }
+
+    #[test]
+    fn label_rules() {
+        assert!(shows_label(3, 3, None, None, false), "current");
+        assert!(shows_label(5, 3, Some(5), None, false), "hovered");
+        assert!(shows_label(5, 3, None, Some(5), false), "selected");
+        assert!(shows_label(5, 3, None, None, true), "visited");
+        assert!(!shows_label(5, 3, None, None, false));
     }
 }

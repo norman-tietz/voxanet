@@ -1,3 +1,4 @@
+pub mod galaxy;
 pub mod icosphere;
 pub mod impostor;
 pub mod map;
@@ -5,3 +6,4 @@ pub mod render;
 pub mod solar_system;
 pub mod star_shading;
 pub mod travel;
+pub mod universe;

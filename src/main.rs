@@ -356,7 +356,10 @@ fn digit_key(code: KeyCode) -> Option<usize> {
 
 // opens the solar-system map: the keyboard and mouse go to it (no movement, the cursor freed)
 fn open_map(controller: &mut Controller) -> crate::space::map::MapView {
-    let view = crate::space::map::MapView::new(controller.mouse_released);
+    let view = crate::space::map::MapView::new(
+        controller.mouse_released,
+        crate::space::map::MapCamera::default_view(),
+    );
     controller.release_keys();
     controller.mouse_released = true;
     view
