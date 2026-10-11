@@ -205,6 +205,8 @@ pub struct Renderer {
     precip: crate::precipitation::Precipitation, // rain, snow, ash, dust around the camera (CPU side)
     precip_gpu: crate::precipitation::PrecipGpu, // and its draw (precip.wgsl)
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
+    perf: Option<crate::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
+    perf_message: Option<String>, // its finished summary, for the console
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
     env_map: crate::env_map::EnvMap,       // the plastic's pre-filtered sky reflection (group 0)
@@ -1156,6 +1158,8 @@ impl Renderer {
             precip: crate::precipitation::Precipitation::new(),
             precip_gpu,
             precip_clock: None,
+            perf: None,
+            perf_message: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -2466,6 +2470,7 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.poll(&self.device);
         }
+        self.perf_tick("planet");
         // before the backdrop, which draws clouds too
         self.update_sky_maps(time);
 
@@ -3329,6 +3334,63 @@ impl Renderer {
     }
 
     // the weather's force or on/off changed: the snapshots are outdated
+    // starts a performance recording (perf.rs): every frame for `seconds`, then one line in perf.log
+    pub fn start_perf(&mut self, seconds: f32, label: &str) {
+        self.perf = Some(crate::perf::PerfRecorder::new(seconds, label));
+    }
+
+    pub fn perf_running(&self) -> bool {
+        self.perf.is_some()
+    }
+
+    // the finished recording's summary (or its error), once
+    pub fn take_perf_message(&mut self) -> Option<String> {
+        self.perf_message.take()
+    }
+
+    // once per frame: feeds the recording this frame's GPU times; writes the report when it's done
+    fn perf_tick(&mut self, mode: &str) {
+        let gpu = self.gpu_timer.as_mut().and_then(|t| t.take_frame());
+        let Some(rec) = &mut self.perf else { return };
+        if !rec.frame(gpu) {
+            return;
+        }
+        let ctx = crate::perf::PerfContext {
+            width: self.config.width,
+            height: self.config.height,
+            mode: mode.to_string(),
+            settings: vec![
+                ("style".into(), format!("{:?}", crate::lowpoly::style())),
+                ("chunks".into(), self.chunks.len().to_string()),
+                ("lods".into(), self.lod_chunks.len().to_string()),
+                ("hw_shadows".into(), self.hw_shadows.to_string()),
+                ("ao".into(), self.ao.enabled.to_string()),
+                (
+                    "shadow".into(),
+                    format!("soft={} sun={}", self.shadow.soft, self.shadow.sun_deg),
+                ),
+                ("plastic".into(), self.plastic.enabled.to_string()),
+                (
+                    "weather".into(),
+                    format!(
+                        "on={} particles={}",
+                        self.weather.on, self.weather.particles
+                    ),
+                ),
+                ("gpu_timer".into(), self.gpu_timer.is_some().to_string()),
+            ],
+        };
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let line = rec.report(&ctx, time, &crate::perf::git_commit());
+        self.perf_message = Some(match crate::perf::append_log(&line) {
+            Ok(_) => rec.summary(),
+            Err(e) => format!("Perf: couldn't write {}: {e}", crate::perf::LOG_PATH),
+        });
+        self.perf = None;
+    }
+
     pub fn weather_changed(&mut self) {
         self.weather_map.reset();
         self.cloud_map.reset();
@@ -3342,6 +3404,7 @@ impl Renderer {
         t: f64,
         console: &Console,
     ) {
+        self.perf_tick("galaxy");
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.galaxy.plastic = self.plastic.impostor_uniform();
         self.galaxy.light = self.light.uniform();

@@ -34,6 +34,7 @@ pub struct GpuTimer {
     samples: u32,
     window_start: Instant,
     pub average_ms: [f32; PARTS.len()],
+    frame_ms: Option<[f32; PARTS.len()]>, // the latest readback's times, until taken (perf.rs)
 }
 
 impl GpuTimer {
@@ -77,6 +78,7 @@ impl GpuTimer {
             samples: 0,
             window_start: Instant::now(),
             average_ms: [0.0; PARTS.len()],
+            frame_ms: None,
         })
     }
 
@@ -137,16 +139,20 @@ impl GpuTimer {
         if self.in_flight && self.mapped.swap(false, Ordering::Acquire) {
             if let Ok(view) = self.readback_buf.get_mapped_range(..) {
                 let ticks: &[u64] = bytemuck::cast_slice(&view);
+                let mut frame = [0.0; PARTS.len()];
                 for part in 0..PARTS.len() {
                     let start = if part == 0 {
                         ticks[0]
                     } else {
                         ticks[2 * part - 1]
                     }; // previous part's end
-                    self.sums_ms[part] += ticks[2 * part + 1].saturating_sub(start) as f64
+                    let ms = ticks[2 * part + 1].saturating_sub(start) as f64
                         * self.period_ns as f64
                         / 1e6;
+                    self.sums_ms[part] += ms;
+                    frame[part] = ms as f32;
                 }
+                self.frame_ms = Some(frame);
                 self.samples += 1;
             }
             self.readback_buf.unmap();
@@ -160,6 +166,11 @@ impl GpuTimer {
             self.samples = 0;
             self.window_start = Instant::now();
         }
+    }
+
+    // one frame's GPU times per part, once per readback (a frame or two behind; perf.rs records them)
+    pub fn take_frame(&mut self) -> Option<[f32; PARTS.len()]> {
+        self.frame_ms.take()
     }
 
     pub fn summary(&self) -> String {

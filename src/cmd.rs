@@ -25,7 +25,7 @@ const HELP_LINES: [&str; 12] = [
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
-    "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]",
+    "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]   /perf <seconds> [label]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -81,6 +81,7 @@ pub struct Console {
     pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
     pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
+    pub perf_request: Option<(f32, String)>, // set by /perf: seconds and label (perf.rs)
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     pub shadow_request: Option<crate::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
@@ -106,6 +107,7 @@ impl Console {
             film_request: None,
             ao_request: None,
             plastic_request: None,
+            perf_request: None,
             weather_request: None,
             light_request: None,
             shadow_request: None,
@@ -284,6 +286,11 @@ impl Console {
 
             "/light" => match crate::light::LightCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.light_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
+            "/perf" => match crate::perf::parse_command(&parts[1..]) {
+                Ok(req) => self.perf_request = Some(req),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 

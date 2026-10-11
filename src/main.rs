@@ -27,6 +27,7 @@ mod lowpoly;
 mod material;
 mod mc_tables;
 mod noise;
+mod perf;
 mod physics;
 mod plastic;
 mod precipitation;
@@ -285,7 +286,9 @@ struct Game {
     bake_rx: Option<std::sync::mpsc::Receiver<BakedPlanet>>, // the running background bake, if any
     baking: Option<usize>,     // which planet it is for
     voxel_ready_announced: bool, // "voxel world ready" printed for the loaded galaxy planet
-    clock: Instant,            // shared game clock: galaxy orbits and planet day/night
+    clock: GameClock,          // shared game clock: galaxy orbits and planet day/night
+    bench: Option<Bench>,      // a --bench run in progress (perf.rs)
+    pub quit: bool,            // the bench run is done: about_to_wait exits
     loaded_world: usize,       // the galaxy planet the voxel engine holds (always one)
     start_planet: usize,       // where the game starts and /galaxy home returns to
     // each planet's edits while another planet is installed (stash_edits), handed to its next bake
@@ -293,6 +296,42 @@ struct Game {
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
+}
+
+// the shared game clock: seconds since the start planet was baked, or frozen at 0 for a --bench run
+struct GameClock {
+    start: Instant,
+    frozen: bool,
+}
+
+impl GameClock {
+    fn new(frozen: bool) -> Self {
+        Self {
+            start: Instant::now(),
+            frozen,
+        }
+    }
+
+    fn now(&self) -> f64 {
+        if self.frozen {
+            0.0
+        } else {
+            self.start.elapsed().as_secs_f64()
+        }
+    }
+}
+
+// a --bench run: wait until the world is streamed in (+2 s), run the --exec commands, wait 1 s,
+// record (perf.rs), quit
+struct Bench {
+    args: crate::perf::BenchArgs,
+    stage: BenchStage,
+}
+
+enum BenchStage {
+    Loading(Option<Instant>), // since when the view has been covered
+    Settling(Instant),        // commands run at
+    Recording,
 }
 
 impl Game {
@@ -313,7 +352,9 @@ impl Game {
         let impostor_generation = baked.impostor_generation;
         // the clock starts once the bake is done, so t = 0 really is now and the planet hasn't
         // turned on past noon while baking
-        let clock = Instant::now();
+        // a --bench run freezes it at t = 0 (noon, no day cycle, clouds and weather standing still)
+        let bench = crate::perf::parse_bench_args(&std::env::args().collect::<Vec<_>>());
+        let clock = GameClock::new(bench.is_some());
         let spawn = noon_spawn(&baked.data, &galaxy, start_planet, 0.0);
         install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
         player.spawn(spawn);
@@ -368,6 +409,11 @@ impl Game {
             voxel_ready_announced: false,
             landed_at: None,
             clock,
+            bench: bench.map(|args| Bench {
+                args,
+                stage: BenchStage::Loading(None),
+            }),
+            quit: false,
             loaded_world: start_planet,
             start_planet,
             edits_by_planet: std::collections::HashMap::new(),
@@ -400,6 +446,8 @@ impl Game {
             edits_by_planet,
             impostor_generation,
             impostor_rx,
+            bench,
+            quit,
         } = self;
 
         let now = Instant::now();
@@ -485,7 +533,7 @@ impl Game {
                         galaxy_flight.position = kept;
                     }
                 }
-                let t = clock.elapsed().as_secs_f64();
+                let t = clock.now();
                 // capture by / release from a planet's frame (galaxy.rs, CAPTURE_RADII)
                 let next = crate::galaxy::next_flight_frame(
                     galaxy,
@@ -587,7 +635,7 @@ impl Game {
                 let local = match *flight_frame {
                     FlightFrame::Captured(_) => galaxy_flight.position,
                     FlightFrame::Free => galaxy.planets[baked.index]
-                        .to_planet_frame(galaxy_flight.position, clock.elapsed().as_secs_f64()),
+                        .to_planet_frame(galaxy_flight.position, clock.now()),
                 };
                 let index = baked.index;
                 let generation = baked.impostor_generation;
@@ -664,14 +712,14 @@ impl Game {
                         let baked = bake_planet(galaxy, i, edits_by_planet.remove(&i));
                         let generation = baked.impostor_generation;
                         // the time after the bake: the planet keeps turning while it bakes
-                        let t = clock.elapsed().as_secs_f64();
+                        let t = clock.now();
                         let spawn = noon_spawn(&baked.data, galaxy, i, t);
                         stash_edits(edits_by_planet, Some(*loaded_world), i, planet);
                         install_world(renderer, controller, planet, baked, spawn);
                         *impostor_generation = generation;
                         *loaded_world = i;
                     }
-                    let t = clock.elapsed().as_secs_f64();
+                    let t = clock.now();
                     player.spawn(noon_spawn(planet, galaxy, i, t));
                     player.handover_altitude =
                         Some(crate::landing::handover_altitude(galaxy.planets[i].radius));
@@ -707,7 +755,7 @@ impl Game {
                         [1.0, 0.5, 0.0],
                     ),
                     Some(target) => {
-                        let t = clock.elapsed().as_secs_f64();
+                        let t = clock.now();
                         // over the day side, looking at the planet's centre (roll levels out by itself)
                         let dir = target.sun_dir_in_planet_frame(galaxy.star.position(), t);
                         *galaxy_flight = crate::galaxy::GalaxyFlight::new(
@@ -736,6 +784,35 @@ impl Game {
             let _ = std::fs::remove_file(SCREENSHOT_TRIGGER);
             renderer.request_screenshot(path.trim().to_string());
         }
+        // --bench: wait for the world, run its commands, record, then quit (perf.rs)
+        if let Some(b) = bench {
+            match &mut b.stage {
+                BenchStage::Loading(since) => {
+                    if renderer.view_covered() {
+                        let since = *since.get_or_insert_with(Instant::now);
+                        if since.elapsed().as_secs_f32() >= 2.0 {
+                            for cmd in &b.args.exec {
+                                console.exec(cmd, player);
+                            }
+                            b.stage = BenchStage::Settling(Instant::now());
+                        }
+                    } else {
+                        *since = None;
+                    }
+                }
+                BenchStage::Settling(at) => {
+                    if at.elapsed().as_secs_f32() >= 1.0 {
+                        renderer.start_perf(b.args.seconds, &b.args.label);
+                        b.stage = BenchStage::Recording;
+                    }
+                }
+                BenchStage::Recording => {
+                    if !renderer.perf_running() {
+                        *quit = true;
+                    }
+                }
+            }
+        }
         const COMMAND_TRIGGER: &str = "/tmp/voxanet_cmd.trigger";
         if let Ok(cmd) = std::fs::read_to_string(COMMAND_TRIGGER) {
             let _ = std::fs::remove_file(COMMAND_TRIGGER);
@@ -756,6 +833,16 @@ impl Game {
             let msg = renderer.plastic.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
+        if let Some((secs, label)) = console.perf_request.take() {
+            renderer.start_perf(secs, &label);
+            console.log(
+                &format!("Perf: recording {secs} s as '{label}'..."),
+                [0.0, 1.0, 0.0],
+            );
+        }
+        if let Some(msg) = renderer.take_perf_message() {
+            console.log(&msg, [0.0, 1.0, 0.0]); // also printed to the terminal
+        }
         if let Some(cmd) = console.weather_request.take() {
             use crate::weather::WeatherCommand;
             // in galaxy flight the player's position and the loaded planet's type are stale: only the
@@ -772,7 +859,7 @@ impl Game {
                 );
             } else {
                 let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
-                let t = (clock.elapsed().as_secs_f64() % 3600.0) as f32;
+                let t = (clock.now() % 3600.0) as f32;
                 let (msg, changed) = renderer.weather.apply(cmd, kind, player.position, t);
                 if changed {
                     renderer.weather_changed();
@@ -1049,7 +1136,7 @@ impl Game {
             }
 
             WindowEvent::RedrawRequested => {
-                let t = self.clock.elapsed().as_secs_f64();
+                let t = self.clock.now();
                 match &self.mode {
                     GameMode::Planet => {
                         let i = self.loaded_world;
@@ -1145,9 +1232,13 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(game) = &mut self.game else { return };
         game.tick();
+        if game.quit {
+            event_loop.exit();
+            return;
+        }
         game.renderer.window.request_redraw();
     }
 }
