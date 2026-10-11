@@ -869,6 +869,28 @@ impl MeshGen {
         let block_center = centre_dir * CoordSystem::get_layer_radius_f(id.layer as f32 + 0.5, res);
         let water_here = data.water_surface_radius(id.face, id.u, id.v);
 
+        // the fans: the whole cell, or the two convex halves of a cell hex::fan_split cuts (each a run of
+        // walls closed by the split line); each part's vertices measure only the sides bounding it, so
+        // every side's distance interpolates exactly within the part
+        let n_walls = walls.len();
+        let parts: Vec<Vec<usize>> = match crate::hex::fan_split(id.u, id.v, res) {
+            None => vec![(0..n_walls).collect()],
+            Some(x) => {
+                let left = |i: usize| walls[i].a.0.max(walls[i].b.0) <= x;
+                [true, false]
+                    .into_iter()
+                    .map(|want| {
+                        let first = (0..n_walls)
+                            .find(|&i| left(i) == want && left((i + n_walls - 1) % n_walls) != want)
+                            .expect("a split cell has walls on both sides");
+                        (0..n_walls)
+                            .map(|k| (first + k) % n_walls)
+                            .take_while(|&i| left(i) == want)
+                            .collect()
+                    })
+                    .collect()
+            }
+        };
         let fan = |verts: &mut Vec<Vertex>,
                    inds: &mut Vec<u32>,
                    idx: &mut u32,
@@ -880,29 +902,53 @@ impl MeshGen {
             } else {
                 -centre_dir
             };
-            let centre = centre_dir * CoordSystem::get_layer_radius(layer, res);
-            let pieces: Vec<_> = walls
-                .iter()
-                .map(|w| (corner(w.a, layer), corner(w.b, layer)))
-                .collect();
-            // every vertex measures every side of the cell (slot = side), so the fan shares them
-            let vertex = |p: Vec3, color: [f32; 3]| Vertex {
-                pos: p.to_array(),
-                color,
-                normal: normal.to_array(),
-                water: water_here,
-                edge: crate::bevel::pack(crate::bevel::polygon_edges(p, &side_of, &pieces)),
-            };
-            let base_idx = *idx;
-            verts.push(vertex(centre, centre_color));
-            for (&(a, _), &color) in pieces.iter().zip(colors) {
-                verts.push(vertex(a, color));
+            let radius = CoordSystem::get_layer_radius(layer, res);
+            for part in &parts {
+                let whole = part.len() == n_walls;
+                // the part's corners (sixths) with the wall each starts: a split half adds the end of its
+                // last wall, where the split line closes it
+                let mut corners: Vec<((i64, i64), usize)> =
+                    part.iter().map(|&i| (walls[i].a, i)).collect();
+                if !whole {
+                    let last = *part.last().unwrap();
+                    corners.push((walls[last].b, (last + 1) % n_walls));
+                }
+                let centre = if whole {
+                    centre_dir * radius
+                } else {
+                    let pts: Vec<_> = corners.iter().map(|c| c.0).collect();
+                    let (pu, pv) = crate::hex::centroid(&pts);
+                    CoordSystem::get_direction_f(id.face, pu, pv, res) * radius
+                };
+                let pieces: Vec<_> = part
+                    .iter()
+                    .map(|&i| (corner(walls[i].a, layer), corner(walls[i].b, layer)))
+                    .collect();
+                let part_sides: Vec<_> = part.iter().map(|&i| side_of[i]).collect();
+                // every vertex of the part measures every side bounding it (slot = side), so the fan
+                // shares them
+                let vertex = |p: Vec3, color: [f32; 3]| Vertex {
+                    pos: p.to_array(),
+                    color,
+                    normal: normal.to_array(),
+                    water: water_here,
+                    edge: crate::bevel::pack(crate::bevel::polygon_edges(p, &part_sides, &pieces)),
+                };
+                let base_idx = *idx;
+                verts.push(vertex(centre, centre_color));
+                for &(q, i) in &corners {
+                    verts.push(vertex(corner(q, layer), colors[i]));
+                }
+                let m = corners.len() as u32;
+                for i in 0..m {
+                    inds.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1 + i,
+                        base_idx + 1 + (i + 1) % m,
+                    ]);
+                }
+                *idx += m + 1;
             }
-            let n = walls.len() as u32;
-            for i in 0..n {
-                inds.extend_from_slice(&[base_idx, base_idx + 1 + i, base_idx + 1 + (i + 1) % n]);
-            }
-            *idx += n + 1;
         };
 
         if !has_top {
@@ -2677,6 +2723,78 @@ mod hex_mesh_tests {
                         .filter(|&&i| edges[i as usize].iter().any(|d| d.abs() < 1e-3))
                         .count();
                     assert!(on >= 2, "triangle {tri:?}");
+                }
+            }
+        }
+    }
+
+    // the top and bottom fans' bevel distances interpolate exactly: wherever a side's interpolated
+    // distance is small, the point really is that close to the side (a fan over a non-convex cell
+    // interpolated distances to a side's line across its extension: dark groove spikes into the cell)
+    #[test]
+    fn hex_fan_bevel_distances_are_exact() {
+        fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+            (p - (a + ab * t)).length()
+        }
+        for res in [32u32, 33] {
+            let mut planet = PlanetData::new(res);
+            planet.cells = CellShape::Hex;
+            for key in all_keys(&planet) {
+                let (verts, inds) = MeshGen::build_chunk_hex(key, &planet);
+                for tri in inds.chunks_exact(3) {
+                    let v: Vec<_> = tri.iter().map(|&i| &verts[i as usize]).collect();
+                    let pos: Vec<Vec3> = v.iter().map(|v| Vec3::from_array(v.pos)).collect();
+                    let r: Vec<f32> = pos.iter().map(|p| p.length()).collect();
+                    if (r[0] - r[1]).abs() > 1e-3 || (r[0] - r[2]).abs() > 1e-3 {
+                        continue; // a wall piece
+                    }
+                    let centre = (pos[0] + pos[1] + pos[2]) / 3.0;
+                    let (id, ..) = planet.cell_local(centre * 0.999).unwrap();
+                    let walls = planet.hex_walls(id.face, id.u, id.v);
+                    let side_of = crate::bevel::polygon_lines(
+                        &walls.iter().map(|w| (w.a, w.b)).collect::<Vec<_>>(),
+                    );
+                    // the fan's layer boundary: the one at the triangle's radius
+                    let layer = [id.layer, id.layer + 1]
+                        .into_iter()
+                        .min_by(|&a, &b| {
+                            let d = |l| (CoordSystem::get_layer_radius(l, res) - r[0]).abs();
+                            d(a).total_cmp(&d(b))
+                        })
+                        .unwrap();
+                    let corner = |q: (i64, i64)| {
+                        CoordSystem::get_vertex_pos_six(id.face, q.0, q.1, layer, res)
+                    };
+                    let edges: Vec<_> = v.iter().map(|v| crate::bevel::unpack(v.edge)).collect();
+                    for w in [
+                        [0.6, 0.2, 0.2],
+                        [0.2, 0.6, 0.2],
+                        [0.2, 0.2, 0.6],
+                        [0.34, 0.33, 0.33],
+                    ] {
+                        let p = pos[0] * w[0] + pos[1] * w[1] + pos[2] * w[2];
+                        for slot in 0..crate::bevel::SLOTS {
+                            if edges.iter().any(|e| e[slot] >= crate::bevel::NO_EDGE) {
+                                continue;
+                            }
+                            let d: f32 = (0..3).map(|k| edges[k][slot] * w[k]).sum();
+                            if d >= 0.1 {
+                                continue;
+                            }
+                            let real = walls
+                                .iter()
+                                .zip(&side_of)
+                                .filter(|(_, &s)| s == slot)
+                                .map(|(w, _)| segment_distance(p, corner(w.a), corner(w.b)))
+                                .fold(f32::MAX, f32::min);
+                            assert!(
+                                real < d + 0.03,
+                                "res {res} cell {id:?} slot {slot}: interpolated {d}, really {real}"
+                            );
+                        }
+                    }
                 }
             }
         }

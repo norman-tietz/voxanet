@@ -87,6 +87,14 @@ fn drop_collinear(mut pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
     }
 }
 
+// where a non-convex cell's top and bottom fans are split (u6 of a vertical line), None for a convex
+// cell. Only the widened first cell of an odd row isn't convex: the neighbouring rows' points poke into
+// it at u = ½, its old left corners. The bevel's distances to a side's line interpolate exactly only
+// over a fan whose vertices all lie on the line's inner side, so the mesher draws each half separately.
+pub fn fan_split(u: u32, v: u32, res: u32) -> Option<i64> {
+    (u == 0 && v % 2 == 1 && res > 1).then_some(3)
+}
+
 // the centroid of an outline, in columns (the top and bottom faces' fan centre)
 pub fn centroid(pts: &[(i64, i64)]) -> (f64, f64) {
     let (mut a, mut cx, mut cy) = (0.0, 0.0, 0.0);
@@ -262,6 +270,34 @@ mod tests {
                 total += row;
             }
             assert_eq!(total, (res * res) as f64);
+        }
+    }
+
+    // the fans fan_split cuts are convex, and every other cell is convex as it is
+    #[test]
+    fn fan_parts_are_convex() {
+        let convex = |p: &[(i64, i64)]| {
+            let n = p.len();
+            (0..n).all(|i| {
+                let (a, b, c) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
+                (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0) >= 0
+            })
+        };
+        for res in [7u32, 8] {
+            for v in 0..res {
+                for u in 0..res {
+                    let p = outline(u, v, res);
+                    match fan_split(u, v, res) {
+                        None => assert!(convex(&p), "({u},{v}) {p:?}"),
+                        Some(x) => {
+                            let left: Vec<_> = p.iter().copied().filter(|q| q.0 <= x).collect();
+                            let right: Vec<_> = p.iter().copied().filter(|q| q.0 >= x).collect();
+                            assert!(convex(&left) && convex(&right), "({u},{v}) {p:?}");
+                            assert!(left.len() >= 3 && right.len() >= 3, "({u},{v}) {p:?}");
+                        }
+                    }
+                }
+            }
         }
     }
 
