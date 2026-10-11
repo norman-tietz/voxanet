@@ -33,8 +33,8 @@ pub struct Deferred {
     pub blur_pipeline: wgpu::RenderPipeline,  // fs_motion_blur: `shaded` onto the swapchain
     pub water_pipeline: wgpu::RenderPipeline,
     down_pipeline: wgpu::ComputePipeline,
-    textures_layout: wgpu::BindGroupLayout, // group 3: the full-resolution G-buffer
-    down_layout: wgpu::BindGroupLayout,     // group 1 of cs_gbuf_down: shadow G-buffer outputs
+    pub textures_layout: wgpu::BindGroupLayout, // group 3: the full-resolution G-buffer
+    down_layout: wgpu::BindGroupLayout,         // group 1 of cs_gbuf_down: shadow G-buffer outputs
     albedo: wgpu::TextureView,
     normal: wgpu::TextureView,
     dist: wgpu::TextureView,

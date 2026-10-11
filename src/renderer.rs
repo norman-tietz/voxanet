@@ -44,7 +44,9 @@ pub(crate) const SCENE_SHADER: &str = concat!(
     include_str!("clouds.wgsl"),
     include_str!("star.wgsl"),
     "\n",
-    include_str!("shader.wgsl")
+    include_str!("shader.wgsl"),
+    "\n",
+    include_str!("precip.wgsl")
 );
 
 // --- UNIFORMS ---
@@ -200,6 +202,9 @@ pub struct Renderer {
     galaxy: crate::galaxy_render::GalaxyRenderer,
     weather_map: crate::weather::WeatherMap, // the baked weather (weather.rs), group 0 of the scene and the galaxy
     pub weather: crate::weather::WeatherSettings,
+    precip: crate::precipitation::Precipitation, // rain, snow, ash, dust around the camera (CPU side)
+    precip_gpu: crate::precipitation::PrecipGpu, // and its draw (precip.wgsl)
+    precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
     env_map: crate::env_map::EnvMap,       // the plastic's pre-filtered sky reflection (group 0)
@@ -772,6 +777,14 @@ impl Renderer {
         );
         let galaxy =
             crate::galaxy_render::GalaxyRenderer::new(&device, &config, &cloud_map, &weather_map);
+        let precip_gpu = crate::precipitation::PrecipGpu::new(
+            &device,
+            &shader,
+            &global_layout,
+            &rt_blur.sample_layout,
+            &deferred.textures_layout,
+            config.format,
+        );
 
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1140,6 +1153,9 @@ impl Renderer {
             cloud_map,
             weather_map,
             weather: crate::weather::WeatherSettings::default(),
+            precip: crate::precipitation::Precipitation::new(),
+            precip_gpu,
+            precip_clock: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -1969,6 +1985,8 @@ impl Renderer {
         self.generation += 1; // results still in flight belong to the old planet
         self.env_reset = true; // the sky around the camera is another planet's
         self.weather_map.reset();
+        self.precip.reset(); // another planet: new roof grid, no offset carried over
+        self.precip_clock = None;
         self.edit_epoch += 1; // the progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
@@ -2485,6 +2503,11 @@ impl Renderer {
         // the sun direction comes from the game (the real star,
         // GalaxyPlanet::sun_dir_in_planet_frame); everything downstream (shade(), caustics, cloud_shadow, both
         // shadow paths) re-reads it fresh every frame. The water animation clock wraps hourly as before.
+        let precip_dt = self
+            .precip_clock
+            .map_or(0.0, |c| (time - c) as f32)
+            .clamp(0.0, 0.1);
+        self.precip_clock = Some(time);
         let time = (time % 3600.0) as f32;
 
         // -- Camera Matrix --
@@ -2572,6 +2595,21 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
+
+        // precipitation around the camera (precipitation.rs); none seen from under water
+        let mut precip = self.precip.update(
+            precip_dt,
+            cam_pos,
+            planet,
+            &self.weather,
+            &self.weather_force,
+            time,
+        );
+        if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
+            precip.instances = 0;
+        }
+        self.precip_gpu
+            .update(&self.queue, &precip, self.precip.grid(), time);
 
         // the installed planet is the one the backdrop leaves out (the voxel engine draws it)
         let (angular_radius, star_frame) = match backdrop.content {
@@ -2933,6 +2971,8 @@ impl Renderer {
                     }
                 }
             }
+            // rain, snow, ash or dust over the water and the lit scene (precip.wgsl)
+            self.precip_gpu.draw(&mut pass);
 
             if self.collision_inds > 0 {
                 pass.set_pipeline(&self.pipeline_line); // Use line pipeline
@@ -3307,6 +3347,8 @@ impl Renderer {
         self.galaxy.light = self.light.uniform();
         self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after galaxy mode bakes the map whole
+        self.precip.reset(); // the landing starts the particles over
+        self.precip_clock = None;
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
             | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
@@ -3918,6 +3960,21 @@ pub(crate) mod tests {
         assert!(crate::galaxy_render::GALAXY_SHADER.contains("fn weather_at("));
         let bake = include_str!("cloud_bake.wgsl");
         assert!(bake.contains("weather_storm(dir, t, bake.force) * STORM_COVER"));
+    }
+
+    #[test]
+    fn precipitation_is_drawn_from_the_roof_grid() {
+        let p = include_str!("precip.wgsl");
+        let vs = &p[p.find("fn vs_precip(").unwrap()..];
+        assert!(vs[..vs.find("\n}\n").unwrap()].contains("textureLoad(roof_grid"));
+        let fs = &p[p.find("fn fs_precip(").unwrap()..];
+        assert!(fs[..fs.find("\n}\n").unwrap()].contains("post_process("));
+        assert!(SCENE_SHADER.contains("fn vs_precip("));
+        assert!(p.contains(&format!(
+            "const ROOF_GRID: i32 = {};",
+            crate::precipitation::GRID
+        )));
+        assert!(p.contains("const BOX_SIZE: vec3<f32> = vec3<f32>(40.0, 30.0, 40.0);"));
     }
 
     #[test]

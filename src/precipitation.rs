@@ -6,8 +6,6 @@
 // out from under roofs. precip.wgsl draws it: stateless particles, position = hash(index) + offset,
 // wrapped in a box around the camera.
 
-#![cfg_attr(not(test), allow(dead_code))] // Task 2 (the GPU side) is the user of this module
-
 use glam::Vec3;
 
 use crate::common::PlanetData;
@@ -53,7 +51,7 @@ impl PrecipKind {
                 n_max: 8000,
                 fall: 1.2,
                 sway: 0.3,
-                size: 0.05,
+                size: 0.12,
                 alpha: 0.9,
                 color: [0.9, 0.9, 0.95],
             },
@@ -61,7 +59,7 @@ impl PrecipKind {
                 n_max: 8000,
                 fall: 1.6,
                 sway: 0.2,
-                size: 0.06,
+                size: 0.12,
                 alpha: 0.8,
                 color: [0.12, 0.12, 0.12],
             },
@@ -69,8 +67,8 @@ impl PrecipKind {
                 n_max: 6000,
                 fall: 0.3,
                 sway: 0.0,
-                size: 0.02,
-                alpha: 0.35,
+                size: 0.03,
+                alpha: 0.5,
                 color: [0.55, 0.40, 0.22],
             },
         }
@@ -558,5 +556,216 @@ mod tests {
             WeatherCommand::parse(&["particles", "maybe"]),
             Err(crate::weather::WEATHER_USAGE)
         );
+    }
+}
+
+// --- GPU: precip.wgsl's uniform, the roof grid texture and the draw ---
+
+// precip.wgsl's Precip uniform
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct PrecipUniform {
+    east: [f32; 4],   // w: time
+    up: [f32; 4],     // w: kind
+    north: [f32; 4],  // w: fall speed
+    offset: [f32; 4], // w: sway
+    wind: [f32; 4],   // w: size
+    color: [f32; 4],
+    grid_origin: [f32; 4], // w: cell size
+    grid_east: [f32; 4],
+    grid_north: [f32; 4],
+}
+
+pub struct PrecipGpu {
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    grid_tex: wgpu::Texture,
+    bind: wgpu::BindGroup,
+    instances: u32,
+}
+
+impl PrecipGpu {
+    pub fn new(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule, // the scene shader (precip.wgsl is appended to it)
+        global_layout: &wgpu::BindGroupLayout,
+        sample_layout: &wgpu::BindGroupLayout,
+        textures_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("precip_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Precip Uniform"),
+            size: std::mem::size_of::<PrecipUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let grid_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Roof Grid"),
+            size: wgpu::Extent3d {
+                width: GRID as u32,
+                height: GRID as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let grid_view = grid_tex.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("precip_bind"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&grid_view),
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("precip_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(global_layout),
+                Some(&layout),
+                Some(sample_layout),
+                Some(textures_layout),
+            ],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Precipitation"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_precip"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_precip"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::deferred::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            uniform,
+            grid_tex,
+            bind,
+            instances: 0,
+        }
+    }
+
+    // this frame's parameters and, when rebuilt, the roof grid; `t`: the clock wrapped at 3600
+    pub fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        f: &PrecipFrame,
+        grid: Option<&RoofGrid>,
+        t: f32,
+    ) {
+        self.instances = f.instances;
+        let (Some(kind), Some(grid)) = (f.kind, grid) else {
+            self.instances = 0;
+            return;
+        };
+        if f.grid_rebuilt {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.grid_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&grid.radii),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(GRID as u32 * 4),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: GRID as u32,
+                    height: GRID as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        if self.instances == 0 {
+            return;
+        }
+        let k = kind.params();
+        let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
+        let u = PrecipUniform {
+            east: v4(f.frame.east, t),
+            up: v4(f.frame.up, kind.index() as f32),
+            north: v4(f.frame.north, k.fall),
+            offset: v4(f.offset, k.sway),
+            wind: v4(f.wind, k.size),
+            color: [k.color[0], k.color[1], k.color[2], k.alpha],
+            grid_origin: v4(grid.origin, CELL),
+            grid_east: v4(grid.east, 0.0),
+            grid_north: v4(grid.north, 0.0),
+        };
+        queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[u]));
+    }
+
+    // in the lighting pass after the water: groups 0, 2 and 3 are bound there already
+    pub fn draw(&self, pass: &mut wgpu::RenderPass) {
+        if self.instances > 0 {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(1, &self.bind, &[]);
+            pass.draw(0..4, 0..self.instances);
+        }
     }
 }
