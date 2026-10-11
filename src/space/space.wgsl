@@ -316,3 +316,28 @@ fn fs_background(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let brightness = smoothstep(0.985, 1.0, h); // sparse: only the top ~1.5% of cells show a star
     return vec4<f32>(vec3<f32>(brightness), 1.0);
 }
+
+// --- the solar-system map's orbit rings and travel line (space/map.rs, Layout::Map) ---
+
+struct RingIn {
+    @location(0) pos: vec3<f32>,   // camera-relative
+    @location(1) color: vec4<f32>, // premultiplied
+}
+
+struct RingOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_ring(in: RingIn) -> RingOut {
+    var out: RingOut;
+    out.clip_pos = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_ring(in: RingOut) -> @location(0) vec4<f32> {
+    return in.color;
+}

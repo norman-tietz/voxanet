@@ -247,6 +247,73 @@ pub struct Backdrop<'a> {
     pub handover_overlay: Option<(usize, f32)>,
 }
 
+// where the bodies are drawn: at their real positions, or on the solar-system map (space/map.rs).
+// On the map every body's camera-relative offset is the mapped offset divided by the map's size factor
+// k (MapLayout::render_offset): perspective then shows it at its mapped apparent size, while radii,
+// light and every shading term stay in real units, so map planets look exactly like the real ones
+pub enum Layout<'a> {
+    Real,
+    Map {
+        map: &'a crate::space::map::MapLayout,
+        eye: Vec3, // the map camera's position in map units (the star at the map origin)
+    },
+}
+
+impl Layout<'_> {
+    // planet i's offset from the camera, in real units
+    pub fn planet_offset(
+        &self,
+        system: &SolarSystem,
+        i: usize,
+        camera: &SpaceCamera,
+        t: f64,
+    ) -> DVec3 {
+        let pos = system.planets[i].position_at(t);
+        match self {
+            Layout::Real => pos - camera.position,
+            Layout::Map { map, eye } => {
+                map.render_offset(map.position(pos - system.star.position()), *eye)
+            }
+        }
+    }
+
+    // the star's offset from the camera and its drawn radius, in real units
+    pub fn star(&self, system: &SolarSystem, camera: &SpaceCamera) -> (DVec3, f64) {
+        match self {
+            Layout::Real => (system.star.position() - camera.position, system.star.radius),
+            Layout::Map { map, eye } => (
+                map.render_offset(Vec3::ZERO, *eye),
+                (crate::space::map::STAR_MAP_RADIUS / map.k) as f64,
+            ),
+        }
+    }
+}
+
+// a vertex of the map's orbit rings and travel line (fs_ring): camera-relative position, premultiplied
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct RingVertex {
+    pub pos: [f32; 3],
+    pub color: [f32; 4],
+}
+
+// the most ring vertices drawn (15 orbits × 128 segments × 2, plus a 256-segment travel line)
+const MAX_RING_VERTS: usize = 15 * 128 * 2 + 256 * 2;
+
+// where a camera-relative offset lands on screen (pixels, y down); None behind the camera
+pub fn project(camera: &SpaceCamera, offset: Vec3, screen: (f32, f32)) -> Option<glam::Vec2> {
+    let view = Mat4::from_quat(camera.rotation).inverse();
+    let clip = projection(camera.fov_y, screen.0 / screen.1) * view * offset.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(glam::Vec2::new(
+        (ndc.x * 0.5 + 0.5) * screen.0,
+        (0.5 - ndc.y * 0.5) * screen.1,
+    ))
+}
+
 pub struct SpaceRenderer {
     pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
     pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
@@ -256,6 +323,8 @@ pub struct SpaceRenderer {
     star_bind: wgpu::BindGroup,
     star_pipeline: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
+    ring_pipeline: wgpu::RenderPipeline, // the map's orbit rings and travel line (line list)
+    ring_buf: wgpu::Buffer,
     v_buf: wgpu::Buffer,
     i_buf: wgpu::Buffer,
     num_indices: u32,
@@ -703,11 +772,54 @@ impl SpaceRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
-                ..depth_stencil
+                ..depth_stencil.clone()
             }),
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
+        });
+
+        // the map's orbit rings and travel line: thin lines behind the planets, premultiplied, no depth write
+        let ring_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("SolarSystem Ring Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_ring"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RingVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_ring"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_write_enabled: Some(false),
+                ..depth_stencil.clone()
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let ring_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Map Rings"),
+            size: (MAX_RING_VERTS * std::mem::size_of::<RingVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         Self {
@@ -719,6 +831,8 @@ impl SpaceRenderer {
             star_bind,
             star_pipeline,
             background_pipeline,
+            ring_pipeline,
+            ring_buf,
             v_buf,
             i_buf,
             num_indices: indices.len() as u32,
@@ -746,19 +860,26 @@ impl SpaceRenderer {
         system: &SolarSystem,
         t: f64,
         screen: (f32, f32),
+        layout: &Layout,
+        rings: &[RingVertex], // the map's orbit rings and travel line (empty at true scale)
     ) {
         self.write_camera(queue, camera, t, screen, 0.0);
+        let rings = &rings[..rings.len().min(MAX_RING_VERTS)];
+        if !rings.is_empty() {
+            queue.write_buffer(&self.ring_buf, 0, bytemuck::cast_slice(rings));
+        }
 
         // the star (always drawn: only planets can be left out)
         {
             let star = system.star.star_type.def();
-            let offset = (system.star.position() - camera.position).as_vec3();
+            let (offset, radius) = layout.star(system, camera);
+            let offset = offset.as_vec3();
             let v4 = |c: [f32; 3], w: f32| [c[0], c[1], c[2], w];
             queue.write_buffer(
                 &self.star_buf,
                 0,
                 bytemuck::cast_slice(&[StarUniform {
-                    offset: [offset.x, offset.y, offset.z, system.star.radius as f32],
+                    offset: [offset.x, offset.y, offset.z, radius as f32],
                     surface: v4(star.surface_color, 0.0),
                     limb: v4(star.limb_color, 0.0),
                     corona: v4(star.corona_color, star.corona_size),
@@ -774,7 +895,7 @@ impl SpaceRenderer {
 
         let mut planet_uniforms = Vec::with_capacity(system.planets.len());
         for (i, p) in system.planets.iter().enumerate() {
-            let camera_relative = (p.position_at(t) - camera.position).as_vec3();
+            let camera_relative = layout.planet_offset(system, i, camera, t).as_vec3();
             // every planet keeps its uniform slot (slot i = planet i); only drawn ones need a mesh
             if content.draws_planet(i) && !self.has_near_impostor(i) {
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
@@ -783,7 +904,7 @@ impl SpaceRenderer {
             planet_uniforms.push(Self::planet_uniform(
                 system,
                 i,
-                camera,
+                camera_relative,
                 t,
                 self.plastic,
                 self.light,
@@ -846,8 +967,7 @@ impl SpaceRenderer {
                 if !content.draws_planet(i) {
                     continue;
                 }
-                let body_pos = p.position_at(t);
-                let camera_relative = (body_pos - camera.position).as_vec3();
+                let camera_relative = layout.planet_offset(system, i, camera, t).as_vec3();
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 let mesh = match &self.near_impostor {
                     Some((n, near)) if *n == i => Some(near),
@@ -874,7 +994,7 @@ impl SpaceRenderer {
                 .map(|i| {
                     (
                         i,
-                        (system.planets[i].position_at(t) - camera.position).length() as f32,
+                        layout.planet_offset(system, i, camera, t).length() as f32,
                     )
                 })
                 .collect();
@@ -885,6 +1005,14 @@ impl SpaceRenderer {
                     &[(i as u64 * self.planet_uniform_stride) as u32],
                 );
                 pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            }
+
+            // the map's orbit rings and travel line, over the background, behind the planets (depth)
+            if !rings.is_empty() {
+                pass.set_pipeline(&self.ring_pipeline);
+                pass.set_bind_group(0, &self.camera_bind, &[]);
+                pass.set_vertex_buffer(0, self.ring_buf.slice(..));
+                pass.draw(0..rings.len() as u32, 0..1);
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
@@ -922,14 +1050,13 @@ impl SpaceRenderer {
     fn planet_uniform(
         system: &SolarSystem,
         i: usize,
-        camera: &SpaceCamera,
+        camera_relative: Vec3, // the planet's offset from the camera (Layout::planet_offset)
         t: f64,
         plastic: [f32; 4],
         light: [f32; 4],
     ) -> PlanetUniform {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
-        let camera_relative = (body_pos - camera.position).as_vec3();
         let light_dir = (-body_pos).normalize_or_zero().as_vec3();
         let atmosphere = p.planet_type.def().atmosphere;
         let model = glam::Mat3::from_quat(p.orientation(t));
@@ -1001,7 +1128,9 @@ impl SpaceRenderer {
             bytemuck::cast_slice(&[Self::planet_uniform(
                 system,
                 index,
-                camera,
+                Layout::Real
+                    .planet_offset(system, index, camera, t)
+                    .as_vec3(),
                 t,
                 self.plastic,
                 self.light,

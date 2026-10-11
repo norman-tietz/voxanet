@@ -2508,6 +2508,8 @@ impl Renderer {
             backdrop.system,
             backdrop.t,
             screen,
+            &crate::space::render::Layout::Real,
+            &[],
         );
 
         self.update_rt_window(player.position, planet);
@@ -3450,6 +3452,8 @@ impl Renderer {
             system,
             t,
             screen,
+            &crate::space::render::Layout::Real,
+            &[],
         );
         self.update_fps();
         let heat = crate::space::solar_system::star_heat(
@@ -3488,6 +3492,381 @@ impl Renderer {
     // plus a compass strip across the top showing where the star and each planet are relative to
     // the view direction, with a distance to its surface. Text-only (glyphon), no extra pipeline.
     #[allow(clippy::too_many_arguments)]
+    // the solar-system map (space/map.rs): the space renderer in Layout::Map with orbit rings, then the
+    // labels, hover and selection rings, "you are here", the info panel and the help line
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_map(
+        &mut self,
+        system: &crate::space::solar_system::SolarSystem,
+        t: f64,
+        map_view: &crate::space::map::MapView,
+        here_planet: Option<usize>, // the planet you're on (planet mode)
+        ship: Option<glam::DVec3>,  // your position in space (space mode)
+        visited: &std::collections::HashSet<usize>,
+        travel_line: &[glam::DVec3], // a running trip's path, solar-system space
+        console: &Console,
+    ) {
+        use crate::space::map::{MapLayout, MAP_FOV_Y};
+        use crate::space::render::{project, Layout, RingVertex, SpaceCamera};
+        self.perf_tick("map");
+        self.system.plastic = self.plastic.impostor_uniform();
+        self.system.light = self.light.uniform();
+        self.update_sky_maps(t);
+        let out = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(o)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            _ => return,
+        };
+        let view = out
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let screen = (self.config.width as f32, self.config.height as f32);
+        let map = MapLayout::new(system);
+        let eye = map_view.camera.eye();
+        // the camera sits at the render origin looking at the star; every body comes from Layout::Map
+        let fwd = (-eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        let camera = SpaceCamera {
+            position: glam::DVec3::ZERO,
+            rotation: glam::Quat::from_mat3(&glam::Mat3::from_cols(right, up, -fwd)),
+            fov_y: MAP_FOV_Y,
+        };
+        let layout = Layout::Map { map: &map, eye };
+        let star = system.star.position();
+        let to_render = |p: Vec3| map.render_offset(p, eye).as_vec3();
+
+        // orbit rings (each orbit sampled over its period, so tilted orbits come out right), the trip's
+        // line, and rings around the hovered / selected planet and your ship
+        let mut rings: Vec<RingVertex> = Vec::new();
+        let polyline = |pts: &[Vec3], rgba: [f32; 4], closed: bool, rings: &mut Vec<RingVertex>| {
+            let c = [
+                rgba[0] * rgba[3],
+                rgba[1] * rgba[3],
+                rgba[2] * rgba[3],
+                rgba[3],
+            ];
+            let n = pts.len();
+            let segs = if closed { n } else { n.saturating_sub(1) };
+            for k in 0..segs {
+                for q in [pts[k], pts[(k + 1) % n]] {
+                    rings.push(RingVertex {
+                        pos: to_render(q).to_array(),
+                        color: c,
+                    });
+                }
+            }
+        };
+        for p in &system.planets {
+            let period = std::f64::consts::TAU / p.orbit_speed.abs().max(1e-9);
+            let pts: Vec<Vec3> = (0..128)
+                .map(|k| map.position(p.position_at(t + period * k as f64 / 128.0) - star))
+                .collect();
+            polyline(&pts, [0.55, 0.6, 0.7, 0.35], true, &mut rings);
+        }
+        if travel_line.len() > 1 {
+            let pts: Vec<Vec3> = travel_line
+                .iter()
+                .map(|q| map.position(*q - star))
+                .collect();
+            polyline(&pts, [1.0, 0.85, 0.3, 0.9], false, &mut rings);
+        }
+        // a camera-facing circle around a mapped point
+        let circle = |c: Vec3, r: f32| -> Vec<Vec3> {
+            let to_eye = (eye - c).normalize();
+            let a = to_eye.cross(Vec3::Y).normalize_or(Vec3::X);
+            let b = to_eye.cross(a);
+            (0..48)
+                .map(|k| {
+                    let ang = std::f32::consts::TAU * k as f32 / 48.0;
+                    c + (a * ang.cos() + b * ang.sin()) * r
+                })
+                .collect()
+        };
+        let mapped = |i: usize| map.position(system.planets[i].position_at(t) - star);
+        let ring_r = |i: usize| map.radius(system.planets[i].radius) * 1.6 + 0.4;
+        if let Some(i) = map_view.selected {
+            polyline(
+                &circle(mapped(i), ring_r(i)),
+                [1.0, 1.0, 1.0, 0.9],
+                true,
+                &mut rings,
+            );
+        }
+        if let Some(i) = map_view.hover.filter(|h| Some(*h) != map_view.selected) {
+            polyline(
+                &circle(mapped(i), ring_r(i)),
+                [1.0, 0.85, 0.3, 0.8],
+                true,
+                &mut rings,
+            );
+        }
+        let ship_map = ship.map(|p| map.position(p - star));
+        if let Some(c) = ship_map {
+            polyline(&circle(c, 0.8), [0.4, 1.0, 0.5, 0.9], true, &mut rings);
+        }
+
+        self.system.render(
+            &self.device,
+            &self.queue,
+            &view,
+            &self.deferred.depth,
+            &camera,
+            crate::space::render::SpaceContent::Everything,
+            system,
+            t,
+            screen,
+            &layout,
+            &rings,
+        );
+        self.update_fps();
+
+        // HUD: labels at the projected planets, the info panel, the help line
+        let mut texts: Vec<(String, f32, f32, f32, glyphon::Color)> = Vec::new();
+        let light = |rgb: [f32; 3], k: f32| {
+            let c = |v: f32| ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 * k) as u8;
+            glyphon::Color::rgb(c(rgb[0]), c(rgb[1]), c(rgb[2]))
+        };
+        for (i, p) in system.planets.iter().enumerate() {
+            let c = mapped(i);
+            let Some(px) = project(&camera, to_render(c), screen) else {
+                continue;
+            };
+            let def = p.planet_type.def();
+            let r_px = map.radius(p.radius) / (c - eye).length() / (MAP_FOV_Y / screen.1);
+            let bright = map_view.hover == Some(i) || map_view.selected == Some(i);
+            let here = if here_planet == Some(i) {
+                "  <- you"
+            } else {
+                ""
+            };
+            texts.push((
+                format!("#{} {}{here}", i + 1, def.name),
+                px.x + r_px + 6.0,
+                px.y - 9.0,
+                15.0,
+                light(def.palette.ground.color(), if bright { 1.0 } else { 0.75 }),
+            ));
+        }
+        if let Some(px) = ship_map.and_then(|c| project(&camera, to_render(c), screen)) {
+            texts.push((
+                "you".into(),
+                px.x + 10.0,
+                px.y - 8.0,
+                14.0,
+                glyphon::Color::rgb(110, 255, 140),
+            ));
+        }
+        let mut panel: Option<[u32; 4]> = None;
+        if let Some(i) = map_view.selected {
+            let p = &system.planets[i];
+            let def = p.planet_type.def();
+            let from = match (here_planet, ship) {
+                (Some(h), _) => Some(system.planets[h].position_at(t)),
+                (None, Some(s)) => Some(s),
+                _ => None,
+            };
+            let lines = [
+                format!("#{} {}", i + 1, def.name),
+                format!("radius {:.0}", p.radius),
+                format!("day {:.0} s", def.day_length_secs),
+                format!("liquid {}", def.liquid.map_or("none", |l| l.name)),
+                format!(
+                    "distance {}",
+                    from.map_or("-".into(), |f| crate::space::solar_system::format_distance(
+                        (p.position_at(t) - f).length()
+                    ))
+                ),
+                if visited.contains(&i) {
+                    "visited".into()
+                } else {
+                    "not visited".into()
+                },
+                if here_planet == Some(i) {
+                    "you are here".into()
+                } else {
+                    "Enter / click again: travel".into()
+                },
+            ];
+            let (x0, y0) = (20.0, screen.1 - 20.0 - lines.len() as f32 * 20.0 - 16.0);
+            panel = Some([
+                (x0 - 10.0) as u32,
+                (y0 - 8.0) as u32,
+                300,
+                (lines.len() as f32 * 20.0 + 24.0) as u32,
+            ]);
+            for (k, line) in lines.into_iter().enumerate() {
+                let size = if k == 0 { 18.0 } else { 15.0 };
+                texts.push((
+                    line,
+                    x0,
+                    y0 + k as f32 * 20.0,
+                    size,
+                    glyphon::Color::rgb(230, 230, 235),
+                ));
+            }
+        }
+        let help =
+            "drag: rotate   wheel: zoom   click / 1-9: select   Enter: travel   M / Esc: close";
+        texts.push((
+            help.into(),
+            (screen.0 - help.len() as f32 * 8.4) / 2.0,
+            12.0,
+            14.0,
+            glyphon::Color::rgb(170, 170, 180),
+        ));
+        texts.push((
+            format!("FPS: {}", self.current_fps),
+            screen.0 - 120.0,
+            34.0,
+            18.0,
+            glyphon::Color::rgb(0, 255, 0),
+        ));
+        self.draw_hud(&view, texts, panel, console);
+        if let Some(path) = self.screenshot_request.take() {
+            crate::app::screenshot::capture(
+                &self.device,
+                &self.queue,
+                &out.texture,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+                &path,
+            );
+            self.screenshot_flash = Some(std::time::Instant::now());
+        }
+        self.queue.present(out);
+        self.text_atlas.trim();
+    }
+
+    // HUD text over the finished frame, with an optional dark panel under part of it and the console
+    fn draw_hud(
+        &mut self,
+        view: &wgpu::TextureView,
+        texts: Vec<(String, f32, f32, f32, glyphon::Color)>,
+        panel: Option<[u32; 4]>, // x, y, width, height in pixels
+        console: &Console,
+    ) {
+        let (width, height) = (self.config.width as f32, self.config.height as f32);
+        let mut buffers: Vec<(Buffer, f32, f32)> = texts
+            .into_iter()
+            .map(|(text, x, y, size, color)| {
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
+                buf.set_size(Some(width), Some(height));
+                buf.set_text(
+                    &text,
+                    &Attrs::new().family(Family::Monospace).color(color),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                (buf, x, y)
+            })
+            .collect();
+        let console_panel_px = console_height_px(height, console.height_fraction).round() as u32;
+        if console_panel_px > 0 {
+            buffers.retain(|(_, _, y)| *y >= console_panel_px as f32);
+            buffers.extend(
+                self.console_text(console)
+                    .into_iter()
+                    .map(|(buf, y)| (buf, 10.0, y)),
+            );
+        }
+        let text_areas: Vec<TextArea> = buffers
+            .iter()
+            .map(|(buf, x, y)| TextArea {
+                buffer: buf,
+                left: *x,
+                top: *y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            })
+            .collect();
+        self.text_viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                &self.text_viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )
+            .unwrap();
+        let flash_alpha = self.update_flash(std::time::Instant::now());
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Map HUD"),
+            });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Map HUD Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let clamp_rect = |r: [u32; 4]| {
+                let x = r[0].min(self.config.width);
+                let y = r[1].min(self.config.height);
+                [
+                    x,
+                    y,
+                    r[2].min(self.config.width - x),
+                    r[3].min(self.config.height - y),
+                ]
+            };
+            if let Some(r) = panel.map(clamp_rect).filter(|r| r[2] > 0 && r[3] > 0) {
+                pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
+                self.draw_full_screen(&mut pass, &self.console_panel_bind, 1.0);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            if console_panel_px > 0 {
+                pass.set_scissor_rect(
+                    0,
+                    0,
+                    self.config.width,
+                    console_panel_px.min(self.config.height),
+                );
+                self.draw_full_screen(&mut pass, &self.console_panel_bind, 1.0);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            self.text_renderer
+                .render(&self.text_atlas, &self.text_viewport, &mut pass)
+                .unwrap();
+            self.draw_flash(&mut pass, flash_alpha);
+        }
+        self.queue.submit(std::iter::once(enc.finish()));
+    }
+
     fn render_space_overlay(
         &mut self,
         view: &wgpu::TextureView,

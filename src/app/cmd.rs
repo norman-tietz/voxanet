@@ -84,6 +84,7 @@ pub struct Console {
     pub ao_request: Option<crate::render::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::render::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
     pub perf_request: Option<(f32, String)>, // set by /perf: seconds and label (perf.rs)
+    pub map_request: Option<Option<usize>>, // set by /map [n]: toggle the map, or open it with planet n selected
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::render::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     pub shadow_request: Option<crate::render::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
@@ -110,6 +111,7 @@ impl Console {
             ao_request: None,
             plastic_request: None,
             perf_request: None,
+            map_request: None,
             weather_request: None,
             light_request: None,
             shadow_request: None,
@@ -289,6 +291,12 @@ impl Console {
             "/light" => match crate::render::light::LightCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.light_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
+            "/map" => match parts.get(1).map(|n| n.parse::<usize>()) {
+                None => self.map_request = Some(None),
+                Some(Ok(n)) if n >= 1 => self.map_request = Some(Some(n - 1)),
+                _ => self.log("Usage: /map [planet number]", [1.0, 0.5, 0.0]),
             },
 
             "/perf" => match crate::app::perf::parse_command(&parts[1..]) {

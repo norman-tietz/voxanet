@@ -265,7 +265,41 @@ struct Game {
     edits_by_planet: std::collections::HashMap<usize, crate::planet::data::PlanetEdits>,
     impostor_generation: u64, // the installed planet's edit_generation when its near impostor was built
     impostor_rx: Option<std::sync::mpsc::Receiver<ImpostorRebuild>>, // a near impostor rebuild in flight
+    map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
+    visited: std::collections::HashSet<usize>, // planets whose voxel world has been installed this session
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
+}
+
+// 1..9 from the number row or the keypad
+fn digit_key(code: KeyCode) -> Option<usize> {
+    use KeyCode::*;
+    [
+        Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+    ]
+    .iter()
+    .position(|&c| c == code)
+    .or_else(|| {
+        [
+            Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
+        ]
+        .iter()
+        .position(|&c| c == code)
+    })
+    .map(|i| i + 1)
+}
+
+// opens the solar-system map: the keyboard and mouse go to it (no movement, the cursor freed)
+fn open_map(controller: &mut Controller) -> crate::space::map::MapView {
+    let view = crate::space::map::MapView::new(controller.mouse_released);
+    controller.release_keys();
+    controller.mouse_released = true;
+    view
+}
+
+fn close_map(map: &mut Option<crate::space::map::MapView>, controller: &mut Controller) {
+    if let Some(m) = map.take() {
+        controller.mouse_released = m.restore_mouse_released;
+    }
 }
 
 // the shared game clock: seconds since the start planet was baked, or frozen at 0 for a --bench run
@@ -383,6 +417,8 @@ impl Game {
             bake_rx: None,
             baking: None,
             voxel_ready_announced: false,
+            map: None,
+            visited: std::collections::HashSet::new(),
             landed_at: None,
             clock,
             bench: bench.map(|args| Bench {
@@ -416,6 +452,8 @@ impl Game {
             baking,
             voxel_ready_announced,
             landed_at,
+            map,
+            visited,
             clock,
             loaded_world,
             start_planet,
@@ -820,6 +858,18 @@ impl Game {
             let msg = renderer.plastic.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
+        visited.insert(*loaded_world);
+        if let Some(request) = console.map_request.take() {
+            match (request, map.is_some()) {
+                (None, true) => close_map(map, controller),
+                (selected, _) => {
+                    let m = map.get_or_insert_with(|| open_map(controller));
+                    if let Some(i) = selected.filter(|&i| i < system.planets.len()) {
+                        m.selected = Some(i);
+                    }
+                }
+            }
+        }
         if let Some((secs, label)) = console.perf_request.take() {
             renderer.start_perf(secs, &label);
             console.log(
@@ -938,7 +988,11 @@ impl Game {
                         return;
                     }
                     PhysicalKey::Code(KeyCode::Escape) => {
-                        controller.toggle_mouse_release();
+                        if self.map.is_some() {
+                            close_map(&mut self.map, controller);
+                        } else {
+                            controller.toggle_mouse_release();
+                        }
                         return;
                     }
                     _ => {}
@@ -992,6 +1046,65 @@ impl Game {
                     console.toggle();
                     return;
                 }
+            }
+        }
+
+        // the open map takes the keyboard and mouse (space/map.rs MapView)
+        if let Some(m) = &mut self.map {
+            match &event {
+                WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                } if key_event.state == ElementState::Pressed => {
+                    match key_event.physical_key {
+                        PhysicalKey::Code(KeyCode::KeyM) => close_map(&mut self.map, controller),
+                        PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => m.confirm(),
+                        PhysicalKey::Code(code) => {
+                            if let Some(n) = digit_key(code)
+                                .filter(|&n| n >= 1 && n <= self.system.planets.len())
+                            {
+                                m.selected = Some(n - 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    m.cursor_moved(glam::Vec2::new(position.x as f32, position.y as f32));
+                    return;
+                }
+                WindowEvent::MouseInput {
+                    button: MouseButton::Left,
+                    state,
+                    ..
+                } => {
+                    match state {
+                        ElementState::Pressed => m.press(),
+                        ElementState::Released => m.release(),
+                    }
+                    return;
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let steps = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    m.camera.zoom(steps);
+                    return;
+                }
+                WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } => return,
+                _ => {} // redraw, resize, close: as usual
+            }
+        } else if let WindowEvent::KeyboardInput {
+            event: key_event, ..
+        } = &event
+        {
+            if key_event.state == ElementState::Pressed
+                && !key_event.repeat
+                && key_event.physical_key == PhysicalKey::Code(KeyCode::KeyM)
+            {
+                self.map = Some(open_map(controller));
+                return;
             }
         }
 
@@ -1128,6 +1241,42 @@ impl Game {
 
             WindowEvent::RedrawRequested => {
                 let t = self.clock.now();
+                if let Some(m) = &mut self.map {
+                    let screen = (renderer.config.width as f32, renderer.config.height as f32);
+                    let layout = crate::space::map::MapLayout::new(&self.system);
+                    m.hover = m.cursor.and_then(|c| {
+                        crate::space::map::pick_planet(
+                            &self.system,
+                            &layout,
+                            &m.camera,
+                            c,
+                            screen,
+                            t,
+                        )
+                    });
+                    let (here, ship) = match self.mode {
+                        GameMode::Planet => (Some(self.loaded_world), None),
+                        GameMode::Space => (
+                            None,
+                            Some(match self.flight_frame {
+                                FlightFrame::Free => self.space_flight.position,
+                                FlightFrame::Captured(i) => self.system.planets[i]
+                                    .from_planet_frame(self.space_flight.position, t),
+                            }),
+                        ),
+                    };
+                    renderer.render_map(
+                        &self.system,
+                        t,
+                        m,
+                        here,
+                        ship,
+                        &self.visited,
+                        &[],
+                        &self.console,
+                    );
+                    return;
+                }
                 match &self.mode {
                     GameMode::Planet => {
                         let i = self.loaded_world;

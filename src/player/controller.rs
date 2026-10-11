@@ -168,6 +168,13 @@ impl Controller {
 
     // Escape: free the cursor without leaving first person (or capture it again). A global key,
     // handled in main.rs before the console sees input, so it works in every mode.
+    // lets go of every movement key (the map takes the keyboard while it's open)
+    pub fn release_keys(&mut self) {
+        self.keys = [false; 7];
+        self.move_down = false;
+        self.sprint = false;
+    }
+
     pub fn toggle_mouse_release(&mut self) {
         if self.first_person {
             self.mouse_released = !self.mouse_released;
