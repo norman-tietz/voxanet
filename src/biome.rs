@@ -2,8 +2,9 @@
 // The whole planet's type, as pure data in the `def()` table: Earth-like (water), Volcanic (lava),
 // Ice (no liquid, slippery ice shores), Desert (no liquid), Toxic (glowing sludge), Ocean (water,
 // sandy islands) and Shattered (glowing plasma). Every galaxy planet has one (galaxy.rs cycles
-// through `ALL`). The terrain shape (noise, continents, mountains) is the same for every type; only
-// what fills it changes: blocks, liquid (look and physics, `LiquidPhysics`), atmosphere, day length.
+// through `ALL`). Each type has its own landscape (noise.rs TerrainShape, one profile per type on a
+// shared continent mask) and fills it with its own blocks, liquid (look and physics, `LiquidPhysics`),
+// atmosphere and day length.
 // (Internal design note, not part of this repo: 2026-10-02-planet-types-design.md.)
 
 use crate::material::BlockType;
