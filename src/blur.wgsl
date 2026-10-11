@@ -20,6 +20,7 @@ struct BlurParams {
 @group(0) @binding(1) var<uniform> bp: BlurParams;
 
 const TAPS: i32 = 8;          // samples on each side (shadow.rs TAPS)
+const SEARCH_TAPS: i32 = 4;   // the search's: it only averages distances (shadow.rs SEARCH_TAPS)
 const MAX_RADIUS: f32 = 32.0; // pixels (shadow.rs MAX_RADIUS_PX)
 
 // one triangle covering the screen
@@ -36,8 +37,8 @@ fn penumbra_width(t: f32) -> f32 {
 
 // whether neighbour `d` (camera distance) lies on the same surface as the centre `c` at tap `k`: the
 // allowed difference grows with the offset, so slanted floors seen at grazing angles still count
-fn same_surface(c: f32, d: f32, k: i32) -> bool {
-    let tol = 0.05 + 0.1 * c * f32(abs(k)) / f32(TAPS);
+fn same_surface(c: f32, d: f32, k: i32, taps: i32) -> bool {
+    let tol = 0.05 + 0.1 * c * f32(abs(k)) / f32(taps);
     return d > 0.0 && abs(d - c) <= tol;
 }
 
@@ -53,13 +54,13 @@ fn fs_search_h(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let pc = vec2<i32>(pos.xy);
     let c = textureLoad(src, pc, 0);
     if (c.g <= 0.0) { return vec4<f32>(0.0, 0.0, 0.0, c.r); }
-    let step = search_radius(c.g) / f32(TAPS);
+    let step = search_radius(c.g) / f32(SEARCH_TAPS);
     var sum = 0.0;
     var n = 0.0;
-    for (var k = -TAPS; k <= TAPS; k++) {
+    for (var k = -SEARCH_TAPS; k <= SEARCH_TAPS; k++) {
         let q = clamp(pc + vec2<i32>(i32(round(f32(k) * step)), 0), vec2<i32>(0), size - 1);
         let s = textureLoad(src, q, 0);
-        if (s.b > 0.0 && same_surface(c.g, s.g, k)) {
+        if (s.b > 0.0 && same_surface(c.g, s.g, k, SEARCH_TAPS)) {
             sum += s.b;
             n += 1.0;
         }
@@ -75,13 +76,13 @@ fn fs_search_v(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let pc = vec2<i32>(pos.xy);
     let c = textureLoad(src, pc, 0); // (Σ blocker, count, distance, shadow)
     if (c.b <= 0.0) { return vec4<f32>(c.a, 0.0, bp.min_width, 1.0); } // sky
-    let step = search_radius(c.b) / f32(TAPS);
+    let step = search_radius(c.b) / f32(SEARCH_TAPS);
     var sum = 0.0;
     var n = 0.0;
-    for (var k = -TAPS; k <= TAPS; k++) {
+    for (var k = -SEARCH_TAPS; k <= SEARCH_TAPS; k++) {
         let q = clamp(pc + vec2<i32>(0, i32(round(f32(k) * step))), vec2<i32>(0), size - 1);
         let s = textureLoad(src, q, 0);
-        if (same_surface(c.b, s.b, k)) {
+        if (same_surface(c.b, s.b, k, SEARCH_TAPS)) {
             sum += s.r;
             n += s.g;
         }
@@ -110,7 +111,7 @@ fn fs_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let q = clamp(pc + vec2<i32>(round(bp.dir * (f32(k) * step))), vec2<i32>(0), size - 1);
         let s = textureLoad(src, q, 0);
         // skip samples from other surfaces (sky, silhouettes)
-        if (!same_surface(c.g, s.g, k)) { continue; }
+        if (!same_surface(c.g, s.g, k, TAPS)) { continue; }
         let wgt = exp(-f32(k * k) / f32(TAPS * TAPS / 2));
         sum += s.r * wgt;
         wsum += wgt;

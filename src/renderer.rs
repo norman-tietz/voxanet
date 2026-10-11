@@ -3899,6 +3899,12 @@ pub(crate) mod tests {
         assert!(
             blur.contains("const TAPS: i32 = 8;") && blur.contains("const MAX_RADIUS: f32 = 32.0;")
         );
+        // the Rust mirrors (shadow.rs) match the shader's constants
+        assert!(blur.contains(&format!("const TAPS: i32 = {};", crate::shadow::TAPS)));
+        assert!(blur.contains(&format!(
+            "const SEARCH_TAPS: i32 = {};",
+            crate::shadow::SEARCH_TAPS
+        )));
         assert!(
             blur.contains("bp.mode == 1u"),
             "the blur picks the per-texel width in soft mode"

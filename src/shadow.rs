@@ -8,7 +8,10 @@ pub const MIN_WIDTH: f32 = 0.03; // world units: contact shadows still get about
 pub const MAX_BLOCKER: f32 = 32.0; // blocks: beyond, the edge stops widening (and the search radius ends)
 pub const FIXED_WIDTH: f32 = 0.3; // world units: /shadow off and the ray-march path (the old look)
 pub const MAX_RADIUS_PX: f32 = 32.0; // blur.wgsl MAX_RADIUS
+#[cfg_attr(not(test), allow(dead_code))]
 pub const TAPS: i32 = 8; // blur.wgsl TAPS, per side
+#[cfg_attr(not(test), allow(dead_code))]
+pub const SEARCH_TAPS: i32 = 4; // blur.wgsl SEARCH_TAPS: the search only averages distances
 pub const DEFAULT_SUN_DEG: f32 = 2.5; // the sun's angular radius
 const MAX_SUN_DEG: f32 = 10.0;
 pub const SHADOW_USAGE: &str = "Usage: /shadow [on|off|sun <0-10>]";
