@@ -345,7 +345,11 @@ pub fn f_action(
 // whether the column straight below `position` is under a damaging liquid (lava): landing there
 // would kill the player
 pub fn over_damaging_liquid(planet: &crate::common::PlanetData, position: Vec3) -> bool {
-    let damaging = planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
+    let damaging = planet
+        .planet_type
+        .def()
+        .liquid
+        .is_some_and(|l| l.damaging());
     if !damaging {
         return false;
     }

@@ -9,9 +9,8 @@ const MAX_BUOYANCY: f32 = 1.15; // fully submerged: rise slowly when not swimmin
 const WATER_DRAG: f32 = 3.0; // 1/s
 const SURFACE_HOP: f32 = 6.5; // upward speed of a hop out of the water
 
-// health (Player.health); damage while submerged in a damaging liquid beyond SWIM_DEPTH, passive
-// regen otherwise
-const DAMAGE_RATE: f32 = 20.0; // HP/s; dies in ~5s fully submerged
+// health (Player.health); damage while submerged in a damaging liquid beyond SWIM_DEPTH (its
+// LiquidPhysics::damage_rate, biome.rs), passive regen otherwise
 const REGEN_RATE: f32 = 5.0; // HP/s; ~20s from empty, only while not taking damage
 const MAX_HEALTH: f32 = 100.0;
 
@@ -46,11 +45,21 @@ const FLY_CLIMB_RATE: f32 = 15.0; // world units/s the floor correction may lift
 
 // Compute damage amount for this tick. Pure decision logic, testable without a real planet/terrain.
 // Returns damage amount (>0 means take damage, 0 means no damage).
-fn damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
+fn damage_this_tick(depth: Option<f32>, damage_rate: f32, dt: f32) -> f32 {
     match depth {
-        Some(d) if d > SWIM_DEPTH && damaging => DAMAGE_RATE * dt,
+        Some(d) if d > SWIM_DEPTH && damage_rate > 0.0 => damage_rate * dt,
         _ => 0.0,
     }
+}
+
+// jump strength wading in a thick liquid: a 1.3-block hop (8 × 0.7 at gravity 12), enough for a
+// one-block ledge out of it
+const THICK_JUMP: f32 = 0.7;
+
+// a thick liquid (lava, sludge) slows a falling body to its sink speed; rising (a jump off the
+// bottom) is left alone. Pure, tested.
+fn thick_liquid_vertical(vert: f32, sink_speed: f32) -> f32 {
+    vert.max(-sink_speed)
 }
 
 // Decides whether holding the up key in `swim()` should hop the player out of the water (e.g. onto
@@ -378,8 +387,9 @@ impl Player {
         let depth = water_depth.unwrap_or(f32::MIN);
 
         // --- HEALTH ---
-        let damaging = planet.planet_type.def().liquid.is_some_and(|l| l.damaging);
-        let damage_amount = damage_this_tick(water_depth, damaging, dt);
+        let liquid = planet.planet_type.def().liquid.map(|l| l.physics);
+        let damage_rate = liquid.map_or(0.0, |l| l.damage_rate);
+        let damage_amount = damage_this_tick(water_depth, damage_rate, dt);
         if damage_amount > 0.0 {
             self.health = (self.health - damage_amount).max(0.0);
         } else {
@@ -393,7 +403,9 @@ impl Player {
             return false;
         }
 
-        if !flying && depth > SWIM_DEPTH {
+        // a thick liquid can't be swum in: wade slowly on the bottom, sinking into it (below)
+        let thick = liquid.filter(|l| !l.swimmable && !flying && depth > SWIM_DEPTH);
+        if !flying && depth > SWIM_DEPTH && liquid.is_some_and(|l| l.swimmable) {
             self.swim(dt, planet, input, jump, down, depth, up);
             self.rotation = Physics::align_to_planet(self.rotation, up);
             return false;
@@ -413,7 +425,7 @@ impl Player {
             self.move_speed * 2.0
         } else {
             self.move_speed
-        };
+        } * thick.map_or(1.0, |l| l.wade_speed);
 
         // --- MOVEMENT INPUT ---
         if flying {
@@ -514,13 +526,19 @@ impl Player {
 
         // --- JUMP ---
         if jump && self.grounded && !flying {
-            self.velocity += up * self.jump_force;
+            // a thick liquid holds the legs back: enough to climb a one-block ledge out, no more
+            let force = if thick.is_some() { THICK_JUMP } else { 1.0 };
+            self.velocity += up * self.jump_force * force;
             self.grounded = false;
         }
 
         // --- GRAVITY ---
         if !flying {
             self.velocity -= up * Physics::GRAVITY * dt;
+        }
+        if let Some(l) = thick {
+            let vert = self.velocity.dot(up);
+            self.velocity += up * (thick_liquid_vertical(vert, l.sink_speed) - vert);
         }
 
         // --- PHYSICS SOLVE ---
@@ -660,8 +678,30 @@ mod tests {
     use crate::controller::FlightKeys;
 
     // Test wrapper that calls the production function
+    // the test damage rate of a damaging liquid (lava's)
+    const DAMAGE_RATE: f32 = crate::biome::LAVA.damage_rate;
+
     fn liquid_damage_this_tick(depth: Option<f32>, damaging: bool, dt: f32) -> f32 {
-        damage_this_tick(depth, damaging, dt)
+        damage_this_tick(depth, if damaging { DAMAGE_RATE } else { 0.0 }, dt)
+    }
+
+    #[test]
+    fn thick_liquids_slow_a_fall_but_not_a_jump() {
+        assert_eq!(thick_liquid_vertical(-10.0, 0.8), -0.8);
+        assert_eq!(thick_liquid_vertical(-0.3, 0.8), -0.3);
+        assert_eq!(thick_liquid_vertical(4.0, 0.8), 4.0);
+    }
+
+    #[test]
+    fn each_liquid_hurts_at_its_own_rate() {
+        assert_eq!(
+            damage_this_tick(Some(2.0), crate::biome::SLUDGE.damage_rate, 0.5),
+            6.0
+        );
+        assert_eq!(
+            damage_this_tick(Some(2.0), crate::biome::PLASMA.damage_rate, 0.5),
+            0.0
+        );
     }
 
     // a flying player over flat-ish ground, looking slightly down

@@ -416,7 +416,7 @@ impl PlanetData {
     // which case it searches a dense, evenly-spread set of directions over the whole sphere for a dry
     // one
     pub fn safe_spawn_direction(&self, preferred: glam::Vec3) -> glam::Vec3 {
-        let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging);
+        let damaging = self.planet_type.def().liquid.is_some_and(|l| l.damaging());
         if !damaging {
             return preferred;
         }

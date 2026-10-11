@@ -1017,7 +1017,9 @@ impl Game {
                                 renderer.show_status("Landing cancelled.");
                             }
                             crate::landing::FAction::RefuseLanding => {
-                                renderer.show_status("Can't land here: lava below.");
+                                let liquid =
+                                    planet.planet_type.def().liquid.map_or("liquid", |l| l.name);
+                                renderer.show_status(&format!("Can't land here: {liquid} below."));
                             }
                             crate::landing::FAction::TakeOff => {
                                 controller.fly_mode = true;

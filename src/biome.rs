@@ -1,10 +1,9 @@
 // biome.rs
-// The whole planet's type: Earth-like (today's planet), Volcanic (lava, damaging, glowing),
-// Ice (no liquid at all, walkable and slippery). Switched at runtime (main.rs, `B` key),
-// regenerating edits but reusing the same terrain shape in every case — only which
-// material/liquid/atmosphere fills that shape changes. Phase 1 deliberately keeps terrain
-// shape (noise, continents, mountains) identical across types and only swaps what fills it;
-// more types (Desert/Toxic/Ocean) can be added later as pure data in the `def()` table below.
+// The whole planet's type, as pure data in the `def()` table: Earth-like (water), Volcanic (lava),
+// Ice (no liquid, slippery ice shores), Desert (no liquid), Toxic (glowing sludge), Ocean (water,
+// sandy islands) and Shattered (glowing plasma). Every galaxy planet has one (galaxy.rs cycles
+// through `ALL`). The terrain shape (noise, continents, mountains) is the same for every type; only
+// what fills it changes: blocks, liquid (look and physics, `LiquidPhysics`), atmosphere, day length.
 // (Internal design note, not part of this repo: 2026-10-02-planet-types-design.md.)
 
 use crate::material::BlockType;
@@ -50,7 +49,8 @@ impl PlanetType {
                     shallow_color: [0.020, 0.150, 0.170],
                     deep_color: [0.002, 0.030, 0.090],
                     behavior: LiquidBehavior::Reflective,
-                    damaging: false,
+                    name: "water",
+                    physics: WATER,
                 }),
                 palette: Palette {
                     peak: BlockType::Snow,
@@ -74,7 +74,8 @@ impl PlanetType {
                     shallow_color: [1.4, 0.5, 0.05],
                     deep_color: [0.35, 0.05, 0.02],
                     behavior: LiquidBehavior::Glowing,
-                    damaging: true,
+                    name: "lava",
+                    physics: LAVA,
                 }),
                 palette: Palette {
                     peak: BlockType::Ember,
@@ -112,14 +113,14 @@ impl PlanetType {
             },
             PlanetType::Desert => PlanetTypeDef {
                 name: "Desert",
-                day_length_secs: 300.0, // Sehr lange, heiße Tage
+                day_length_secs: 300.0, // very long, hot days
                 liquid: None,
                 palette: Palette {
                     peak: BlockType::Stone,
                     rock: BlockType::Stone,
                     beach: BlockType::Sand,
                     ground: BlockType::Sand,
-                    subsurface: BlockType::Sand, // Oder Sandstone, falls vorhanden
+                    subsurface: BlockType::Sand, // no sandstone block (yet)
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.85, 0.65, 0.40],
@@ -133,20 +134,21 @@ impl PlanetType {
                 name: "Toxic",
                 day_length_secs: 150.0,
                 liquid: Some(LiquidDef {
-                    shallow_color: [0.2, 1.2, 0.1], // Giftiges Neongrün
+                    shallow_color: [0.2, 1.2, 0.1], // poisonous neon green
                     deep_color: [0.05, 0.3, 0.02],
                     behavior: LiquidBehavior::Glowing,
-                    damaging: true,
+                    name: "toxic sludge",
+                    physics: SLUDGE,
                 }),
                 palette: Palette {
                     peak: BlockType::Stone,
                     rock: BlockType::Obsidian,
-                    beach: BlockType::Ash, // Oder Schlamm/Mud
+                    beach: BlockType::Ash, // no mud block (yet)
                     ground: BlockType::Dirt,
                     subsurface: BlockType::Dirt,
                 },
                 atmosphere: AtmosphereDef {
-                    sky_zenith: [0.3, 0.5, 0.3], // Krankhaftes, gelb-grünes Licht
+                    sky_zenith: [0.3, 0.5, 0.3], // sickly yellow-green light
                     sky_horizon_warm: [0.6, 0.7, 0.2],
                     cloud_light: [0.4, 0.5, 0.3],
                     cloud_dark: [0.15, 0.2, 0.1],
@@ -160,17 +162,18 @@ impl PlanetType {
                     shallow_color: [0.05, 0.4, 0.6],
                     deep_color: [0.005, 0.05, 0.15],
                     behavior: LiquidBehavior::Reflective,
-                    damaging: false,
+                    name: "water",
+                    physics: WATER,
                 }),
                 palette: Palette {
                     peak: BlockType::Stone,
                     rock: BlockType::Stone,
                     beach: BlockType::Sand,
-                    ground: BlockType::Sand, // Inseln bestehen fast nur aus Strand
+                    ground: BlockType::Sand, // islands are mostly beach
                     subsurface: BlockType::Dirt,
                 },
                 atmosphere: AtmosphereDef {
-                    sky_zenith: [0.1, 0.25, 0.5], // Schwerer, stürmischer blauer Himmel
+                    sky_zenith: [0.1, 0.25, 0.5], // heavy, stormy blue sky
                     sky_horizon_warm: [0.5, 0.6, 0.8],
                     cloud_light: [0.6, 0.65, 0.7],
                     cloud_dark: [0.2, 0.25, 0.35],
@@ -179,22 +182,23 @@ impl PlanetType {
             },
             PlanetType::Shattered => PlanetTypeDef {
                 name: "Shattered",
-                day_length_secs: 90.0, // Schnelle, chaotische Rotation
+                day_length_secs: 90.0, // fast, chaotic rotation
                 liquid: Some(LiquidDef {
-                    shallow_color: [1.2, 0.1, 1.5], // Leuchtendes Plasma (Magenta/Lila)
+                    shallow_color: [1.2, 0.1, 1.5], // glowing plasma (magenta/purple)
                     deep_color: [0.3, 0.02, 0.4],
                     behavior: LiquidBehavior::Glowing,
-                    damaging: false,
+                    name: "plasma",
+                    physics: PLASMA,
                 }),
                 palette: Palette {
-                    peak: BlockType::Ember, // Leuchtende Spitzen
+                    peak: BlockType::Ember, // glowing peaks
                     rock: BlockType::Obsidian,
                     beach: BlockType::Ash,
                     ground: BlockType::Basalt,
                     subsurface: BlockType::Basalt,
                 },
                 atmosphere: AtmosphereDef {
-                    sky_zenith: [0.1, 0.05, 0.2], // Alien-Neon-Himmel
+                    sky_zenith: [0.1, 0.05, 0.2], // alien neon sky
                     sky_horizon_warm: [0.5, 0.1, 0.8],
                     cloud_light: [0.7, 0.3, 0.9],
                     cloud_dark: [0.1, 0.02, 0.15],
@@ -216,8 +220,53 @@ pub struct LiquidDef {
     pub shallow_color: [f32; 3],
     pub deep_color: [f32; 3],
     pub behavior: LiquidBehavior,
-    pub damaging: bool,
+    pub name: &'static str, // for messages ("Can't land here: lava below.")
+    pub physics: LiquidPhysics,
 }
+
+impl LiquidDef {
+    pub fn damaging(&self) -> bool {
+        self.physics.damage_rate > 0.0
+    }
+}
+
+// how the player moves in a liquid deeper than the knees (entity.rs Player::update)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiquidPhysics {
+    pub swimmable: bool, // buoyancy and swimming (Player::swim); otherwise wading on the bottom
+    pub damage_rate: f32, // HP/s while submerged beyond the wading depth; 0 = harmless
+    pub wade_speed: f32, // walking speed factor when not swimmable (thick liquid)
+    pub sink_speed: f32, // the fastest a body sinks through it when not swimmable, units/s
+}
+
+// water: swim
+pub const WATER: LiquidPhysics = LiquidPhysics {
+    swimmable: true,
+    damage_rate: 0.0,
+    wade_speed: 1.0,
+    sink_speed: 0.0,
+};
+// lava: far too thick to swim; you sink slowly, wade at a crawl and burn (dead in ~5 s)
+pub const LAVA: LiquidPhysics = LiquidPhysics {
+    swimmable: false,
+    damage_rate: 20.0,
+    wade_speed: 0.3,
+    sink_speed: 0.8,
+};
+// toxic sludge: viscous, no swimming; less deadly than lava, so wading out of a shore is survivable
+pub const SLUDGE: LiquidPhysics = LiquidPhysics {
+    swimmable: false,
+    damage_rate: 12.0,
+    wade_speed: 0.4,
+    sink_speed: 1.2,
+};
+// plasma: harmless, buoyant like water
+pub const PLASMA: LiquidPhysics = LiquidPhysics {
+    swimmable: true,
+    damage_rate: 0.0,
+    wade_speed: 1.0,
+    sink_speed: 0.0,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct AtmosphereDef {
@@ -249,6 +298,34 @@ pub struct PlanetTypeDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // water and plasma swim and are harmless; lava and toxic sludge can't be swum in and hurt
+    #[test]
+    fn liquids_have_their_physics() {
+        let physics = |t: PlanetType| t.def().liquid.map(|l| l.physics);
+        assert_eq!(physics(PlanetType::EarthLike), Some(WATER));
+        assert_eq!(physics(PlanetType::Ocean), Some(WATER));
+        assert_eq!(physics(PlanetType::Shattered), Some(PLASMA));
+        assert_eq!(physics(PlanetType::Volcanic), Some(LAVA));
+        assert_eq!(physics(PlanetType::Toxic), Some(SLUDGE));
+        assert_eq!(physics(PlanetType::Ice), None);
+        assert_eq!(physics(PlanetType::Desert), None);
+        for t in PlanetType::ALL {
+            if let Some(l) = t.def().liquid {
+                // a liquid you can't swim in must slow you down and let you sink
+                assert_eq!(l.physics.swimmable, l.physics.sink_speed == 0.0, "{t:?}");
+                assert!(l.physics.wade_speed > 0.0 && l.physics.wade_speed <= 1.0);
+                assert_eq!(
+                    l.damaging(),
+                    !matches!(
+                        t,
+                        PlanetType::EarthLike | PlanetType::Ocean | PlanetType::Shattered
+                    )
+                );
+            }
+        }
+        assert!(SLUDGE.damage_rate < LAVA.damage_rate);
+    }
 
     #[test]
     fn planet_type_names_parse_like_the_biome_flag() {
@@ -282,7 +359,7 @@ mod tests {
         assert_eq!(def.name, "Earth-like");
         let liquid = def.liquid.expect("Earth-like has water");
         assert!(matches!(liquid.behavior, LiquidBehavior::Reflective));
-        assert!(!liquid.damaging);
+        assert!(!liquid.damaging());
         assert_eq!(def.palette.ground, crate::material::BlockType::Grass);
         assert_eq!(def.palette.peak, crate::material::BlockType::Snow);
     }
@@ -292,7 +369,7 @@ mod tests {
         let def = PlanetType::Volcanic.def();
         let liquid = def.liquid.expect("Volcanic has lava");
         assert!(matches!(liquid.behavior, LiquidBehavior::Glowing));
-        assert!(liquid.damaging);
+        assert!(liquid.damaging());
     }
 
     #[test]
@@ -300,7 +377,7 @@ mod tests {
         let def = PlanetType::Toxic.def();
         let liquid = def.liquid.expect("Toxic has acid");
         assert!(matches!(liquid.behavior, LiquidBehavior::Glowing));
-        assert!(liquid.damaging);
+        assert!(liquid.damaging());
     }
 
     #[test]

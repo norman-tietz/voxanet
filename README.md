@@ -10,7 +10,7 @@
 This project is a high-performance voxel engine built from scratch in **Rust**, capable of generating fully explorable, spherical planets in real-time.
 
 *   **Oceans and Lakes:** Water fills every part of the terrain below sea level, including holes you dig below it. Liquid planets also have a few lakes above sea level, each at its own water level, in naturally shaped basins with sandy shores (lava lakes on Volcanic planets); they behave like the sea up close and show as water from afar and from orbit. Near the player it is a translucent surface whose colour and opacity follow the water depth (turquoise shallows, deep blue sea), with sky reflection and a sun glint on an animated, rippling surface, and surf foam along the shores; sunlight under water forms moving caustics on the sea floor. You can swim on the surface and dive below it; distant oceans are part of the LOD terrain, and the view gets a blue tint below the surface.
-*   **Planet Types:** Three switchable biomes—Earth-like (oceans and temperate terrain), Volcanic (lava lakes and glowing rock), and Ice (frozen landscape, no water)—each with unique materials, liquids (reflective or damaging), and atmosphere colours. Every planet in the solar system has one of them; pick the one you start on with `--biome`. On Volcanic planets, submerged lava damages the player; on Ice planets the terrain is solid everywhere and there is no liquid to swim in.
+*   **Planet Types:** Seven biomes—Earth-like (oceans and temperate terrain), Volcanic (lava lakes and glowing rock), Ice (frozen landscape, no water), Desert (sand, no water), Toxic (glowing neon sludge), Ocean (water and sandy islands) and Shattered (dark rock and a glowing plasma sea)—each with its own materials, liquid and atmosphere colours. Every planet in the solar system has one of them; pick the one you start on with `--biome`. Water and plasma can be swum in; lava and toxic sludge are too thick to swim: you wade slowly on the bottom, sinking in, and they hurt (lava more than sludge). On Ice and Desert planets there is no liquid.
 *   **Dynamic Clouds & Atmosphere:** A procedurally shaded cloud layer wraps the planet with no extra geometry: horizon-grazing view rays cross far more of the layer's thickness, so clouds thicken and brighten near the horizon the way real atmosphere does, while a stylised sky gradient gives a blue dome overhead and a glowing atmospheric limb when the planet is seen from orbit. Clouds drift over time, cast moving shadows on the terrain and ocean below, and are reflected on the water's surface.
 *   **Day and Night:** Each planet turns under its star (a day lasts 1–4 minutes depending on the planet type). At night the sky turns transparent and shows the stars, the sun and the other planets, and the terrain falls back to a dim, cool moonlight.
 *   **Solar System & Seamless Landing:** The planet is one of several in a seeded solar system. Fly up and keep climbing to leave the atmosphere and cross over into space flight; fly at another planet to be captured by its orbit, and descend to land on it, with no loading screen at either handover (its terrain is generated in the background while you approach).
@@ -32,7 +32,7 @@ cargo run --release
 
 Use `--release`, because terrain generation and meshing are much slower in debug builds.
 
-The game starts on planet #1 (Earth-like) at local noon. To start on the first planet of another type, pass `--biome earthlike|volcanic|ice`, e.g. `cargo run --release -- --biome ice`. `--seed <n>` (default 1) picks another solar system, with a different sun: red dwarf, orange, yellow, white or blue giant (e.g. `--seed 8` for a red dwarf, `--seed 2` for a blue giant).
+The game starts on planet #1 (Earth-like) at local noon. To start on the first planet of another type, pass `--biome earthlike|volcanic|ice|desert|toxic|ocean|shattered`, e.g. `cargo run --release -- --biome ice`. `--seed <n>` (default 1) picks another solar system, with a different sun: red dwarf, orange, yellow, white or blue giant (e.g. `--seed 8` for a red dwarf, `--seed 2` for a blue giant).
 
 If you're contributing, run `git config core.hooksPath .githooks` once to enable the pre-commit
 hook: it formats staged Rust files with `rustfmt` and prints `cargo clippy` output (advisory only,
@@ -51,7 +51,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Q` / `E` | Turn left / right (first and third person) |
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
-| `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground and levels your roll; `F` again cancels it; refused over lava). During the automatic climb or descent `A` / `D` and `Q` / `E` are ignored |
+| `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground and levels your roll; `F` again cancels it; refused over lava or toxic sludge). During the automatic climb or descent `A` / `D` and `Q` / `E` are ignored |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
 | Mouse wheel | Zoom the camera in/out (third person only) |
@@ -89,7 +89,7 @@ Fly close to a planet and you are captured by it: the planet holds still while t
 
 ### Swimming
 
-In water deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Your health (`HP: current/max` shown in the top-right overlay) regenerates when safe, but drains if you are submerged in a damaging liquid like lava on Volcanic planets; if health reaches zero, you respawn at your last spawn point.
+In water (or plasma) deeper than about half a block you swim at half the walking speed; you float with your eyes just above the surface. Lava and toxic sludge can't be swum in: you sink to the bottom and wade out slowly, with a weak jump that just clears a one-block ledge. Your health (`HP: current/max` shown in the top-right overlay) regenerates when safe, but drains while you are submerged in lava or toxic sludge; if health reaches zero, you respawn at your last spawn point.
 
 | Input | Action |
 |-------|--------|
@@ -133,7 +133,7 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/weather [on\|off\|auto\|clear\|rain\|storm\|snow]` | Show the weather where you stand, force a weather around you for testing (`auto` returns to the natural weather; `snow` falls as ash on volcanic planets), or turn weather off |
 | `/galaxy home` | Return to the start planet, standing at local noon |
 | `/galaxy goto <n> <radii>` | Jump into planet *n*'s orbit, over its day side at *radii* planet radii from its centre |
-| `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`) and radius (20–500) on the next orbit outward (up to 15 planets) |
+| `/galaxy add <type> <radius>` | Add a planet of that type (`earthlike`, `volcanic`, `ice`, `desert`, `toxic`, `ocean`, `shattered`) and radius (20–500) on the next orbit outward (up to 15 planets) |
 
 ### Debug Keys (require `/debug_mode true`)
 
