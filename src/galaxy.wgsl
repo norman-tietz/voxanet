@@ -113,6 +113,7 @@ struct PlanetUniform {
     glow: vec4<f32>,        // rgb: the planet type's glowing liquid colour (lava), w: 1 if it has one
     glow_emission: vec4<f32>, // rgb: what that liquid emits (galaxy_render.rs lava_emission)
     plastic: vec4<f32>,       // x: base roughness, y: specular strength, z: reflection weight (plastic.rs)
+    light: vec4<f32>,         // x: ground bounce, y: wrap lighting (light.rs)
     model: mat3x3<f32>,     // planet frame -> galaxy space rotation: the planet's spin at this time
 }
 
@@ -203,15 +204,16 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let V = normalize(cam - in.local_pos);
 
     let albedo = pow(in.flat_color, vec3<f32>(2.2));
-    let NdotL = max(dot(N, L), 0.0);
     let sun = a.sun_color * atmo_cloud_shadow(in.local_pos, L, t, a.planet_r);
-    let direct = sun * NdotL;
+    let direct = sun * atmo_wrap_diffuse(dot(N, L), planet.light.y);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
-    let ambient = mix(GROUND_COLOR, a.sky_zenith, hemi) * sky_light;
+    // the engine's fill light: the ground's bounce in the surface's colour below, sky above (shade())
+    let ground = atmo_ground_bounce(albedo, in.local_pos, L, sun, planet.light.x);
+    let ambient = mix(ground, a.sky_zenith * sky_light, hemi);
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     // the voxel terrain's plastic (atmosphere.wgsl), base roughness, no shadows or AO out here
-    let pl = atmo_plastic(N, V, L, in.local_pos, sun, ambient, planet.plastic.x, planet.plastic.y,
+    let pl = atmo_plastic(N, V, L, in.local_pos, sun, ambient, ground, planet.plastic.x, planet.plastic.y,
                           planet.plastic.z, 1.0, a);
     var lit = albedo * (direct + ambient + rim) * pl.diffuse_w + pl.spec;
     // a glowing liquid (lava) is emissive like the engine's (fs_water); impostor vertices carry the

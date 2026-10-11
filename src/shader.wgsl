@@ -11,6 +11,7 @@ struct Global {
     bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening (fs_geom, bevel.rs)
     plastic: vec4<f32>, // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
     plastic_ext: vec4<f32>, // x: sky reflection weight (plastic.rs)
+    light: vec4<f32>, // x: ground bounce, y: wrap lighting (light.rs)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -545,7 +546,8 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // `water_depth` is how deep the point lies below its own water (a lake's or the sea's, through the
     // G-buffer), 0 when dry — so lake floors get caustics and tunnels sealed off from water don't
     let clouded = cloud_shadow(world_pos, L, global.screen.w);
-    var direct_light = biome.sun.rgb * NdotL * shadow * clouded;
+    // wrap lighting (/light wrap) lets the diffuse sun reach a little past the terminator
+    var direct_light = biome.sun.rgb * atmo_wrap_diffuse(dot(N, L), global.light.y) * shadow * clouded;
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
     // which doesn't focus light the same way (matches fs_water's reflective-vs-glowing branch)
     if (water_depth > 0.0 && biome.liquid_shallow.w < 0.5 && shadow_raw > 0.0) {
@@ -553,13 +555,15 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     }
 
     // B. Hemispheric Ambient
-    // Top of objects gets Sky Color, Bottom gets Ground Bounce
+    // Top of objects gets Sky Color, Bottom gets Ground Bounce: sunlit ground in the surface's own
+    // colour (atmosphere.wgsl atmo_ground_bounce, /light bounce)
     let up_dot = dot(N, normalize(world_pos)); // Relative Up for sphere
     let hemi_factor = up_dot * 0.5 + 0.5;
     // dims to moonlight on the night side, like the sky itself
     let sky_light = atmo_ambient_daylight(world_pos, L);
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
-    let ambient_light = mix(GROUND_COLOR, biome.sky_zenith.rgb, hemi_factor) * sky_light * sa.y;
+    let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
+    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y;
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
@@ -569,7 +573,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // D. Plastic: GGX sun highlight (in full shadow none: the hard shadow, not the softened one) and the
     // sky reflection (atmosphere.wgsl), taking their share of the light from the diffuse terms
     let pl = atmo_plastic(N, V, L, world_pos, biome.sun.rgb * shadow_raw * clouded, ambient_light,
-                          roughness, global.plastic.y, global.plastic_ext.x, sa.y, engine_atmosphere());
+                          ground, roughness, global.plastic.y, global.plastic_ext.x, sa.y, engine_atmosphere());
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)

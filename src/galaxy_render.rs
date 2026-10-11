@@ -107,6 +107,7 @@ struct GalaxyPlanetUniform {
     glow: [f32; 4],          // the planet type's glowing liquid colour (rgb), w = 1 if it has one
     glow_emission: [f32; 4], // what it emits (rgb): lava_emission
     plastic: [f32; 4], // base roughness, specular strength, reflection weight (plastic.rs impostor_uniform)
+    light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
     model: [[f32; 4]; 3], // planet frame -> galaxy space rotation (GalaxyPlanet::orientation), mat3 columns
 }
 
@@ -242,6 +243,7 @@ pub struct Backdrop<'a> {
 
 pub struct GalaxyRenderer {
     pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
+    pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     star_buf: wgpu::Buffer,
@@ -699,6 +701,7 @@ impl GalaxyRenderer {
 
         Self {
             plastic: crate::plastic::PlasticSettings::default().impostor_uniform(),
+            light: crate::light::LightSettings::default().uniform(),
             camera_buf,
             camera_bind,
             star_buf,
@@ -766,7 +769,14 @@ impl GalaxyRenderer {
                 let subdivision = subdivision_for_distance(camera_relative.length(), p.radius);
                 self.ensure_planet_mesh(device, i, p, subdivision);
             }
-            planet_uniforms.push(Self::planet_uniform(galaxy, i, camera, t, self.plastic));
+            planet_uniforms.push(Self::planet_uniform(
+                galaxy,
+                i,
+                camera,
+                t,
+                self.plastic,
+                self.light,
+            ));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
         for (i, u) in planet_uniforms.iter().enumerate() {
@@ -904,6 +914,7 @@ impl GalaxyRenderer {
         camera: &GalaxyCamera,
         t: f64,
         plastic: [f32; 4],
+        light: [f32; 4],
     ) -> GalaxyPlanetUniform {
         let p = &galaxy.planets[i];
         let body_pos = p.position_at(t);
@@ -938,6 +949,7 @@ impl GalaxyRenderer {
                 None => [0.0; 4],
             },
             plastic,
+            light,
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -973,7 +985,14 @@ impl GalaxyRenderer {
         queue.write_buffer(
             &self.planet_uniform_buf,
             slot,
-            bytemuck::cast_slice(&[Self::planet_uniform(galaxy, index, camera, t, self.plastic)]),
+            bytemuck::cast_slice(&[Self::planet_uniform(
+                galaxy,
+                index,
+                camera,
+                t,
+                self.plastic,
+                self.light,
+            )]),
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Handover Overlay Pass"),
@@ -1104,7 +1123,7 @@ mod tests {
     // GalaxyPlanetUniform must mirror galaxy.wgsl's PlanetUniform: 7 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 11 * 16 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GalaxyPlanetUniform>(), 12 * 16 + 3 * 16);
         // + plastic
     }
 

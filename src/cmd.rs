@@ -15,7 +15,7 @@ pub enum GalaxyRequest {
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 9] = [
+const HELP_LINES: [&str; 10] = [
     "Commands (up/down recall earlier ones):",
     "  /debug_mode set true|false     /view set first|third",
     "  /move_speed get|set <value>    /jump_force get|set <value>",
@@ -23,6 +23,7 @@ const HELP_LINES: [&str; 9] = [
     "  /bevel get|on|off|width <v>|cavity <v>  /film get|on|off|grain <v>|vignette <v>",
     "  /ao get|on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>",
     "  /plastic get|on|off|roughness|specular|smudge|scratch|reflection <v>",
+    "  /light get|bounce <0-1>|wrap <0-0.5>",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -78,6 +79,7 @@ pub struct Console {
     pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
     pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
+    pub light_request: Option<crate::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -100,6 +102,7 @@ impl Console {
             film_request: None,
             ao_request: None,
             plastic_request: None,
+            light_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -273,6 +276,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/light" => match crate::light::LightCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.light_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/ao" => match crate::ao::AoCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.ao_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
@@ -382,6 +390,15 @@ mod tests {
             c.submit(&mut p);
         }
         c
+    }
+
+    #[test]
+    fn light_command_sets_a_request() {
+        let c = console_with(&["/light wrap 0.2"]);
+        assert_eq!(c.light_request, Some(crate::light::LightCommand::Wrap(0.2)));
+        let c = console_with(&["/light wrap 2"]);
+        assert_eq!(c.light_request, None);
+        assert_eq!(c.history.last().unwrap().0, crate::light::LIGHT_USAGE);
     }
 
     #[test]

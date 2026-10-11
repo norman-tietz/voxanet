@@ -60,6 +60,7 @@ pub struct GlobalUniform {
     pub bevel: [f32; 4], // x: block bevel width in world units (0 = off), y: cavity darkening (bevel.rs, fs_geom)
     pub plastic: [f32; 4], // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
     pub plastic_ext: [f32; 4], // x: sky reflection weight (plastic.rs)
+    pub light: [f32; 4],   // x: ground bounce, y: wrap lighting (light.rs)
 }
 
 #[repr(C)]
@@ -249,6 +250,7 @@ pub struct Renderer {
     pub film: crate::film::FilmSettings, // grain and vignette (console: /film)
     pub ao: crate::ao::AoSettings,       // ray-traced ambient occlusion (console: /ao)
     pub plastic: crate::plastic::PlasticSettings, // specular plastic look (console: /plastic)
+    pub light: crate::light::LightSettings, // ground bounce and wrap lighting (console: /light)
     ao_progress: crate::ao::AoProgress,  // the progressive AO's frames since its last reset
     edit_epoch: u64, // bumped by block edits and full reloads: the progressive AO starts over
     prev_ao_view: Option<(glam::Mat4, Vec3)>, // last frame's view-projection and camera (AO reprojection)
@@ -991,6 +993,7 @@ impl Renderer {
             bevel: [0.0; 4],   // overlays aren't bevelled
             plastic: [0.0; 4], // nor glossy
             plastic_ext: [0.0; 4],
+            light: crate::light::LightSettings::default().uniform(),
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1073,6 +1076,7 @@ impl Renderer {
             film: crate::film::FilmSettings::default(),
             ao: crate::ao::AoSettings::default(),
             plastic: crate::plastic::PlasticSettings::default(),
+            light: crate::light::LightSettings::default(),
             ao_progress: Default::default(),
             edit_epoch: 0,
             prev_ao_view: None,
@@ -2377,6 +2381,7 @@ impl Renderer {
     ) {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.galaxy.plastic = self.plastic.impostor_uniform();
+        self.galaxy.light = self.light.uniform();
         self.update_console_mesh(console.height_fraction);
 
         if controller.show_collisions {
@@ -2505,6 +2510,7 @@ impl Renderer {
             bevel: self.bevel.uniform(),
             plastic: self.plastic.uniform(),
             plastic_ext: self.plastic.uniform_ext(),
+            light: self.light.uniform(),
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -3205,6 +3211,7 @@ impl Renderer {
     ) {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.galaxy.plastic = self.plastic.impostor_uniform();
+        self.galaxy.light = self.light.uniform();
         self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
