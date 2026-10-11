@@ -214,11 +214,12 @@ impl PlanetData {
     // type later keeps the terrain)
     pub fn new_for_type(resolution: u32, seed: u32, planet_type: PlanetType) -> Self {
         println!("Generating Terrain Noise Map for res {}...", resolution);
-        let terrain = if planet_type.def().liquid.is_some() {
-            PlanetTerrain::with_lakes(resolution, seed)
-        } else {
-            PlanetTerrain::new(resolution, seed)
-        };
+        let terrain = PlanetTerrain::for_type(
+            resolution,
+            seed,
+            planet_type,
+            planet_type.def().liquid.is_some(),
+        );
         println!("Terrain Generation Complete.");
         Self::from_terrain(resolution, seed, terrain, planet_type)
     }

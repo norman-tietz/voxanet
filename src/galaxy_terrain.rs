@@ -29,7 +29,7 @@ pub fn generate_planet_mesh(planet: &GalaxyPlanet, subdivision: u32) -> (Vec<Ver
     let def = planet.planet_type.def();
     let generator = NoiseGenerator::new(planet.noise_seed);
     // lakes like the baked planet (GalaxyPlanet::bake: liquid planet types)
-    let shape = TerrainShape::new(res, &generator, def.liquid.is_some());
+    let shape = TerrainShape::new(res, &generator, planet.planet_type, def.liquid.is_some());
 
     // TerrainShape returns offsets in layers from sea level, like the real engine's; per vertex the
     // carved height and, inside a lake below its level, that level
@@ -157,6 +157,25 @@ mod tests {
     use super::*;
     use crate::biome::PlanetType;
     use crate::gen::CoordSystem;
+    use crate::noise::PlanetTerrain;
+
+    // Review Focus 2
+    #[test]
+    fn impostor_shape_matches_the_bake_for_every_type() {
+        for t in PlanetType::ALL {
+            let res = 48;
+            let g = NoiseGenerator::new(5);
+            let shape = TerrainShape::new(res, &g, t, t.def().liquid.is_some());
+            let baked = PlanetTerrain::for_type(res, 5, t, t.def().liquid.is_some());
+            for (face, u, v) in [(0u8, 3u32, 7u32), (2, 20, 31), (5, 47, 0)] {
+                let dir = CoordSystem::get_direction(face, u, v, res);
+                let h = ((res / 2) as f32 + shape.sample(&g, dir).height)
+                    .round()
+                    .max(1.0) as u32;
+                assert_eq!(baked.get_height(face, u, v), h, "{t:?} {face} {u} {v}");
+            }
+        }
+    }
 
     // every generated planet (radius 40..=250) gets a near impostor sampling every 2nd column
     #[test]
@@ -208,7 +227,12 @@ mod tests {
             let planet = test_planet(1, planet_type);
             let res = planet.voxel_resolution();
             let generator = NoiseGenerator::new(planet.noise_seed);
-            let shape = TerrainShape::new(res, &generator, planet_type.def().liquid.is_some());
+            let shape = TerrainShape::new(
+                res,
+                &generator,
+                planet_type,
+                planet_type.def().liquid.is_some(),
+            );
             let (unit_verts, _) = crate::icosphere::generate(2);
             let (verts, _) = generate_planet_mesh(&planet, 2);
             let sea = (res / 2) as f32;
@@ -265,7 +289,7 @@ mod tests {
             .map(|b| crate::gen::lod_land_color(b, b, 1.0));
         let res = planet.voxel_resolution();
         let g = NoiseGenerator::new(planet.noise_seed);
-        let shape = TerrainShape::new(res, &g, true);
+        let shape = TerrainShape::new(res, &g, PlanetType::EarthLike, true);
         let water_r: Vec<f32> = std::iter::once((res / 2) as f32)
             .chain(shape.lakes().iter().map(|l| l.level as f32))
             .map(|level| CoordSystem::get_layer_radius_f(level, res))
@@ -327,7 +351,7 @@ mod tests {
             .map(|seed| test_planet(seed, planet_type))
             .find(|p| {
                 let g = NoiseGenerator::new(p.noise_seed);
-                !TerrainShape::new(p.voxel_resolution(), &g, true)
+                !TerrainShape::new(p.voxel_resolution(), &g, PlanetType::EarthLike, true)
                     .lakes()
                     .is_empty()
             })
@@ -339,7 +363,7 @@ mod tests {
         let planet = lake_test_planet(PlanetType::EarthLike);
         let res = planet.voxel_resolution();
         let g = NoiseGenerator::new(planet.noise_seed);
-        let shape = TerrainShape::new(res, &g, true);
+        let shape = TerrainShape::new(res, &g, PlanetType::EarthLike, true);
         let sea = (res / 2) as f32;
         let (unit_verts, _) = crate::icosphere::generate(5);
         let (verts, _) = generate_planet_mesh(&planet, 5);

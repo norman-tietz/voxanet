@@ -1,3 +1,4 @@
+use crate::biome::PlanetType;
 use crate::gen::CoordSystem;
 use glam::Vec3;
 use std::sync::Arc;
@@ -71,11 +72,17 @@ pub(crate) struct TerrainShape {
     ridge_freq: f32,
     range_freq: f32,
     resolution: u32,
+    planet_type: PlanetType,
     lakes: Vec<Lake>,
 }
 
 impl TerrainShape {
-    pub(crate) fn new(resolution: u32, g: &NoiseGenerator, with_lakes: bool) -> Self {
+    pub(crate) fn new(
+        resolution: u32,
+        g: &NoiseGenerator,
+        planet_type: PlanetType,
+        with_lakes: bool,
+    ) -> Self {
         let radius = resolution as f32 / 2.0;
         let mut shape = Self {
             relief: (3.0 * radius.sqrt()).min(0.2 * radius),
@@ -83,6 +90,7 @@ impl TerrainShape {
             ridge_freq: (radius / 120.0).max(2.5),
             range_freq: (radius / 400.0).max(1.5),
             resolution,
+            planet_type,
             lakes: Vec::new(),
         };
         if with_lakes {
@@ -209,10 +217,21 @@ impl TerrainShape {
         lakes
     }
 
+    // the continent mask (low-frequency, positive = land), including the type's land offset
+    pub(crate) fn continent(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + land_offset(self.planet_type)
+    }
+
     // height above (or below) sea level for a direction on the unit sphere, before lakes are carved
     pub(crate) fn natural_height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
-        // continents: low-frequency, positive = land
-        let c = g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + 0.08;
+        #[allow(clippy::match_single_binding)]
+        match self.planet_type {
+            _ => self.earth_like(g, dir),
+        }
+    }
+
+    pub(crate) fn earth_like(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let c = self.continent(g, dir);
         let land = smoothstep(-0.02, 0.12, c);
         // short continental shelves: coasts are a narrow band, not wide flats around sea level
         let base = if c < 0.0 {
@@ -255,6 +274,24 @@ fn lake_hash(seed: u32, k: u32, salt: u32) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
+// a height quantised into steps of `step` with the step edges rounded over the last `softness` of each
+// step (0..1): flat treads, steep risers — mesas and strata
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn terrace(h: f32, step: f32, softness: f32) -> f32 {
+    let k = h / step;
+    let f = k.floor();
+    (f + smoothstep(1.0 - softness, 1.0, k - f)) * step
+}
+
+// the continent mask's offset per planet type: its land share (Earth-like's is today's 0.08)
+pub(crate) fn land_offset(t: PlanetType) -> f32 {
+    match t {
+        PlanetType::Desert => 0.5,
+        PlanetType::Ocean => -0.35,
+        _ => 0.08,
+    }
+}
+
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -280,18 +317,20 @@ pub struct PlanetTerrain {
 
 impl PlanetTerrain {
     pub fn new(resolution: u32, seed: u32) -> Self {
-        Self::generate(resolution, seed, false)
+        Self::for_type(resolution, seed, PlanetType::EarthLike, false)
     }
 
     // a liquid planet's terrain: lakes carved, each with its own water level
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_lakes(resolution: u32, seed: u32) -> Self {
-        Self::generate(resolution, seed, true)
+        Self::for_type(resolution, seed, PlanetType::EarthLike, true)
     }
 
-    fn generate(resolution: u32, seed: u32, lakes: bool) -> Self {
+    // the terrain of a planet type (lakes only where the caller says so)
+    pub fn for_type(resolution: u32, seed: u32, planet_type: PlanetType, lakes: bool) -> Self {
         use rayon::prelude::*;
         let generator = NoiseGenerator::new(seed);
-        let shape = TerrainShape::new(resolution, &generator, lakes);
+        let shape = TerrainShape::new(resolution, &generator, planet_type, lakes);
         let sea_level = resolution / 2;
         // index 0: the sea; k + 1: lake k
         let water_levels: Vec<u32> = std::iter::once(sea_level)
@@ -396,6 +435,69 @@ impl NoiseGenerator {
             p[i + 256] = permutation[i];
         }
         Self { perm: p, seed }
+    }
+
+    // billow noise, 0..1: soft rounded mounds (1 − |perlin| per octave)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn billow(&self, p: Vec3, octaves: u32) -> f32 {
+        let (mut sum, mut amp, mut norm, mut freq) = (0.0, 1.0, 0.0, 1.0);
+        for _ in 0..octaves {
+            sum += (1.0 - self.perlin(p * freq).abs()) * amp;
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
+        }
+        (sum / norm).clamp(0.0, 1.0)
+    }
+
+    // Voronoi (cellular) noise over the 3D lattice: one feature point per integer cell, jittered by a
+    // hash of the cell and the seed. Returns the distances to the nearest (f1) and second-nearest (f2)
+    // feature point and the nearest cell's own hash in 0..1 (per-cell choices: which cells get a
+    // caldera, how high a plate sits)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn cellular(&self, p: Vec3) -> (f32, f32, f32) {
+        let base = p.floor();
+        let (mut f1, mut f2, mut h1) = (f32::MAX, f32::MAX, 0.0);
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let cell = base + Vec3::new(dx as f32, dy as f32, dz as f32);
+                    let [jx, jy, jz, h] = self.cell_hash(cell);
+                    let d = (cell + Vec3::new(jx, jy, jz) - p).length();
+                    if d < f1 {
+                        f2 = f1;
+                        f1 = d;
+                        h1 = h;
+                    } else if d < f2 {
+                        f2 = d;
+                    }
+                }
+            }
+        }
+        (f1, f2, h1)
+    }
+
+    // four values in 0..1 for an integer cell (splitmix64 over the seed and the cell coordinates)
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn cell_hash(&self, c: Vec3) -> [f32; 4] {
+        let (x, y, z) = (
+            c.x as i32 as u32 as u64,
+            c.y as i32 as u32 as u64,
+            c.z as i32 as u32 as u64,
+        );
+        let mut s = (self.seed as u64)
+            ^ x.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ y.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ z.wrapping_mul(0x1656_67B1_9E37_79F9);
+        let mut next = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut v = s;
+            v = (v ^ (v >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            v = (v ^ (v >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            v ^= v >> 31;
+            (v >> 40) as f32 / (1u64 << 24) as f32
+        };
+        [next(), next(), next(), next()]
     }
 
     pub(crate) fn seed(&self) -> u32 {
@@ -514,6 +616,54 @@ fn grad(hash: u8, x: f32, y: f32, z: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cellular_distances_are_ordered_and_continuous() {
+        let g = NoiseGenerator::new(HOME_SEED);
+        let mut prev: Option<(f32, f32)> = None;
+        for k in 0..2000 {
+            let p = Vec3::new(k as f32 * 0.01, 0.37, -1.3);
+            let (f1, f2, h) = g.cellular(p);
+            assert!(f1 >= 0.0 && f1 <= f2, "{p}: {f1} {f2}");
+            assert!((0.0..1.0).contains(&h));
+            if let Some((a, _)) = prev {
+                assert!((f1 - a).abs() <= 0.011, "f1 continuous at {p}");
+            }
+            prev = Some((f1, f2));
+        }
+    }
+
+    #[test]
+    fn billow_and_terrace_behave() {
+        let g = NoiseGenerator::new(7);
+        for k in 0..500 {
+            let b = g.billow(Vec3::new(k as f32 * 0.13, 1.1, 2.7), 3);
+            assert!((0.0..=1.0).contains(&b), "{b}");
+        }
+        // terrace: monotonic, flat mid-step, steps of `step`
+        let mut last = f32::MIN;
+        for k in 0..400 {
+            let h = k as f32 * 0.05;
+            let t = terrace(h, 2.0, 0.15);
+            assert!(t >= last - 1e-5);
+            last = t;
+        }
+        assert_eq!(terrace(1.0, 2.0, 0.15), 0.0);
+        assert_eq!(terrace(3.0, 2.0, 0.15), 2.0);
+        assert!((terrace(3.99, 2.0, 0.15) - 4.0).abs() < 0.1);
+    }
+
+    // Review Focus 3
+    #[test]
+    fn earth_like_profile_is_todays_formula() {
+        let g = NoiseGenerator::new(HOME_SEED);
+        let shape = TerrainShape::new(128, &g, PlanetType::EarthLike, false);
+        assert_eq!(land_offset(PlanetType::EarthLike), 0.08);
+        for k in 0..64 {
+            let dir = Vec3::new((k as f32 * 0.7).sin(), (k as f32 * 0.3).cos(), 0.4).normalize();
+            assert_eq!(shape.natural_height(&g, dir), shape.earth_like(&g, dir));
+        }
+    }
+
     // FNV-1a over every column height: a cheap fingerprint of a whole terrain
     fn fingerprint(t: &PlanetTerrain) -> u64 {
         t.heights.iter().fold(0xcbf2_9ce4_8422_2325u64, |a, &h| {
@@ -541,7 +691,7 @@ mod tests {
 
     fn lake_shape(res: u32, seed: u32) -> (TerrainShape, NoiseGenerator) {
         let g = NoiseGenerator::new(seed);
-        (TerrainShape::new(res, &g, true), g)
+        (TerrainShape::new(res, &g, PlanetType::EarthLike, true), g)
     }
 
     // the first seeds that give `res` at least `min` lakes
@@ -578,7 +728,9 @@ mod tests {
     #[test]
     fn lake_count_follows_the_planet_size() {
         let g = NoiseGenerator::new(3);
-        assert!(TerrainShape::new(256, &g, false).lakes().is_empty());
+        assert!(TerrainShape::new(256, &g, PlanetType::EarthLike, false)
+            .lakes()
+            .is_empty());
         for seed in 1..20 {
             let n = lake_shape(256, seed).0.lakes().len();
             assert!(
