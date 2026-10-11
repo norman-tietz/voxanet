@@ -10,7 +10,7 @@ docs/showcase/take-showcase.sh                 # overwrites resources/planet.png
 docs/showcase/take-showcase.sh /tmp/try.png    # or write somewhere else to compare first
 ```
 
-The script needs a clean `src/main.rs`, `src/renderer.rs` and `src/screenshot.rs`. It works like this:
+The script needs a clean `src/main.rs`, `src/render/renderer.rs` and `src/app/screenshot.rs`. It works like this:
 1. Applies `showcase.patch` (throwaway capture hooks).
 2. Builds the release binary and runs the game.
 3. Captures at a fixed game time.

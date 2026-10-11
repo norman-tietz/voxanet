@@ -14,7 +14,7 @@ OUT="${1:-resources/planet.png}"
 RAW="$(mktemp -d)/showcase_raw.png"
 LOG="$(dirname "$RAW")/run.log"
 
-for f in src/main.rs src/renderer.rs src/screenshot.rs; do
+for f in src/main.rs src/render/renderer.rs src/app/screenshot.rs; do
     git diff --quiet -- "$f" || { echo "$f has uncommitted changes; commit or stash them first" >&2; exit 1; }
 done
 pgrep -x voxanet >/dev/null && { echo "voxanet is already running; stop it first (pkill -x voxanet)" >&2; exit 1; }

@@ -26,7 +26,7 @@ index 63d3029..f53499e 100644
 +                    // the volcanic planet that looks biggest from here
 +                    let mut best: Option<(usize, glam::DVec3, f64)> = None;
 +                    for (j, p) in galaxy.planets.iter().enumerate() {
-+                        if p.planet_type != crate::biome::PlanetType::Volcanic { continue; }
++                        if p.planet_type != crate::planet::biome::PlanetType::Volcanic { continue; }
 +                        let rel = me.to_planet_frame(p.position_at(t), t);
 +                        let ang = (p.radius as f64 / rel.length()).asin();
 +                        if best.is_none_or(|b| ang > b.2) { best = Some((j, rel.normalize(), ang)); }
@@ -89,10 +89,10 @@ index 63d3029..f53499e 100644
                  .unwrap(),
          );
          self.game = Some(Game::new(window, self.initial_biome, self.seed));
-diff --git a/src/renderer.rs b/src/renderer.rs
+diff --git a/src/render/renderer.rs b/src/render/renderer.rs
 index baf49ee..d71f06e 100644
---- a/src/renderer.rs
-+++ b/src/renderer.rs
+--- a/src/render/renderer.rs
++++ b/src/render/renderer.rs
 @@ -317,7 +317,10 @@ impl Renderer {
              .await
              .unwrap();
@@ -139,10 +139,10 @@ index baf49ee..d71f06e 100644
  
              // screenshot flash: drawn last (over the text too), so it's visible feedback on screen but,
              // since it's timed to start only after this frame's capture (below), never in the PNG itself
-diff --git a/src/screenshot.rs b/src/screenshot.rs
+diff --git a/src/app/screenshot.rs b/src/app/screenshot.rs
 index ce0b9ff..975aa01 100644
---- a/src/screenshot.rs
-+++ b/src/screenshot.rs
+--- a/src/app/screenshot.rs
++++ b/src/app/screenshot.rs
 @@ -183,7 +183,7 @@ pub fn capture(
          wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
      );
