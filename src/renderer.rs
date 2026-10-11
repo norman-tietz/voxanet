@@ -190,6 +190,8 @@ pub struct Renderer {
     deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
     galaxy: crate::galaxy_render::GalaxyRenderer,
     cloud_map: crate::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
+    env_map: crate::env_map::EnvMap,       // the plastic's pre-filtered sky reflection (group 0)
+    env_reset: bool, // the environment map no longer fits: bake it whole on the next planet frame
     global_bind_identity: wgpu::BindGroup, // for UI: identity camera, no ray-marched shadows
 
     // --- MESHES ---
@@ -410,6 +412,8 @@ impl Renderer {
 
         let cloud_map = crate::cloud_map::CloudMap::new(&device);
         let cloud_layout = crate::cloud_map::CloudMap::layout_entries();
+        let mut env_map = crate::env_map::EnvMap::new(&device);
+        let env_layout = crate::env_map::EnvMap::layout_entries();
         let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -461,6 +465,9 @@ impl Renderer {
                 cloud_layout[0],
                 cloud_layout[1],
                 cloud_layout[2],
+                // 11-12: the environment map (env_map.rs)
+                env_layout[0],
+                env_layout[1],
             ],
             label: Some("global_layout"),
         });
@@ -514,6 +521,7 @@ impl Renderer {
         });
 
         let cloud_entries = cloud_map.bind_entries();
+        let env_entries = env_map.bind_entries();
         let global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &global_layout,
             entries: &[
@@ -537,6 +545,9 @@ impl Renderer {
                 cloud_entries[0].clone(),
                 cloud_entries[1].clone(),
                 cloud_entries[2].clone(),
+                // 11-12: the environment map
+                env_entries[0].clone(),
+                env_entries[1].clone(),
             ],
             label: None,
         });
@@ -1026,9 +1037,13 @@ impl Renderer {
                 cloud_entries[0].clone(),
                 cloud_entries[1].clone(),
                 cloud_entries[2].clone(),
+                // 11-12: the environment map
+                env_entries[0].clone(),
+                env_entries[1].clone(),
             ],
             label: Some("Identity Bind Group"),
         });
+        env_map.init_bake(&device, &shader, &global_layout);
 
         let gpu_timer = GpuTimer::new(&device, &queue);
         let hw_rt = HwRt::supported(&device).then(|| HwRt::new(&device));
@@ -1097,6 +1112,8 @@ impl Renderer {
             deferred,
             galaxy,
             cloud_map,
+            env_map,
+            env_reset: true,
 
             font_system,
             swash_cache,
@@ -1921,6 +1938,7 @@ impl Renderer {
 
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
         self.generation += 1; // results still in flight belong to the old planet
+        self.env_reset = true; // the sky around the camera is another planet's
         self.edit_epoch += 1; // the progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
@@ -2570,6 +2588,11 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.biome_buf, 0, bytemuck::cast_slice(&[biome_data]));
+
+        // the environment map's step for this frame (env_map.rs), reading this frame's uniforms
+        self.env_map
+            .update(&self.device, &self.queue, &self.global_bind, self.env_reset);
+        self.env_reset = false;
 
         let model_mat = player.get_model_matrix();
         self.queue.write_buffer(
@@ -3223,6 +3246,7 @@ impl Renderer {
         self.galaxy.plastic = self.plastic.impostor_uniform();
         self.galaxy.light = self.light.uniform();
         self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
+        self.env_reset = true; // the first planet frame after galaxy mode bakes the map whole
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
             | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
@@ -3806,6 +3830,43 @@ pub(crate) mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("WGSL validation error: {e:?}"));
+    }
+
+    #[test]
+    fn env_filter_shader_is_valid_wgsl() {
+        assert_valid_wgsl(include_str!("env_filter.wgsl"));
+    }
+
+    // Review Focus 2 and 3, and the lookup wiring (env_map.rs)
+    #[test]
+    fn env_map_is_wired_into_the_lighting() {
+        let s = include_str!("shader.wgsl");
+        let bake = &s[s.find("fn fs_env_bake").unwrap()..];
+        let bake = &bake[..bake.find("\n}\n").unwrap()];
+        assert!(
+            bake.contains("smoothstep(-0.1, 0.1, dot(dir, up))"),
+            "{bake}"
+        );
+        assert!(
+            bake.contains("vec4<f32>(rgb * a, a)"),
+            "premultiplied: {bake}"
+        );
+        let shade = &s[s.find("fn shade(").unwrap()..s.find("fn fog(").unwrap()];
+        assert!(
+            shade.contains("env_sample(") && shade.contains("(1.0 - e.a) * ground"),
+            "{shade}"
+        );
+        assert!(
+            shade.contains("atmo_env_analytic("),
+            "the /plastic env off path"
+        );
+        let g = include_str!("galaxy.wgsl");
+        assert!(g.contains("atmo_env_analytic("), "impostors stay analytic");
+        let f = include_str!("env_filter.wgsl");
+        assert!(
+            f.contains("textureSampleLevel(src_cube"),
+            "the filter samples the source in direction space"
+        );
     }
 
     #[test]

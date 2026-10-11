@@ -213,8 +213,8 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let ambient = mix(ground, a.sky_zenith * sky_light, hemi);
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     // the voxel terrain's plastic (atmosphere.wgsl), base roughness, no shadows or AO out here
-    let pl = atmo_plastic(N, V, L, in.local_pos, sun, ambient, ground, planet.plastic.x, planet.plastic.y,
-                          planet.plastic.z, 1.0, a);
+    let env = atmo_env_analytic(reflect(-V, N), in.local_pos, L, ground, ambient, planet.plastic.x, a);
+    let pl = atmo_plastic(N, V, L, sun, env, planet.plastic.x, planet.plastic.y, planet.plastic.z, 1.0);
     var lit = albedo * (direct + ambient + rim) * pl.diffuse_w + pl.spec;
     // a glowing liquid (lava) is emissive like the engine's (fs_water); impostor vertices carry the
     // liquid colour itself, so match on it, fading over shore blends

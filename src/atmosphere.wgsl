@@ -272,15 +272,24 @@ struct Plastic {
     diffuse_w: f32,  // weight of the diffuse terms: 1 - strength * F (energy split)
 }
 
+// the plastic's environment without the map (the impostors, and /plastic env off): the sky dome along
+// the reflection (no sun disc: the sun is the GGX highlight), the ground colour below the local horizon,
+// blended toward `ambient` with roughness as a cheap stand-in for pre-filtering
+fn atmo_env_analytic(R: vec3<f32>, pos: vec3<f32>, L: vec3<f32>, ground: vec3<f32>,
+                     ambient: vec3<f32>, roughness: f32, a: Atmosphere) -> vec3<f32> {
+    let up = normalize(pos);
+    let sky = atmo_sky_dome(R, pos, L, a) * atmo_sky_opacity(R, pos, L, a.planet_r);
+    let env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
+    return mix(env, ambient, clamp(roughness, 0.05, 1.0));
+}
+
 // glossy plastic at a surface point (planet frame): a GGX sun highlight (Trowbridge-Reitz distribution,
 // Schlick Fresnel, Smith-Schlick visibility) lit by `sun` (sun colour x shadow x cloud shadow), and the
-// sky along the reflection (dome x opacity, so dark at night; `ground`, the bounce light, below the local horizon;
-// blended toward `ambient` with roughness, a cheap stand-in for a pre-filtered environment), times `ao`
-// and `reflection` (its own weight: at the physical ~13 % a bright sky washed block colours out).
+// environment `env` along the reflection (shade(): the pre-filtered map, env_map.rs; the impostors and
+// /plastic env off: atmo_env_analytic), times `ao` and `reflection` (its own weight: at the physical ~13 % a bright sky washed block colours out).
 // strength 0: no specular and diffuse_w 1, the purely diffuse look. Mirrored in plastic.rs.
-fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: vec3<f32>,
-                ambient: vec3<f32>, ground: vec3<f32>, roughness: f32, strength: f32, reflection: f32,
-                ao: f32, a: Atmosphere) -> Plastic {
+fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, sun: vec3<f32>, env: vec3<f32>,
+                roughness: f32, strength: f32, reflection: f32, ao: f32) -> Plastic {
     if (strength <= 0.0) {
         return Plastic(vec3<f32>(0.0), 1.0);
     }
@@ -299,12 +308,6 @@ fn atmo_plastic(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, pos: vec3<f32>, sun: v
     let vis = 1.0 / (4.0 * (n_v * (1.0 - k) + k) * (n_l * (1.0 - k) + k));
     let highlight = sun * (D * F * vis * n_l);
 
-    let R = reflect(-V, N);
-    let up = normalize(pos);
-    // the dome without the sun disc (the sun is the GGX highlight, which knows the shadow)
-    let sky = atmo_sky_dome(R, pos, L, a) * atmo_sky_opacity(R, pos, L, a.planet_r);
-    var env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
-    env = mix(env, ambient, r);
     let F_env = PLASTIC_F0 + (max(1.0 - r, PLASTIC_F0) - PLASTIC_F0) * pow(1.0 - n_v, 5.0);
     let F_refl = F_env * reflection;
     // capped: at the lowest roughness the GGX peak overflowed half-float targets (motion blur's

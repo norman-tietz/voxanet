@@ -52,6 +52,22 @@ struct Biome {
     star_frame: vec4<f32>,   // quaternion: planet frame -> galaxy space (GalaxyPlanet::orientation)
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
+
+// the pre-filtered environment map (env_map.rs): the read slot's levels, sampled with the cloud map's
+// linear sampler
+struct EnvParams {
+    slot: vec4<f32>, // x: the slot to read
+}
+@group(0) @binding(11) var env_map: texture_cube_array<f32>;
+@group(0) @binding(12) var<uniform> env_params: EnvParams;
+const ENV_SIZE: f32 = 128.0;  // env_map.rs ENV_SIZE
+const ENV_LEVELS: f32 = 6.0;  // env_map.rs ENV_LEVELS
+
+// premultiplied sky and its coverage along R, filtered for `roughness` (env_map.rs roughness_to_level)
+fn env_sample(R: vec3<f32>, roughness: f32) -> vec4<f32> {
+    return textureSampleLevel(env_map, cloud_sampler, R, i32(env_params.slot.x),
+                              clamp(roughness, 0.0, 1.0) * (ENV_LEVELS - 1.0));
+}
 // blurred shadow term written by cs_march or rt_hw.wgsl + blur.wgsl (r = shadow), see rt_blur.rs
 @group(2) @binding(0) var rt_blurred: texture_2d<f32>;
 @group(2) @binding(1) var rt_ao: texture_2d<f32>; // (ao, distance): progressive ray-traced AO (rt_hw.wgsl), else 1
@@ -572,8 +588,18 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
 
     // D. Plastic: GGX sun highlight (in full shadow none: the hard shadow, not the softened one) and the
     // sky reflection (atmosphere.wgsl), taking their share of the light from the diffuse terms
-    let pl = atmo_plastic(N, V, L, world_pos, biome.sun.rgb * shadow_raw * clouded, ambient_light,
-                          ground, roughness, global.plastic.y, global.plastic_ext.x, sa.y, engine_atmosphere());
+    // the environment along the reflection: the pre-filtered map's sky, its uncovered part (below the
+    // horizon) filled with this point's ground colour; /plastic env off: the analytic sky (env_map.rs)
+    let R = reflect(-V, N);
+    var env: vec3<f32>;
+    if (global.plastic_ext.y > 0.5) {
+        let e = env_sample(R, roughness);
+        env = e.rgb + (1.0 - e.a) * ground;
+    } else {
+        env = atmo_env_analytic(R, world_pos, L, ground, ambient_light, roughness, engine_atmosphere());
+    }
+    let pl = atmo_plastic(N, V, L, biome.sun.rgb * shadow_raw * clouded, env, roughness,
+                          global.plastic.y, global.plastic_ext.x, sa.y);
 
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
@@ -1140,4 +1166,53 @@ fn cs_gbuf_down(@builtin(global_invocation_id) id: vec3<u32>) {
     let world_pos = world_from_pixel(vec2<f32>(src) + 0.5, dist);
     textureStore(down_pos, vec2<i32>(id.xy), vec4<f32>(world_pos, dist));
     textureStore(down_nrm, vec2<i32>(id.xy), vec4<f32>(textureLoad(d_normal, src, 0).xyz * 2.0 - 1.0, 0.0));
+}
+
+// --- ENVIRONMENT MAP BAKE (env_map.rs) ---
+// one face of the source cube per pass (the face comes in as the instance index): the sky around the
+// camera along each texel's direction — dome × opacity (no sun disc) with the clouds composited in, as
+// fs_water reflects them — premultiplied with its coverage above the camera's horizon
+
+struct EnvFaceOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) @interpolate(flat) face: u32,
+}
+
+@vertex
+fn vs_env_face(@builtin(vertex_index) i: u32, @builtin(instance_index) face: u32) -> EnvFaceOut {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    var out: EnvFaceOut;
+    out.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+    out.face = face;
+    return out;
+}
+
+// the direction through texel centre `px` of cube face `face` (+X, -X, +Y, -Y, +Z, -Z) on a face
+// `size` texels wide, as the hardware's cube sampling maps it (cloud_bake.wgsl cube_dir)
+fn env_cube_dir(face: u32, px: vec2<f32>, size: f32) -> vec3<f32> {
+    let st = px / size * 2.0 - 1.0;
+    let s = st.x;
+    let t = st.y;
+    switch face {
+        case 0u: { return vec3<f32>(1.0, -t, -s); }
+        case 1u: { return vec3<f32>(-1.0, -t, s); }
+        case 2u: { return vec3<f32>(s, 1.0, t); }
+        case 3u: { return vec3<f32>(s, -1.0, -t); }
+        case 4u: { return vec3<f32>(s, -t, 1.0); }
+        default: { return vec3<f32>(-s, -t, -1.0); }
+    }
+}
+
+@fragment
+fn fs_env_bake(in: EnvFaceOut) -> @location(0) vec4<f32> {
+    let dir = normalize(env_cube_dir(in.face, in.pos.xy, ENV_SIZE));
+    let cam = global.camera_pos.xyz;
+    let L = normalize(global.sun_dir.xyz);
+    let up = normalize(cam);
+    let sky = atmo_sky_dome(dir, cam, L, engine_atmosphere()) * sky_opacity(dir, cam, L);
+    // the clouds at the map's texel size (~2 / ENV_SIZE radians), not a screen pixel's
+    let c = atmo_clouds(cam, dir, 2.0 / ENV_SIZE, L, engine_atmosphere());
+    let rgb = mix(sky, c.rgb, c.a);
+    let a = smoothstep(-0.1, 0.1, dot(dir, up));
+    return vec4<f32>(rgb * a, a);
 }

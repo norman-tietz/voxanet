@@ -347,8 +347,10 @@ mod tests {
     #[test]
     fn wgsl_plastic_follows_the_review_fixes() {
         let atmo = include_str!("atmosphere.wgsl");
-        let f = &atmo[atmo.find("fn atmo_plastic(").unwrap()..];
-        // the reflected sky without the sun disc (the sun is the GGX highlight)
+        // the reflected sky without the sun disc (the sun is the GGX highlight); the sky now comes in
+        // as `env`, from the env map's bake (shader.wgsl) or atmo_env_analytic
+        let f = &atmo[atmo.find("fn atmo_env_analytic(").unwrap()..];
+        let f = &f[..f.find("fn atmo_plastic(").unwrap()];
         assert!(
             !f.contains("atmo_sky_over_black"),
             "sun disc in the reflection"
