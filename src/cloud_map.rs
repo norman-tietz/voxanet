@@ -17,6 +17,8 @@ pub(crate) const CLOUD_BAKE_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
     include_str!("star.wgsl"), // atmosphere.wgsl's sun disc uses it
     "\n",
+    include_str!("weather.wgsl"),
+    "\n",
     include_str!("cloud_bake.wgsl")
 );
 
@@ -39,6 +41,7 @@ struct CloudMapParams {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct BakeParams {
     times: [f32; 4],
+    force: crate::weather::WeatherForce,
 }
 
 // which snapshots exist and which is being baked; pure bookkeeping, no GPU (tested below)
@@ -104,7 +107,8 @@ impl Schedule {
 
 pub struct CloudMap {
     schedule: Schedule,
-    times: [f32; 4], // BakeParams.times as last written
+    times: [f32; 4],                     // BakeParams.times as last written
+    force: crate::weather::WeatherForce, // the weather's force, baked in as the storm term
     sample_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     params_buf: wgpu::Buffer,
@@ -253,6 +257,7 @@ impl CloudMap {
         Self {
             schedule: Schedule::default(),
             times: [0.0; 4],
+            force: crate::weather::WeatherSettings::default().force_uniform(),
             sample_view,
             sampler,
             params_buf,
@@ -315,6 +320,15 @@ impl CloudMap {
         ]
     }
 
+    pub fn set_force(&mut self, f: crate::weather::WeatherForce) {
+        self.force = f;
+    }
+
+    // the force changed: every snapshot is outdated
+    pub fn reset(&mut self) {
+        self.schedule = Schedule::default();
+    }
+
     // once per frame, before anything that draws clouds: bakes what the schedule asks for (submitted
     // on its own) and sets the blend for cloud time `t` (seconds, wrapped like the shaders' clock)
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, t: f64) {
@@ -332,7 +346,10 @@ impl CloudMap {
         queue.write_buffer(
             &self.bake_buf,
             0,
-            bytemuck::cast_slice(&[BakeParams { times: self.times }]),
+            bytemuck::cast_slice(&[BakeParams {
+                times: self.times,
+                force: self.force,
+            }]),
         );
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Cloud Map Bake"),

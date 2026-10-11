@@ -37,6 +37,10 @@ pub(crate) const FLARE_SHADER: &str = concat!(
 pub(crate) const SCENE_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
     "\n",
+    include_str!("weather.wgsl"),
+    "\n",
+    include_str!("weather_map.wgsl"),
+    "\n",
     include_str!("clouds.wgsl"),
     include_str!("star.wgsl"),
     "\n",
@@ -189,6 +193,9 @@ pub struct Renderer {
 
     deferred: Deferred, // full-resolution G-buffer, geometry and lighting pipelines
     galaxy: crate::galaxy_render::GalaxyRenderer,
+    weather_map: crate::weather::WeatherMap, // the baked weather (weather.rs), group 0 of the scene and the galaxy
+    pub weather: crate::weather::WeatherSettings,
+    pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::cloud_map::CloudMap, // shared by the scene and the galaxy renderer (group 0 of both)
     env_map: crate::env_map::EnvMap,       // the plastic's pre-filtered sky reflection (group 0)
     env_reset: bool, // the environment map no longer fits: bake it whole on the next planet frame
@@ -411,6 +418,8 @@ impl Renderer {
         );
 
         let cloud_map = crate::cloud_map::CloudMap::new(&device);
+        let weather_map = crate::weather::WeatherMap::new(&device);
+        let weather_layout = crate::weather::WeatherMap::layout_entries();
         let cloud_layout = crate::cloud_map::CloudMap::layout_entries();
         let mut env_map = crate::env_map::EnvMap::new(&device);
         let env_layout = crate::env_map::EnvMap::layout_entries();
@@ -468,6 +477,9 @@ impl Renderer {
                 // 11-12: the environment map (env_map.rs)
                 env_layout[0],
                 env_layout[1],
+                // 13-14: the weather map (weather.rs, weather_map.wgsl)
+                weather_layout[0],
+                weather_layout[1],
             ],
             label: Some("global_layout"),
         });
@@ -522,6 +534,7 @@ impl Renderer {
 
         let cloud_entries = cloud_map.bind_entries();
         let env_entries = env_map.bind_entries();
+        let weather_entries = weather_map.bind_entries();
         let global_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &global_layout,
             entries: &[
@@ -548,6 +561,9 @@ impl Renderer {
                 // 11-12: the environment map
                 env_entries[0].clone(),
                 env_entries[1].clone(),
+                // 13-14: the weather map
+                weather_entries[0].clone(),
+                weather_entries[1].clone(),
             ],
             label: None,
         });
@@ -749,7 +765,8 @@ impl Renderer {
             config.width,
             config.height,
         );
-        let galaxy = crate::galaxy_render::GalaxyRenderer::new(&device, &config, &cloud_map);
+        let galaxy =
+            crate::galaxy_render::GalaxyRenderer::new(&device, &config, &cloud_map, &weather_map);
 
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1040,6 +1057,9 @@ impl Renderer {
                 // 11-12: the environment map
                 env_entries[0].clone(),
                 env_entries[1].clone(),
+                // 13-14: the weather map
+                weather_entries[0].clone(),
+                weather_entries[1].clone(),
             ],
             label: Some("Identity Bind Group"),
         });
@@ -1112,6 +1132,9 @@ impl Renderer {
             deferred,
             galaxy,
             cloud_map,
+            weather_map,
+            weather: crate::weather::WeatherSettings::default(),
+            weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
 
@@ -1939,6 +1962,7 @@ impl Renderer {
     pub fn force_reload_all(&mut self, planet: &PlanetData, player_pos: Vec3) {
         self.generation += 1; // results still in flight belong to the old planet
         self.env_reset = true; // the sky around the camera is another planet's
+        self.weather_map.reset();
         self.edit_epoch += 1; // the progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
@@ -2419,6 +2443,14 @@ impl Renderer {
             timer.poll(&self.device);
         }
         // before the backdrop, which draws clouds too; cloud time wraps hourly like the shaders' clock
+        // the weather first: the cloud bake adds its storm term (weather.rs)
+        if self.weather.expire((time % 3600.0) as f32) {
+            self.weather_changed();
+        }
+        self.weather_force = self.weather.force_uniform();
+        self.weather_map
+            .update(&self.device, &self.queue, time % 3600.0, self.weather_force);
+        self.cloud_map.set_force(self.weather_force);
         self.cloud_map
             .update(&self.device, &self.queue, time % 3600.0);
 
@@ -3235,6 +3267,13 @@ impl Renderer {
         self.text_atlas.trim();
     }
 
+    // the weather's force or on/off changed: the snapshots are outdated
+    pub fn weather_changed(&mut self) {
+        self.weather_map.reset();
+        self.cloud_map.reset();
+        self.env_reset = true;
+    }
+
     pub fn render_galaxy(
         &mut self,
         camera: &crate::galaxy_render::GalaxyCamera,
@@ -3245,6 +3284,14 @@ impl Renderer {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.galaxy.plastic = self.plastic.impostor_uniform();
         self.galaxy.light = self.light.uniform();
+        // the weather first: the cloud bake adds its storm term (weather.rs)
+        if self.weather.expire((t % 3600.0) as f32) {
+            self.weather_changed();
+        }
+        self.weather_force = self.weather.force_uniform();
+        self.weather_map
+            .update(&self.device, &self.queue, t % 3600.0, self.weather_force);
+        self.cloud_map.set_force(self.weather_force);
         self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
         self.env_reset = true; // the first planet frame after galaxy mode bakes the map whole
         let out = match self.surface.get_current_texture() {
@@ -3838,6 +3885,29 @@ pub(crate) mod tests {
     }
 
     // Review Focus 2 and 3, and the lookup wiring (env_map.rs)
+    // Review Focus 4, and the wiring of the weather map (weather.rs)
+    #[test]
+    fn weather_map_is_updated_in_both_modes() {
+        let r = include_str!("renderer.rs");
+        let render = &r[r.find("pub fn render(").unwrap()..];
+        let render = &render[..render.find("\n    pub fn ").unwrap()];
+        // rustfmt may break the chain across lines
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        assert!(squash(render).contains("self.weather_map.update("));
+        let galaxy = &r[r.find("pub fn render_galaxy(").unwrap()..];
+        let galaxy = &galaxy[..galaxy.find("\n    pub fn ").unwrap_or(galaxy.len())];
+        assert!(squash(galaxy).contains("self.weather_map.update("));
+        assert!(SCENE_SHADER.contains("fn weather_at("));
+        assert!(crate::galaxy_render::GALAXY_SHADER.contains("fn weather_at("));
+        let bake = include_str!("cloud_bake.wgsl");
+        assert!(bake.contains("weather_storm(dir, t, bake.force) * STORM_COVER"));
+    }
+
+    #[test]
+    fn weather_bake_shader_is_valid_wgsl() {
+        assert_valid_wgsl(crate::weather::WEATHER_BAKE_SHADER);
+    }
+
     #[test]
     fn env_map_is_wired_into_the_lighting() {
         let s = include_str!("shader.wgsl");

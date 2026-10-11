@@ -14,6 +14,10 @@ use wgpu::util::DeviceExt;
 pub(crate) const GALAXY_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
     "\n",
+    include_str!("weather.wgsl"),
+    "\n",
+    include_str!("weather_map.wgsl"),
+    "\n",
     include_str!("clouds.wgsl"),
     include_str!("star.wgsl"),
     "\n",
@@ -269,6 +273,7 @@ impl GalaxyRenderer {
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
         cloud_map: &crate::cloud_map::CloudMap, // its bindings join the camera's group 0 (clouds.wgsl)
+        weather_map: &crate::weather::WeatherMap, // so do the weather map's (weather_map.wgsl)
     ) -> Self {
         let (verts, indices) = crate::icosphere::generate(ICOSPHERE_SUBDIVISIONS);
         let vert_data: Vec<[f32; 3]> = verts.iter().map(|v| v.to_array()).collect();
@@ -285,6 +290,8 @@ impl GalaxyRenderer {
 
         let cloud_layout = crate::cloud_map::CloudMap::layout_entries();
         let cloud_entries = cloud_map.bind_entries();
+        let weather_layout = crate::weather::WeatherMap::layout_entries();
+        let weather_entries = weather_map.bind_entries();
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("galaxy_camera_layout"),
             entries: &[
@@ -301,6 +308,8 @@ impl GalaxyRenderer {
                 cloud_layout[0],
                 cloud_layout[1],
                 cloud_layout[2],
+                weather_layout[0],
+                weather_layout[1],
             ],
         });
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -320,6 +329,8 @@ impl GalaxyRenderer {
                 cloud_entries[0].clone(),
                 cloud_entries[1].clone(),
                 cloud_entries[2].clone(),
+                weather_entries[0].clone(),
+                weather_entries[1].clone(),
             ],
         });
 

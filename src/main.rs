@@ -756,6 +756,15 @@ impl Game {
             let msg = renderer.plastic.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
+        if let Some(cmd) = console.weather_request.take() {
+            let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
+            let t = (clock.elapsed().as_secs_f64() % 3600.0) as f32;
+            let (msg, changed) = renderer.weather.apply(cmd, kind, player.position, t);
+            if changed {
+                renderer.weather_changed();
+            }
+            console.log(&msg, [0.0, 1.0, 0.0]);
+        }
         if let Some(cmd) = console.light_request.take() {
             let msg = renderer.light.apply(cmd);
             console.log(&msg, [0.0, 1.0, 0.0]);

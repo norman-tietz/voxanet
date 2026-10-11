@@ -6,6 +6,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use wgpu::util::DeviceExt;
 
 use crate::biome::PlanetType;
 
@@ -14,6 +15,15 @@ pub(crate) const WEATHER_FN_SHADER: &str = concat!(
     include_str!("star.wgsl"),
     "\n",
     include_str!("weather.wgsl")
+);
+
+pub(crate) const WEATHER_BAKE_SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    include_str!("star.wgsl"),
+    "\n",
+    include_str!("weather.wgsl"),
+    "\n",
+    include_str!("weather_bake.wgsl")
 );
 
 pub const SNAPSHOT_SECS: f64 = 5.0;
@@ -335,6 +345,18 @@ impl WeatherSettings {
         }
     }
 
+    // a released force is gone once its fade-out is over (`t`: the clock wrapped at 3600); true if
+    // it was dropped, so the bakes must start over
+    pub fn expire(&mut self, t: f32) -> bool {
+        match self.force {
+            Some(f) if f.end < ACTIVE_END && age(t, f.end) > FORCE_FADE_SECS => {
+                self.force = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     // applies /weather at the player (`dir`: the player's direction from the planet centre, `t`: the
     // clock wrapped at 3600); returns the line to log and whether the bakes must start over
     pub fn apply(
@@ -422,6 +444,235 @@ impl Schedule {
     // the force or on/off changed: every snapshot is outdated
     fn reset(&mut self) {
         self.held = [None; SLOTS as usize];
+    }
+}
+
+const MAP_SIZE: u32 = 64; // weather_bake.wgsl WEATHER_MAP_SIZE
+const FACES: u32 = 6;
+const MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+// must match WeatherBakeParams in weather_bake.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct WeatherBakeParams {
+    times: [f32; 4],
+    force: WeatherForce,
+}
+
+pub struct WeatherMap {
+    schedule: Schedule,
+    times: [f32; 4],
+    sample_view: wgpu::TextureView,
+    params_buf: wgpu::Buffer, // WeatherMapParams (weather_map.wgsl): the blend
+    bake_buf: wgpu::Buffer,
+    bake_bind: wgpu::BindGroup,
+    bake_pipeline: wgpu::RenderPipeline,
+    targets: Vec<wgpu::TextureView>, // one per layer (slot * 6 + face)
+}
+
+impl WeatherMap {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Weather Map"),
+            size: wgpu::Extent3d {
+                width: MAP_SIZE,
+                height: MAP_SIZE,
+                depth_or_array_layers: SLOTS * FACES,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: MAP_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sample_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Weather Map (cube array)"),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Weather Map Params"),
+            contents: bytemuck::cast_slice(&[[0.0f32; 4]]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bake_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Weather Bake Params"),
+            contents: bytemuck::cast_slice(&[WeatherBakeParams::zeroed()]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Weather Bake Shader"),
+            source: wgpu::ShaderSource::Wgsl(WEATHER_BAKE_SHADER.into()),
+        });
+        let bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("weather_bake_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bake_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Weather Bake"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&bake_layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_weather_face"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_weather_bake"),
+                compilation_options: Default::default(),
+                targets: &[Some(MAP_FORMAT.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bake_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("weather_bake_bind"),
+            layout: &bake_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bake_buf.as_entire_binding(),
+            }],
+        });
+        let targets = (0..SLOTS * FACES)
+            .map(|layer| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: None,
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        Self {
+            schedule: Schedule::default(),
+            times: [0.0; 4],
+            sample_view,
+            params_buf,
+            bake_buf,
+            bake_bind,
+            bake_pipeline,
+            targets,
+        }
+    }
+
+    // scene group 0 and galaxy camera group 0 (weather_map.wgsl); sampled with the cloud map's sampler
+    pub fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
+        let fragment = wgpu::ShaderStages::FRAGMENT;
+        [
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: fragment,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::CubeArray,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 14,
+                visibility: fragment,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]
+    }
+
+    pub fn bind_entries(&self) -> [wgpu::BindGroupEntry<'_>; 2] {
+        [
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(&self.sample_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: self.params_buf.as_entire_binding(),
+            },
+        ]
+    }
+
+    pub fn reset(&mut self) {
+        self.schedule.reset();
+    }
+
+    // once per frame before anything reads the map: bakes the missing snapshots (own submission) and
+    // sets the blend; `t`: the clock wrapped at 3600
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        t: f64,
+        force: WeatherForce,
+    ) {
+        let (work, params) = self.schedule.update(t);
+        queue.write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&[params]));
+        if work.is_empty() {
+            return;
+        }
+        for &n in &work {
+            self.times[slot(n) as usize] = (n as f64 * SNAPSHOT_SECS) as f32;
+        }
+        queue.write_buffer(
+            &self.bake_buf,
+            0,
+            bytemuck::cast_slice(&[WeatherBakeParams {
+                times: self.times,
+                force,
+            }]),
+        );
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Weather Map Bake"),
+        });
+        for n in work {
+            for face in 0..FACES {
+                let layer = slot(n) * FACES + face;
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Weather Map"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        depth_slice: None,
+                        view: &self.targets[layer as usize],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.bake_pipeline);
+                pass.set_bind_group(0, &self.bake_bind, &[]);
+                pass.draw(0..3, layer..layer + 1);
+            }
+        }
+        queue.submit(std::iter::once(enc.finish()));
     }
 }
 
@@ -608,6 +859,34 @@ mod tests {
         let f = s.force_uniform();
         assert_eq!(weather_force_weight(here, 204.5, &f), 0.0);
         assert!(weather_force_weight(here, 201.0, &f) > 0.7);
+    }
+
+    #[test]
+    fn released_forces_expire_active_ones_do_not() {
+        let mut s = WeatherSettings::default();
+        s.apply(
+            WeatherCommand::Force(Force::Storm),
+            WeatherKind::Rain,
+            Vec3::Z,
+            90.0,
+        );
+        assert!(!s.expire(3000.0));
+        assert!(s.force.is_some());
+        s.apply(WeatherCommand::Auto, WeatherKind::Rain, Vec3::Z, 100.0);
+        assert!(!s.expire(103.0) && s.force.is_some());
+        assert!(s.expire(105.0));
+        assert!(s.force.is_none());
+        assert!(!s.expire(106.0));
+        // released just before the wrap: expires after it
+        s.apply(
+            WeatherCommand::Force(Force::Storm),
+            WeatherKind::Rain,
+            Vec3::Z,
+            3590.0,
+        );
+        s.apply(WeatherCommand::Auto, WeatherKind::Rain, Vec3::Z, 3598.0);
+        assert!(!s.expire(1.0) && s.force.is_some());
+        assert!(s.expire(3.0));
     }
 
     #[test]

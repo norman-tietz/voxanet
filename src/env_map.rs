@@ -599,6 +599,10 @@ mod tests {
             cases(include_str!("env_filter.wgsl"), "fn cube_dir"),
             reference
         );
+        assert_eq!(
+            cases(include_str!("weather_bake.wgsl"), "fn cube_dir"),
+            reference
+        );
     }
 
     #[test]

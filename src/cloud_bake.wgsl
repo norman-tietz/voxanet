@@ -6,6 +6,7 @@ const CLOUD_MAP_SIZE: f32 = 512.0; // cloud_map.rs SIZE
 
 struct BakeParams {
     times: vec4<f32>, // the snapshot time (cloud time, seconds) of each slot
+    force: WeatherForce, // the weather's force and on/off (weather.wgsl): storms raise the cover
 }
 @group(0) @binding(0) var<uniform> bake: BakeParams;
 @group(0) @binding(1) var mip_src: texture_2d<f32>; // the previous mip level of the same layer
@@ -43,7 +44,10 @@ fn cube_dir(face: u32, px: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_cloud_bake(in: FaceOut) -> @location(0) vec4<f32> {
     let dir = normalize(cube_dir(in.layer % 6u, in.pos.xy));
-    return vec4<f32>(fbm_clouds(dir, bake.times[in.layer / 6u]), 0.0, 0.0, 1.0);
+    let t = bake.times[in.layer / 6u];
+    // storms close the cover: a regional shift of the threshold, exact since it is applied before it
+    let n = fbm_clouds(dir, t) + weather_storm(dir, t, bake.force) * STORM_COVER;
+    return vec4<f32>(n, 0.0, 0.0, 1.0);
 }
 
 @fragment

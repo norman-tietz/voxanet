@@ -15,7 +15,7 @@ pub enum GalaxyRequest {
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 11] = [
+const HELP_LINES: [&str; 12] = [
     "Commands (up/down recall earlier ones):",
     "Commands without a value show the current setting:",
     "  /debug_mode [true|false]       /view [first|third]",
@@ -25,6 +25,7 @@ const HELP_LINES: [&str; 11] = [
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
+    "  /weather [on|off|auto|clear|rain|storm|snow]",
     "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
     "  /screenshot <path>             help",
 ];
@@ -80,6 +81,7 @@ pub struct Console {
     pub film_request: Option<crate::film::FilmCommand>, // set by /film, applied by the game loop (renderer)
     pub ao_request: Option<crate::ao::AoCommand>, // set by /ao, applied by the game loop (renderer)
     pub plastic_request: Option<crate::plastic::PlasticCommand>, // set by /plastic, applied by the game loop (renderer)
+    pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     pub shadow_request: Option<crate::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
@@ -104,6 +106,7 @@ impl Console {
             film_request: None,
             ao_request: None,
             plastic_request: None,
+            weather_request: None,
             light_request: None,
             shadow_request: None,
             command_history: Vec::new(),
@@ -284,6 +287,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/weather" => match crate::weather::WeatherCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.weather_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/shadow" => match crate::shadow::ShadowCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.shadow_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
@@ -416,6 +424,24 @@ mod tests {
         let c = console_with(&["/shadow sun 40"]);
         assert_eq!(c.shadow_request, None);
         assert_eq!(c.history.last().unwrap().0, crate::shadow::SHADOW_USAGE);
+    }
+
+    #[test]
+    fn weather_command_sets_a_request() {
+        let c = console_with(&["/weather storm"]);
+        assert_eq!(
+            c.weather_request,
+            Some(crate::weather::WeatherCommand::Force(
+                crate::weather::Force::Storm
+            ))
+        );
+        let c = console_with(&["/weather"]);
+        assert_eq!(
+            c.weather_request,
+            Some(crate::weather::WeatherCommand::Show)
+        );
+        let c = console_with(&["/weather hail"]);
+        assert_eq!(c.weather_request, None);
     }
 
     #[test]
