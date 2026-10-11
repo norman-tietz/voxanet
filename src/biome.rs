@@ -14,10 +14,22 @@ pub enum PlanetType {
     EarthLike,
     Volcanic,
     Ice,
+    Desert,
+    Toxic,
+    Ocean,
+    Shattered,
 }
 
 impl PlanetType {
-    pub const ALL: [PlanetType; 3] = [PlanetType::EarthLike, PlanetType::Volcanic, PlanetType::Ice];
+    pub const ALL: [PlanetType; 7] = [
+        PlanetType::EarthLike,
+        PlanetType::Volcanic,
+        PlanetType::Ice,
+        PlanetType::Desert,
+        PlanetType::Toxic,
+        PlanetType::Ocean,
+        PlanetType::Shattered,
+    ];
 
     // matches a planet type's name case-insensitively, ignoring spaces and hyphens ("Earth-like",
     // "earthlike", "EARTHLIKE"); used by --biome and /galaxy add
@@ -98,6 +110,97 @@ impl PlanetType {
                     space_color: [0.02, 0.025, 0.04],
                 },
             },
+            PlanetType::Desert => PlanetTypeDef {
+                name: "Desert",
+                day_length_secs: 300.0, // Sehr lange, heiße Tage
+                liquid: None,
+                palette: Palette {
+                    peak: BlockType::Stone,
+                    rock: BlockType::Stone,
+                    beach: BlockType::Sand,
+                    ground: BlockType::Sand,
+                    subsurface: BlockType::Sand, // Oder Sandstone, falls vorhanden
+                },
+                atmosphere: AtmosphereDef {
+                    sky_zenith: [0.85, 0.65, 0.40],
+                    sky_horizon_warm: [1.2, 0.9, 0.6],
+                    cloud_light: [0.95, 0.90, 0.85],
+                    cloud_dark: [0.70, 0.65, 0.60],
+                    space_color: [0.04, 0.03, 0.02],
+                },
+            },
+            PlanetType::Toxic => PlanetTypeDef {
+                name: "Toxic",
+                day_length_secs: 150.0,
+                liquid: Some(LiquidDef {
+                    shallow_color: [0.2, 1.2, 0.1], // Giftiges Neongrün
+                    deep_color: [0.05, 0.3, 0.02],
+                    behavior: LiquidBehavior::Glowing,
+                    damaging: true,
+                }),
+                palette: Palette {
+                    peak: BlockType::Stone,
+                    rock: BlockType::Obsidian,
+                    beach: BlockType::Ash, // Oder Schlamm/Mud
+                    ground: BlockType::Dirt,
+                    subsurface: BlockType::Dirt,
+                },
+                atmosphere: AtmosphereDef {
+                    sky_zenith: [0.3, 0.5, 0.3], // Krankhaftes, gelb-grünes Licht
+                    sky_horizon_warm: [0.6, 0.7, 0.2],
+                    cloud_light: [0.4, 0.5, 0.3],
+                    cloud_dark: [0.15, 0.2, 0.1],
+                    space_color: [0.015, 0.025, 0.015],
+                },
+            },
+            PlanetType::Ocean => PlanetTypeDef {
+                name: "Ocean",
+                day_length_secs: 180.0,
+                liquid: Some(LiquidDef {
+                    shallow_color: [0.05, 0.4, 0.6],
+                    deep_color: [0.005, 0.05, 0.15],
+                    behavior: LiquidBehavior::Reflective,
+                    damaging: false,
+                }),
+                palette: Palette {
+                    peak: BlockType::Stone,
+                    rock: BlockType::Stone,
+                    beach: BlockType::Sand,
+                    ground: BlockType::Sand, // Inseln bestehen fast nur aus Strand
+                    subsurface: BlockType::Dirt,
+                },
+                atmosphere: AtmosphereDef {
+                    sky_zenith: [0.1, 0.25, 0.5], // Schwerer, stürmischer blauer Himmel
+                    sky_horizon_warm: [0.5, 0.6, 0.8],
+                    cloud_light: [0.6, 0.65, 0.7],
+                    cloud_dark: [0.2, 0.25, 0.35],
+                    space_color: [0.01, 0.01, 0.02],
+                },
+            },
+            PlanetType::Shattered => PlanetTypeDef {
+                name: "Shattered",
+                day_length_secs: 90.0, // Schnelle, chaotische Rotation
+                liquid: Some(LiquidDef {
+                    shallow_color: [1.2, 0.1, 1.5], // Leuchtendes Plasma (Magenta/Lila)
+                    deep_color: [0.3, 0.02, 0.4],
+                    behavior: LiquidBehavior::Glowing,
+                    damaging: false,
+                }),
+                palette: Palette {
+                    peak: BlockType::Ember, // Leuchtende Spitzen
+                    rock: BlockType::Obsidian,
+                    beach: BlockType::Ash,
+                    ground: BlockType::Basalt,
+                    subsurface: BlockType::Basalt,
+                },
+                atmosphere: AtmosphereDef {
+                    sky_zenith: [0.1, 0.05, 0.2], // Alien-Neon-Himmel
+                    sky_horizon_warm: [0.5, 0.1, 0.8],
+                    cloud_light: [0.7, 0.3, 0.9],
+                    cloud_dark: [0.1, 0.02, 0.15],
+                    space_color: [0.04, 0.01, 0.05],
+                },
+            },
         }
     }
 }
@@ -137,8 +240,6 @@ pub struct Palette {
 #[derive(Clone, Copy, Debug)]
 pub struct PlanetTypeDef {
     pub name: &'static str,
-    // seconds for one full day/night cycle (the planet's axial spin period); each type's own,
-    // since a faster or slower spin is just more data, same as its palette or atmosphere
     pub day_length_secs: f32,
     pub liquid: Option<LiquidDef>,
     pub palette: Palette,
@@ -149,7 +250,6 @@ pub struct PlanetTypeDef {
 mod tests {
     use super::*;
 
-    // --biome and /galaxy add accept the same spellings
     #[test]
     fn planet_type_names_parse_like_the_biome_flag() {
         assert_eq!(
@@ -165,6 +265,14 @@ mod tests {
             Some(PlanetType::Volcanic)
         );
         assert_eq!(PlanetType::from_name("ice"), Some(PlanetType::Ice));
+        assert_eq!(PlanetType::from_name("desert"), Some(PlanetType::Desert));
+        assert_eq!(PlanetType::from_name("TOXIC"), Some(PlanetType::Toxic));
+        assert_eq!(PlanetType::from_name("Ocean"), Some(PlanetType::Ocean));
+        assert_eq!(
+            PlanetType::from_name("shattered"),
+            Some(PlanetType::Shattered)
+        );
+
         assert_eq!(PlanetType::from_name("lava"), None);
     }
 
@@ -183,6 +291,14 @@ mod tests {
     fn volcanic_liquid_is_glowing_and_damaging() {
         let def = PlanetType::Volcanic.def();
         let liquid = def.liquid.expect("Volcanic has lava");
+        assert!(matches!(liquid.behavior, LiquidBehavior::Glowing));
+        assert!(liquid.damaging);
+    }
+
+    #[test]
+    fn toxic_liquid_is_glowing_and_damaging() {
+        let def = PlanetType::Toxic.def();
+        let liquid = def.liquid.expect("Toxic has acid");
         assert!(matches!(liquid.behavior, LiquidBehavior::Glowing));
         assert!(liquid.damaging);
     }

@@ -208,8 +208,6 @@ pub fn overcast(storm_at_camera: f32, radius_ratio: f32) -> f32 {
 
 // what weather does to a planet type's surfaces
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// AcidRain, Dust and None await the planet types to come (Toxic; Desert; Shattered)
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum WeatherKind {
     Rain,     // rain, snow toward the poles
     AcidRain, // wet everywhere, no snow
@@ -222,9 +220,12 @@ pub enum WeatherKind {
 impl WeatherKind {
     pub fn for_planet(t: PlanetType) -> Self {
         match t {
-            PlanetType::EarthLike => WeatherKind::Rain,
+            PlanetType::EarthLike | PlanetType::Ocean => WeatherKind::Rain,
+            PlanetType::Toxic => WeatherKind::AcidRain,
             PlanetType::Ice => WeatherKind::Snow,
             PlanetType::Volcanic => WeatherKind::Ash,
+            PlanetType::Desert => WeatherKind::Dust,
+            PlanetType::Shattered => WeatherKind::None,
         }
     }
 
@@ -845,6 +846,22 @@ mod tests {
             }
         }
         assert_eq!(WeatherKind::for_planet(PlanetType::Ice), WeatherKind::Snow);
+        assert_eq!(
+            WeatherKind::for_planet(PlanetType::Ocean),
+            WeatherKind::Rain
+        );
+        assert_eq!(
+            WeatherKind::for_planet(PlanetType::Toxic),
+            WeatherKind::AcidRain
+        );
+        assert_eq!(
+            WeatherKind::for_planet(PlanetType::Desert),
+            WeatherKind::Dust
+        );
+        assert_eq!(
+            WeatherKind::for_planet(PlanetType::Shattered),
+            WeatherKind::None
+        );
         assert_eq!(
             WeatherKind::for_planet(PlanetType::Volcanic),
             WeatherKind::Ash

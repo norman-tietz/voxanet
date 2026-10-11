@@ -26,7 +26,7 @@ const HELP_LINES: [&str; 12] = [
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow]",
-    "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice <20-500>",
+    "  /galaxy home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered <20-500>",
     "  /screenshot <path>             help",
 ];
 const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
@@ -49,7 +49,7 @@ fn parse_galaxy_command(args: &[&str]) -> Result<GalaxyRequest, &'static str> {
                     planet_type,
                     radius,
                 }),
-                _ => Err("Usage: /galaxy add earthlike|volcanic|ice <radius 20-500>"),
+                _ => Err("Usage: /galaxy add earthlike|volcanic|ice|desert|toxic|ocean|shattered <radius 20-500>"),
             }
         }
         ["goto", n, radii] => {
