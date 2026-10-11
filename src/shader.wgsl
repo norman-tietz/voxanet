@@ -62,6 +62,7 @@ struct EnvParams {
 @group(0) @binding(12) var<uniform> env_params: EnvParams;
 const ENV_SIZE: f32 = 128.0;  // env_map.rs ENV_SIZE
 const ENV_LEVELS: f32 = 6.0;  // env_map.rs ENV_LEVELS
+const ENV_FADE_TOP: f32 = 1.5; // env_map.rs ENV_FADE_TOP: the map fades out up to this × the cloud shell
 
 // premultiplied sky and its coverage along R, filtered for `roughness` (env_map.rs roughness_to_level)
 fn env_sample(R: vec3<f32>, roughness: f32) -> vec4<f32> {
@@ -590,9 +591,15 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // sky reflection (atmosphere.wgsl), taking their share of the light from the diffuse terms
     // the environment along the reflection: the pre-filtered map's sky, its uncovered part (below the
     // horizon) filled with this point's ground colour; /plastic env off: the analytic sky (env_map.rs)
+    // (nothing to reflect with /plastic off: atmo_plastic returns early)
     let R = reflect(-V, N);
-    var env: vec3<f32>;
-    if (global.plastic_ext.y > 0.5) {
+    var env = vec3<f32>(0.0);
+    // the map is baked from the camera: from the cloud shell up its sky is space, so fade to the
+    // analytic sky (the impostors' too) by camera altitude (env_map.rs map_weight)
+    let planet_r = global.camera_pos.w;
+    let map_w = select(0.0, 1.0 - smoothstep(CLOUD_ALT, CLOUD_ALT * ENV_FADE_TOP,
+        length(global.camera_pos.xyz) / max(planet_r, 1.0)), global.plastic_ext.y > 0.5);
+    if (global.plastic.y > 0.0 && map_w > 0.0) {
         // the map is baked around the camera: read it relative to this point's horizon, rotating R by
         // the turn from this point's up to the camera's (on a small planet they differ by ~10° only 30
         // blocks away, and far ground reflected the map's below-horizon part: a green band)
@@ -601,9 +608,11 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
         let v = cross(up_p, up_c);
         let Rc = R + cross(v, R) + cross(v, cross(v, R)) / (1.0 + dot(up_p, up_c));
         let e = env_sample(Rc, roughness);
-        env = e.rgb + (1.0 - e.a) * ground;
-    } else {
-        env = atmo_env_analytic(R, world_pos, L, ground, ambient_light, roughness, engine_atmosphere());
+        env = (e.rgb + (1.0 - e.a) * ground) * map_w;
+    }
+    if (global.plastic.y > 0.0 && map_w < 1.0) {
+        env += atmo_env_analytic(R, world_pos, L, ground, ambient_light, roughness, engine_atmosphere())
+            * (1.0 - map_w);
     }
     let pl = atmo_plastic(N, V, L, biome.sun.rgb * shadow_raw * clouded, env, roughness,
                           global.plastic.y, global.plastic_ext.x, sa.y);

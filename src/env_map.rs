@@ -64,6 +64,21 @@ pub fn roughness_to_level(r: f32) -> f32 {
     r.clamp(0.0, 1.0) * (ENV_LEVELS - 1) as f32
 }
 
+// shade() reflects only the analytic sky from ENV_FADE_TOP × the cloud shell's radius up: the map is
+// baked from the camera, and from the cloud shell up its sky is space (black reflections at the
+// landing handover, no clouds); shader.wgsl ENV_FADE_TOP
+pub const ENV_FADE_TOP: f32 = 1.5;
+
+// how much of the map shade() reflects with the camera `cam_r` from the centre of a planet of radius
+// `planet_r` (shader.wgsl): all of it below the clouds, none from ENV_FADE_TOP × their radius
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn map_weight(cam_r: f32, planet_r: f32) -> f32 {
+    let lo = crate::common::CLOUD_ALT * planet_r;
+    let hi = lo * ENV_FADE_TOP;
+    let t = ((cam_r - lo) / (hi - lo)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 // the GGX roughness level `level` is filtered with (env_filter.wgsl)
 pub fn level_roughness(level: u32) -> f32 {
     level as f32 / (ENV_LEVELS - 1) as f32
@@ -539,6 +554,51 @@ mod tests {
     fn sizes_are_consistent() {
         assert_eq!(ENV_SIZE >> (ENV_LEVELS - 1), 4);
         assert_eq!(ENV_SIZE >> (SRC_MIPS - 1), 1);
+    }
+
+    // the map is baked from the camera: from the cloud shell up its sky is space, so shade() fades to
+    // the analytic sky (which the impostors use too) — full map below the clouds, none from 1.5×
+    #[test]
+    fn map_weight_fades_out_above_the_clouds() {
+        let r = 168.0;
+        let clouds = crate::common::CLOUD_ALT * r;
+        assert_eq!(map_weight(r + 5.0, r), 1.0);
+        assert_eq!(map_weight(clouds, r), 1.0);
+        let mid = map_weight(clouds * 1.25, r);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        assert_eq!(map_weight(clouds * 1.5, r), 0.0);
+        assert_eq!(map_weight(r * 3.0, r), 0.0);
+        let s = include_str!("shader.wgsl");
+        assert!(
+            s.contains("smoothstep(CLOUD_ALT, CLOUD_ALT * ENV_FADE_TOP"),
+            "shade() mirrors map_weight"
+        );
+        assert!(s.contains(&format!("const ENV_FADE_TOP: f32 = {ENV_FADE_TOP:?};")));
+    }
+
+    // three hand-copied cube-face direction tables must stay identical, or a face is rotated or
+    // mirrored silently (the cloud map's is the tested reference)
+    #[test]
+    fn cube_face_directions_match_the_cloud_map() {
+        let cases = |src: &str, func: &str| -> Vec<String> {
+            let body = &src[src.find(func).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            body.lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("case") || l.starts_with("default"))
+                .map(String::from)
+                .collect()
+        };
+        let reference = cases(include_str!("cloud_bake.wgsl"), "fn cube_dir");
+        assert_eq!(reference.len(), 6);
+        assert_eq!(
+            cases(include_str!("shader.wgsl"), "fn env_cube_dir"),
+            reference
+        );
+        assert_eq!(
+            cases(include_str!("env_filter.wgsl"), "fn cube_dir"),
+            reference
+        );
     }
 
     #[test]

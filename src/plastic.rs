@@ -115,6 +115,7 @@ impl PlasticCommand {
             ["smudge", v] => value(v, 0.0, 1.0).map(PlasticCommand::Smudge),
             ["scratch", v] => value(v, 0.0, 1.0).map(PlasticCommand::Scratch),
             ["reflection", v] => value(v, 0.0, 1.0).map(PlasticCommand::Reflection),
+            ["env"] => Ok(PlasticCommand::Get),
             ["env", "on"] => Ok(PlasticCommand::Env(true)),
             ["env", "off"] => Ok(PlasticCommand::Env(false)),
             _ => Err(PLASTIC_USAGE),
@@ -364,6 +365,7 @@ mod tests {
 
     #[test]
     fn env_toggle_parses_and_rides_in_the_uniform() {
+        assert_eq!(PlasticCommand::parse(&["env"]), Ok(PlasticCommand::Get)); // no value: show
         assert_eq!(
             PlasticCommand::parse(&["env", "off"]),
             Ok(PlasticCommand::Env(false))
