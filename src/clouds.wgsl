@@ -49,8 +49,8 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
     let storm = weather_at(up).x;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * 0.4, storm * 0.8) * a.sun_color * 0.55;
-    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light * (1.0 - 0.7 * storm);
+    let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * STORM_DARK_LEVEL, storm * STORM_DARKEN) * a.sun_color * 0.55;
+    let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light * (1.0 - STORM_SILVER_LOSS * storm);
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
     let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
@@ -66,6 +66,9 @@ fn atmo_clouds(origin: vec3<f32>, ray_dir: vec3<f32>, pixel_angle: f32, L: vec3<
 }
 
 const CLOUD_SHADOW_LOD: f32 = 4.0; // a coarse level: the shadow is soft and one read
+const STORM_DARKEN: f32 = 0.8;     // how far storm clouds go toward STORM_DARK_LEVEL of cloud_dark
+const STORM_DARK_LEVEL: f32 = 0.4;
+const STORM_SILVER_LOSS: f32 = 0.7; // silver lining lost in a full storm
 const STORM_SHADOW: f32 = 0.25;    // extra sunlight blocked under storm clouds
 
 // how much direct sunlight survives the visible clouds (the cloud map, storms included) on the way to

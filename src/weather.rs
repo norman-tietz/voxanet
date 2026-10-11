@@ -45,6 +45,15 @@ const SNOW_LAT_LO: f32 = 0.6;
 const SNOW_LAT_HI: f32 = 0.8;
 const WEATHER_AGE_LOOKBACK: f32 = 200.0;
 const FORCE_FADE_SECS: f32 = 4.0;
+// How long a force still reaches a baked value: the newest held snapshot is at most 10 s ahead of the
+// clock and its oldest history sample (`sample`'s cover history) 180 s before that. Past this after a
+// force's start (its fade-in is over for every sample) or end (its fade-out is) it changes nothing, so
+// `tick` may rewrite or drop it without a rebake. Stays inside WEATHER_AGE_LOOKBACK (200), so `age`
+// is never wrapped for it.
+const FORCE_FORGET_SECS: f32 = FORCE_FADE_SECS + 180.0 + 10.0;
+// `start` of an established force: so far back that `age` is huge and the fade-in is 1 everywhere, at
+// any clock value (a real start would drop the force out again an hour later, see `age`)
+const FORCE_START_LONG_AGO: f32 = -1e9;
 const FORCE_EDGE_LO: f32 = 0.35;
 const FORCE_EDGE_HI: f32 = 0.65;
 #[cfg_attr(not(test), allow(dead_code))] // the cloud bake's copy (weather.wgsl) is the one in use
@@ -349,15 +358,21 @@ impl WeatherSettings {
         }
     }
 
-    // a released force is gone once its fade-out is over (`t`: the clock wrapped at 3600); true if
-    // it was dropped, so the bakes must start over
-    pub fn expire(&mut self, t: f32) -> bool {
-        match self.force {
-            Some(f) if f.end < ACTIVE_END && age(t, f.end) > FORCE_FADE_SECS => {
+    // Per-frame force bookkeeping (`t`: the clock wrapped at 3600). Changes no baked value, so it never
+    // needs a rebake:
+    // - a released force is dropped only once no history sample can still see it (FORCE_FORGET_SECS
+    //   after its end), so the wetness and cover it left behind dry out instead of vanishing;
+    // - an established active force gets a far-past `start`, otherwise `age` would show it as not yet
+    //   started for 200 s once an hour (3400 s after it was given) and it would drop out and fade in again.
+    pub fn tick(&mut self, t: f32) {
+        match &mut self.force {
+            Some(f) if f.end < ACTIVE_END && age(t, f.end) > FORCE_FORGET_SECS => {
                 self.force = None;
-                true
             }
-            _ => false,
+            Some(f) if f.start > FORCE_START_LONG_AGO && age(t, f.start) > FORCE_FORGET_SECS => {
+                f.start = FORCE_START_LONG_AGO;
+            }
+            _ => {}
         }
     }
 
@@ -866,31 +881,89 @@ mod tests {
     }
 
     #[test]
-    fn released_forces_expire_active_ones_do_not() {
+    fn released_forces_expire_after_the_history_window_active_ones_do_not() {
+        let mut s = WeatherSettings::default();
+        let rain = |s: &mut WeatherSettings, c, t| s.apply(c, WeatherKind::Rain, Vec3::Z, t);
+        rain(&mut s, WeatherCommand::Force(Force::Storm), 90.0);
+        s.tick(3000.0);
+        assert!(s.force.is_some());
+        rain(&mut s, WeatherCommand::Auto, 100.0);
+        s.tick(105.0);
+        s.tick(100.0 + FORCE_FORGET_SECS - 1.0);
+        assert!(s.force.is_some());
+        s.tick(100.0 + FORCE_FORGET_SECS + 1.0);
+        assert!(s.force.is_none());
+        // released just before the wrap: dropped only after it, once the window has passed
+        rain(&mut s, WeatherCommand::Force(Force::Storm), 3590.0);
+        rain(&mut s, WeatherCommand::Auto, 3598.0);
+        s.tick(100.0);
+        assert!(s.force.is_some());
+        s.tick(3.0 + FORCE_FORGET_SECS + 1.0);
+        assert!(s.force.is_none());
+    }
+
+    #[test]
+    fn a_released_force_keeps_feeding_the_history() {
+        let here = Vec3::Z;
+        let mut s = WeatherSettings::default();
+        s.apply(
+            WeatherCommand::Force(Force::Rain),
+            WeatherKind::Rain,
+            here,
+            10.0,
+        );
+        s.apply(WeatherCommand::Auto, WeatherKind::Rain, here, 100.0);
+        // the storm has faded out, the ground is still wet (rain history), ticking changes nothing
+        for k in 0..10 {
+            let t = 100.0 + 2.0 * k as f32 + 6.0;
+            let before = sample(here, t, &s.force_uniform());
+            s.tick(t);
+            assert_eq!(before, sample(here, t, &s.force_uniform()));
+        }
+        assert!(sample(here, 120.0, &s.force_uniform())[1] > 0.3);
+        // and the expiry changes no baked value either
+        let before = sample(here, 100.0 + FORCE_FORGET_SECS + 1.0, &s.force_uniform());
+        s.tick(100.0 + FORCE_FORGET_SECS + 1.0);
+        assert!(s.force.is_none());
+        let after = sample(here, 100.0 + FORCE_FORGET_SECS + 1.0, &s.force_uniform());
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn an_active_force_holds_for_hours() {
+        let here = Vec3::Z;
         let mut s = WeatherSettings::default();
         s.apply(
             WeatherCommand::Force(Force::Storm),
             WeatherKind::Rain,
-            Vec3::Z,
-            90.0,
+            here,
+            10.0,
         );
-        assert!(!s.expire(3000.0));
-        assert!(s.force.is_some());
-        s.apply(WeatherCommand::Auto, WeatherKind::Rain, Vec3::Z, 100.0);
-        assert!(!s.expire(103.0) && s.force.is_some());
-        assert!(s.expire(105.0));
-        assert!(s.force.is_none());
-        assert!(!s.expire(106.0));
-        // released just before the wrap: expires after it
-        s.apply(
-            WeatherCommand::Force(Force::Storm),
-            WeatherKind::Rain,
-            Vec3::Z,
-            3590.0,
-        );
-        s.apply(WeatherCommand::Auto, WeatherKind::Rain, Vec3::Z, 3598.0);
-        assert!(!s.expire(1.0) && s.force.is_some());
-        assert!(s.expire(3.0));
+        let mut clock = 10.0f64;
+        let mut min_weight = 1.0f32;
+        while clock < 10.0 + 3.0 * 3600.0 {
+            clock += 5.0;
+            let t = (clock % 3600.0) as f32;
+            s.tick(t);
+            let f = s.force_uniform();
+            if clock > 10.0 + 20.0 {
+                min_weight = min_weight.min(weather_force_weight(here, t, &f));
+            }
+            if clock > 10.0 + 200.0 {
+                // the history samples hold too
+                for back in [30.0, 90.0, 180.0] {
+                    let tb = (t - back).rem_euclid(3600.0);
+                    min_weight = min_weight.min(weather_force_weight(here, tb, &f));
+                }
+            }
+        }
+        assert!(s.force.unwrap().start < -1e8);
+        assert!(min_weight > 0.999, "{min_weight}");
+        // the anniversary explicitly
+        let f = s.force_uniform();
+        for t in [3400.0, 3410.0, 3500.0, 10.0, 0.0] {
+            assert!(weather_force_weight(here, t, &f) > 0.999);
+        }
     }
 
     #[test]

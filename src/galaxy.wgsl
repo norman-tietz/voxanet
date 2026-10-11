@@ -216,7 +216,7 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
     // the engine's fill light: the ground's bounce in the surface's colour below, sky above (shade())
     let ground = atmo_ground_bounce(albedo, in.local_pos, L, sun, planet.light.x);
-    let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - 0.3 * ws.x);
+    let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - STORM_FILL_DROP * ws.x);
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     // the voxel terrain's plastic (atmosphere.wgsl), base roughness, no shadows or AO out here
     let env = atmo_env_analytic(reflect(-V, N), in.local_pos, L, ground, ambient, wm.roughness, a);

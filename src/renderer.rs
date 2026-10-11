@@ -2448,17 +2448,8 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.poll(&self.device);
         }
-        // before the backdrop, which draws clouds too; cloud time wraps hourly like the shaders' clock
-        // the weather first: the cloud bake adds its storm term (weather.rs)
-        if self.weather.expire((time % 3600.0) as f32) {
-            self.weather_changed();
-        }
-        self.weather_force = self.weather.force_uniform();
-        self.weather_map
-            .update(&self.device, &self.queue, time % 3600.0, self.weather_force);
-        self.cloud_map.set_force(self.weather_force);
-        self.cloud_map
-            .update(&self.device, &self.queue, time % 3600.0);
+        // before the backdrop, which draws clouds too
+        self.update_sky_maps(time);
 
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
@@ -2537,7 +2528,7 @@ impl Renderer {
 
         // the weather over the camera (weather.rs): the overcast sky and the flare under storms
         let storm_here =
-            crate::weather::sample(cam_pos.normalize_or_zero(), time, &self.weather_force)[0];
+            crate::weather::storm(cam_pos.normalize_or_zero(), time, &self.weather_force);
         let overcast = crate::weather::overcast(
             storm_here,
             cam_pos.length() / (planet.resolution as f32 * 0.5).max(1.0),
@@ -2624,7 +2615,7 @@ impl Renderer {
                 0.0,
                 angular_radius,
                 controller.fov_y(),
-                daylight * above_water * (1.0 - storm_here), // storm clouds hide the sun
+                daylight * above_water * (1.0 - overcast), // storm clouds hide the sun
                 backdrop.galaxy.star.star_type.def(),
                 true,
                 [
@@ -3285,6 +3276,18 @@ impl Renderer {
         self.text_atlas.trim();
     }
 
+    // the weather map and the cloud map for this frame, in both modes (`t`: the clock; the maps wrap it
+    // hourly like the shaders). The weather first: the cloud bake adds its storm term (weather.rs)
+    fn update_sky_maps(&mut self, t: f64) {
+        let t = t % 3600.0;
+        self.weather.tick(t as f32);
+        self.weather_force = self.weather.force_uniform();
+        self.weather_map
+            .update(&self.device, &self.queue, t, self.weather_force);
+        self.cloud_map.set_force(self.weather_force);
+        self.cloud_map.update(&self.device, &self.queue, t);
+    }
+
     // the weather's force or on/off changed: the snapshots are outdated
     pub fn weather_changed(&mut self) {
         self.weather_map.reset();
@@ -3302,15 +3305,7 @@ impl Renderer {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.galaxy.plastic = self.plastic.impostor_uniform();
         self.galaxy.light = self.light.uniform();
-        // the weather first: the cloud bake adds its storm term (weather.rs)
-        if self.weather.expire((t % 3600.0) as f32) {
-            self.weather_changed();
-        }
-        self.weather_force = self.weather.force_uniform();
-        self.weather_map
-            .update(&self.device, &self.queue, t % 3600.0, self.weather_force);
-        self.cloud_map.set_force(self.weather_force);
-        self.cloud_map.update(&self.device, &self.queue, t % 3600.0);
+        self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after galaxy mode bakes the map whole
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
@@ -3912,10 +3907,13 @@ pub(crate) mod tests {
         let render = &render[..render.find("\n    pub fn ").unwrap()];
         // rustfmt may break the chain across lines
         let squash = |s: &str| s.split_whitespace().collect::<String>();
-        assert!(squash(render).contains("self.weather_map.update("));
+        assert!(squash(render).contains("self.update_sky_maps("));
         let galaxy = &r[r.find("pub fn render_galaxy(").unwrap()..];
         let galaxy = &galaxy[..galaxy.find("\n    pub fn ").unwrap_or(galaxy.len())];
-        assert!(squash(galaxy).contains("self.weather_map.update("));
+        assert!(squash(galaxy).contains("self.update_sky_maps("));
+        let sky = &r[r.find("fn update_sky_maps(").unwrap()..];
+        let sky = &sky[..sky.find("\n    }\n").unwrap()];
+        assert!(squash(sky).contains("self.weather_map.update("));
         assert!(SCENE_SHADER.contains("fn weather_at("));
         assert!(crate::galaxy_render::GALAXY_SHADER.contains("fn weather_at("));
         let bake = include_str!("cloud_bake.wgsl");

@@ -756,13 +756,24 @@ impl Game {
             console.log(&msg, [0.0, 1.0, 0.0]);
         }
         if let Some(cmd) = console.weather_request.take() {
-            let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
-            let t = (clock.elapsed().as_secs_f64() % 3600.0) as f32;
-            let (msg, changed) = renderer.weather.apply(cmd, kind, player.position, t);
-            if changed {
-                renderer.weather_changed();
+            use crate::weather::WeatherCommand;
+            // in galaxy flight the player's position and the loaded planet's type are stale: only the
+            // global switch makes sense there
+            if *mode == GameMode::Galaxy && !matches!(cmd, WeatherCommand::On | WeatherCommand::Off)
+            {
+                console.log(
+                    "Land on a planet to see or force its weather.",
+                    [1.0, 0.5, 0.0],
+                );
+            } else {
+                let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
+                let t = (clock.elapsed().as_secs_f64() % 3600.0) as f32;
+                let (msg, changed) = renderer.weather.apply(cmd, kind, player.position, t);
+                if changed {
+                    renderer.weather_changed();
+                }
+                console.log(&msg, [0.0, 1.0, 0.0]);
             }
-            console.log(&msg, [0.0, 1.0, 0.0]);
         }
         if let Some(cmd) = console.light_request.take() {
             let msg = renderer.light.apply(cmd);

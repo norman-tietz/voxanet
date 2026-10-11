@@ -175,13 +175,16 @@ fn atmo_sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: At
 // the sky without the sun disc: for the galaxy impostors' atmosphere shell, where the galaxy draws
 // the star itself — and where L (planet -> star) is not the camera's direction to the star, so the
 // engine's disc would show up as a second sun beside the real one
+const OVERCAST_GREY: f32 = 0.6; // an overcast dome goes this far toward grey ...
+const OVERCAST_DIM: f32 = 0.4;  // ... and loses this much brightness
+
 fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     let limb = atmo_limb(ray_dir, cam_pos, a.planet_r);
     let sun_glow = pow(max(dot(ray_dir, L), 0.0), 8.0);
     let dome = mix(a.sky_zenith * 0.7, a.sky_horizon, sun_glow);
     // an overcast sky: greyer and darker under a storm (up to 40 %)
     let grey = vec3<f32>(dot(dome, vec3<f32>(0.3, 0.59, 0.11)));
-    let dull = mix(dome, grey, 0.6 * a.overcast) * (1.0 - 0.4 * a.overcast);
+    let dull = mix(dome, grey, OVERCAST_GREY * a.overcast) * (1.0 - OVERCAST_DIM * a.overcast);
     return mix(a.space_color, dull, limb);
 }
 

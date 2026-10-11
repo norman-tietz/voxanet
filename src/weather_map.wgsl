@@ -15,6 +15,8 @@ fn weather_at(dir: vec3<f32>) -> vec4<f32> {
     return mix(a, b, weather_params.slots.z);
 }
 
+const STORM_FILL_DROP: f32 = 0.3; // fill light lost under a full storm (shade() and planet_color)
+
 struct Weathered {
     albedo: vec3<f32>,
     roughness: f32,

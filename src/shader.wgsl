@@ -511,8 +511,8 @@ fn engine_atmosphere() -> Atmosphere {
     );
 }
 
-fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32) -> f32 {
-    // the visible clouds, storms included (clouds.wgsl); `t` is kept for the callers' symmetry
+fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>) -> f32 {
+    // the visible clouds, storms included (clouds.wgsl)
     return atmo_cloud_shadow_map(world_pos, L, global.camera_pos.w);
 }
 
@@ -576,7 +576,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below a water surface:
     // `water_depth` is how deep the point lies below its own water (a lake's or the sea's, through the
     // G-buffer), 0 when dry — so lake floors get caustics and tunnels sealed off from water don't
-    let clouded = cloud_shadow(world_pos, L, global.screen.w);
+    let clouded = cloud_shadow(world_pos, L);
     // wrap lighting (/light wrap) lets the diffuse sun reach a little past the terminator
     var direct_light = biome.sun.rgb * atmo_wrap_diffuse(dot(N, L), global.light.y) * shadow * clouded;
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
@@ -595,7 +595,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
     // storms are overcast: less fill light under them
-    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - 0.3 * ws.x);
+    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * ws.x);
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
@@ -1112,7 +1112,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha = 1.0 - exp(-depth * 0.35);
 
     // the sea floor's shadow (no shadow texel belongs to the surface itself), dimmed under cloud cover too
-    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_ao_at(in.clip_pos.xy, in.world_pos).x) * cloud_shadow(in.world_pos, L, t);
+    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_ao_at(in.clip_pos.xy, in.world_pos).x) * cloud_shadow(in.world_pos, L);
     let NdotL = max(dot(up, L), 0.0);
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
