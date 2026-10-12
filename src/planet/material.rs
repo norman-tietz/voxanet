@@ -35,7 +35,7 @@ impl BlockType {
             BlockType::Obsidian => [0.07, 0.06, 0.09],
             BlockType::Ember => [0.5, 0.22, 0.08],
             BlockType::Ice => [0.75, 0.88, 0.95],
-            BlockType::MoonDust => [0.58, 0.57, 0.55],
+            BlockType::MoonDust => [0.34, 0.335, 0.325],
         }
     }
 
@@ -117,7 +117,7 @@ fn material_band(
     let rel = (height - sea) / peak + j * 0.04; // borders wander by about 4% of the relief
                                                 // beaches and underwater floors follow the column's own water: a lake's shore, else the sea's
     let above_water = height - terrain.water_level(face, u, v) as f32;
-    let beach = (BEACH * peak).min(MAX_BEACH);
+    let beach = (BEACH * peak).min(MAX_BEACH).max(palette.beach_min);
     if rel >= SNOW_LINE {
         palette.peak
     } else if steep || rel >= ROCK_LINE {
@@ -204,10 +204,46 @@ pub fn placeable(palette: &Palette) -> [BlockType; 5] {
 mod tests {
     use super::*;
 
+    // the maria are the dark basalt on small planets too, where 6 % of the relief is a fraction of a layer
+    #[test]
+    fn cratered_maria_are_basalt_at_any_size() {
+        use crate::planet::biome::PlanetType;
+        for res in [111u32, 500] {
+            let data = crate::planet::data::PlanetData::new_for_type(
+                res,
+                1558184414,
+                PlanetType::Cratered,
+            );
+            let palette = PlanetType::Cratered.def().palette;
+            let t = &data.terrain;
+            let sea = t.sea_level();
+            let (mut floor, mut floor_beach, mut high, mut high_dark) = (0, 0, 0, 0);
+            for face in 0..6u8 {
+                for v in (0..res).step_by(2) {
+                    for u in (0..res).step_by(2) {
+                        let h = t.get_height(face, u, v);
+                        let b = surface_type(t, &palette, face, u, v);
+                        if h <= sea + 1 {
+                            floor += 1;
+                            floor_beach += (b == palette.beach) as u32;
+                        } else if h >= sea + 3 {
+                            high += 1;
+                            high_dark += (b == palette.beach) as u32;
+                        }
+                    }
+                }
+            }
+            println!("res {res}: floor {floor_beach}/{floor}, highland basalt {high_dark}/{high}");
+            assert!(floor > 100 && high > 100);
+            assert!(floor_beach as f32 >= 0.8 * floor as f32, "res {res}");
+            assert!((high_dark as f32) < 0.3 * high as f32, "res {res}");
+        }
+    }
+
     #[test]
     fn moon_dust_is_a_light_grey() {
         let [r, g, b] = BlockType::MoonDust.color();
-        assert!(r > 0.4 && (r - g).abs() < 0.05 && (g - b).abs() < 0.08);
+        assert!(r > 0.28 && (r - g).abs() < 0.05 && (g - b).abs() < 0.08);
         assert_eq!(BlockType::MoonDust.name(), "Moon dust");
     }
 

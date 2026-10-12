@@ -61,6 +61,7 @@ impl PlanetType {
                     beach: BlockType::Sand,
                     ground: BlockType::Grass,
                     subsurface: BlockType::Dirt,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.15, 0.3, 0.6],
@@ -87,6 +88,7 @@ impl PlanetType {
                     beach: BlockType::Ash,
                     ground: BlockType::Basalt,
                     subsurface: BlockType::Basalt,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.25, 0.08, 0.04],
@@ -107,6 +109,7 @@ impl PlanetType {
                     beach: BlockType::Ice,
                     ground: BlockType::Stone,
                     subsurface: BlockType::Stone,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.55, 0.65, 0.78],
@@ -127,6 +130,7 @@ impl PlanetType {
                     beach: BlockType::Sand,
                     ground: BlockType::Sand,
                     subsurface: BlockType::Sand, // no sandstone block (yet)
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.85, 0.65, 0.40],
@@ -153,6 +157,7 @@ impl PlanetType {
                     beach: BlockType::Ash, // no mud block (yet)
                     ground: BlockType::Dirt,
                     subsurface: BlockType::Dirt,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.3, 0.5, 0.3], // sickly yellow-green light
@@ -179,6 +184,7 @@ impl PlanetType {
                     beach: BlockType::Sand,
                     ground: BlockType::Sand, // islands are mostly beach
                     subsurface: BlockType::Dirt,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.1, 0.25, 0.5], // heavy, stormy blue sky
@@ -199,6 +205,7 @@ impl PlanetType {
                     beach: BlockType::Basalt,    // the maria: low flat ground
                     ground: BlockType::MoonDust, // the highlands
                     subsurface: BlockType::Basalt,
+                    beach_min: 1.5, // small planets: maria stay dark
                 },
                 // no atmosphere: no sky, clouds or fog (density 0). `sky_zenith` is never seen as a
                 // sky; it is the dim cool fill light shadows get (a quarter of Earth-like's)
@@ -227,6 +234,7 @@ impl PlanetType {
                     beach: BlockType::Ash,
                     ground: BlockType::Basalt,
                     subsurface: BlockType::Basalt,
+                    beach_min: 0.0,
                 },
                 atmosphere: AtmosphereDef {
                     sky_zenith: [0.1, 0.05, 0.2], // alien neon sky
@@ -318,6 +326,7 @@ pub struct Palette {
     pub beach: BlockType,
     pub ground: BlockType,
     pub subsurface: BlockType,
+    pub beach_min: f32, // least width of the beach band in layers (0 = just the share of the relief)
 }
 
 #[derive(Clone, Copy, Debug)]
