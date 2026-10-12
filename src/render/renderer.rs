@@ -46,7 +46,9 @@ pub(crate) const SCENE_SHADER: &str = concat!(
     "\n",
     include_str!("shader.wgsl"),
     "\n",
-    include_str!("../weather/precip.wgsl")
+    include_str!("../weather/precip.wgsl"),
+    "\n",
+    include_str!("../weather/lightning.wgsl")
 );
 
 // --- UNIFORMS ---
@@ -223,6 +225,7 @@ pub struct Renderer {
     pub weather: crate::weather::WeatherSettings,
     precip: crate::weather::precipitation::Precipitation, // rain, snow, ash, dust around the camera (CPU side)
     precip_gpu: crate::weather::precipitation::PrecipGpu, // and its draw (precip.wgsl)
+    lightning_gpu: crate::weather::lightning::LightningGpu, // the bolts' draw (lightning.wgsl)
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
     perf_message: Option<String>, // its finished summary, for the console
@@ -829,6 +832,15 @@ impl Renderer {
             config.format,
         );
 
+        let lightning_gpu = crate::weather::lightning::LightningGpu::new(
+            &device,
+            &shader,
+            &global_layout,
+            &rt_blur.sample_layout,
+            &deferred.textures_layout,
+            config.format,
+        );
+
         // --- UI PIPELINE ---
         let pipeline_ui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("UI Pipeline"),
@@ -1206,6 +1218,7 @@ impl Renderer {
             weather: crate::weather::WeatherSettings::default(),
             precip: crate::weather::precipitation::Precipitation::new(),
             precip_gpu,
+            lightning_gpu,
             precip_clock: None,
             perf: None,
             perf_message: None,
@@ -1391,6 +1404,21 @@ impl Renderer {
 
     // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
     // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
+    // the radius of the highest surface (terrain after edits, or the water) under a direction
+    fn ground_radius(planet: &PlanetData, dir: Vec3) -> f32 {
+        let probe = dir * (planet.resolution as f32 * 0.5);
+        match planet.cell_at(probe) {
+            Some(id) => {
+                let top = CoordSystem::get_layer_radius(
+                    planet.surface(id.face, id.u, id.v) + 1,
+                    planet.resolution,
+                );
+                top.max(planet.water_surface_radius(id.face, id.u, id.v))
+            }
+            None => probe.length(),
+        }
+    }
+
     pub(crate) fn camera_water_radius(planet: &PlanetData, cam_pos: Vec3) -> f32 {
         planet
             .cell_at(cam_pos)
@@ -2751,6 +2779,19 @@ impl Renderer {
         self.precip_gpu
             .update(&self.queue, &precip, self.precip.grid(), time);
 
+        // the bolts of this frame's strikes (lightning.rs); none seen from under water
+        let bolts = if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
+            Vec::new()
+        } else {
+            crate::weather::lightning::bolt_instances(
+                &self.strikes,
+                planet.resolution as f32 * 0.5,
+                planet.resolution as f32 * 0.5 * crate::planet::data::CLOUD_ALT,
+                |dir| Self::ground_radius(planet, dir),
+            )
+        };
+        self.lightning_gpu.update(&self.queue, &bolts);
+
         // the installed planet is the one the backdrop leaves out (the voxel engine draws it)
         let (angular_radius, star_frame) = match backdrop.content {
             crate::space::render::SpaceContent::AllButPlanet(i) => {
@@ -3121,6 +3162,8 @@ impl Renderer {
             }
             // rain, snow, ash or dust over the water and the lit scene (precip.wgsl)
             self.precip_gpu.draw(&mut pass);
+            // lightning bolts (lightning.wgsl)
+            self.lightning_gpu.draw(&mut pass);
 
             if self.collision_inds > 0 {
                 pass.set_pipeline(&self.pipeline_line); // Use line pipeline

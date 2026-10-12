@@ -220,6 +220,168 @@ pub fn frame_strikes(
     active_strikes(kind, settings.rate, planet_radius, cam, RANGE, t, force)
 }
 
+use bytemuck::{Pod, Zeroable};
+
+// one bolt segment for lightning.wgsl: a (xyz, width), b (xyz, brightness)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BoltInstance {
+    pub a: [f32; 4],
+    pub b: [f32; 4],
+}
+
+// the bolts of `strikes` as segments: from the cloud shell down to the ground under each strike
+pub fn bolt_instances(
+    strikes: &[Strike],
+    planet_radius: f32,
+    cloud_radius: f32,
+    ground_radius: impl Fn(Vec3) -> f32,
+) -> Vec<BoltInstance> {
+    let mut out = Vec::new();
+    for s in strikes {
+        let dir = s.pos.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            continue;
+        }
+        let ground = ground_radius(dir).max(planet_radius * 0.5);
+        let segs = super::bolt::build(s.seed, dir * cloud_radius, dir * ground);
+        for g in segs {
+            // keep every vertex above the ground under it (the jag may dip towards the surface)
+            let clamp = |p: Vec3| {
+                let r = p.length();
+                if r < ground {
+                    p / r * ground
+                } else {
+                    p
+                }
+            };
+            let (a, b) = (clamp(g.a), clamp(g.b));
+            out.push(BoltInstance {
+                a: [a.x, a.y, a.z, g.width],
+                b: [b.x, b.y, b.z, s.intensity * g.glow],
+            });
+        }
+    }
+    out
+}
+
+pub struct LightningGpu {
+    pipeline: wgpu::RenderPipeline,
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
+impl LightningGpu {
+    pub fn new(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule, // the scene shader (lightning.wgsl is appended to it)
+        global_layout: &wgpu::BindGroupLayout,
+        sample_layout: &wgpu::BindGroupLayout,
+        textures_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lightning_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(global_layout),
+                None,
+                Some(sample_layout),
+                Some(textures_layout),
+            ],
+            immediate_size: 0,
+        });
+        let additive = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let attributes = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
+        ];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Lightning"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_bolt"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 32,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &attributes,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_bolt"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState {
+                        color: additive,
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::render::deferred::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bolt Instances"),
+            size: (MAX_STRIKES * super::bolt::MAX_SEGMENTS_PER_BOLT * 32) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            instances,
+            count: 0,
+        }
+    }
+
+    pub fn update(&mut self, queue: &wgpu::Queue, instances: &[BoltInstance]) {
+        let n = instances
+            .len()
+            .min(MAX_STRIKES * super::bolt::MAX_SEGMENTS_PER_BOLT);
+        self.count = n as u32;
+        if n > 0 {
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances[..n]));
+        }
+    }
+
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..4, 0..self.count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +389,39 @@ mod tests {
     use crate::weather::{WeatherForce, WeatherSettings};
 
     const R: f32 = 250.0;
+
+    #[test]
+    fn bolt_instances_run_from_the_cloud_shell_to_the_ground() {
+        let s = Strike {
+            pos: Vec3::new(0.0, R, 0.0),
+            age: 0.03,
+            intensity: 1.0,
+            seed: 9,
+        };
+        let cloud = R * 1.4;
+        let inst = bolt_instances(&[s], R, cloud, |_| R - 3.0);
+        assert!(
+            !inst.is_empty()
+                && inst.len() <= MAX_STRIKES * crate::weather::bolt::MAX_SEGMENTS_PER_BOLT
+        );
+        // the first segment starts on the cloud shell, the main channel ends on the ground, never below it
+        let top = Vec3::new(inst[0].a[0], inst[0].a[1], inst[0].a[2]);
+        assert!((top.length() - cloud).abs() < 1e-2);
+        let lowest = inst
+            .iter()
+            .map(|i| Vec3::new(i.b[0], i.b[1], i.b[2]).length())
+            .fold(f32::MAX, f32::min);
+        assert!(lowest >= R - 3.0 - 1e-2, "{lowest}");
+        assert!(
+            inst.iter().all(|i| i.b[3] > 0.0),
+            "brightness follows the envelope"
+        );
+    }
+
+    #[test]
+    fn bolt_instances_are_empty_without_strikes() {
+        assert!(bolt_instances(&[], R, R * 1.4, |_| R).is_empty());
+    }
 
     fn kind(t: PlanetType) -> WeatherKind {
         WeatherKind::for_planet(t)
