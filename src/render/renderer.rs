@@ -151,6 +151,18 @@ type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>, Vec<LodMorph>);
 // handover what the ground level always did, and leaves nothing to dither in during a descent
 const ALL_VOXEL_MAX_CHUNKS: u32 = 6 * 16 * 16;
 
+// a chunk mesh's bounding sphere (centre, radius) over its terrain and water vertices (the water
+// surface can lie far above the sea floor, and a chunk can have water without terrain); the origin with
+// radius 0 for a chunk with neither
+fn mesh_bounds(terrain: &[Vertex], water: &[Vertex]) -> (Vec3, f32) {
+    let mut points = terrain.iter().chain(water).map(|v| Vec3::from_array(v.pos));
+    let Some(first) = points.next() else {
+        return (Vec3::ZERO, 0.0);
+    };
+    let (min, max) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+    ((min + max) * 0.5, min.distance(max) * 0.5)
+}
+
 fn all_voxel(resolution: u32) -> bool {
     6 * resolution.div_ceil(CHUNK_SIZE).pow(2) <= ALL_VOXEL_MAX_CHUNKS
 }
@@ -1982,10 +1994,12 @@ impl Renderer {
                 continue;
             } // meshed for a previous planet
             self.pending_chunks.remove(&key);
-            if !v.is_empty() {
-                self.upload_chunk_buffers(key, v, i, wv, wi);
-                upload_budget -= 1;
-            }
+            // stored even when empty (a low-poly chunk one column wide at a face edge whose cells all
+            // belong to the next face's chunks): dropping it left the chunk missing, so it was meshed
+            // again every frame, nearest first, taking the spawn slots — the planet streamed in at a
+            // few chunks a second and view_covered never came
+            self.upload_chunk_buffers(key, v, i, wv, wi);
+            upload_budget -= 1;
             if upload_budget <= 0 {
                 break;
             }
@@ -2057,13 +2071,10 @@ impl Renderer {
         let keys = chunks_to_refresh(id, planet);
         for key in keys {
             if self.chunks.contains_key(&key) {
+                // kept even when empty, like process_load_queue's results (removing it re-requested it)
                 let (v, i) = MeshGen::build_chunk(key, planet);
-                if v.is_empty() {
-                    self.chunks.remove(&key);
-                } else {
-                    let (wv, wi) = MeshGen::build_water(key, planet);
-                    self.upload_chunk_buffers(key, v, i, wv, wi);
-                }
+                let (wv, wi) = MeshGen::build_water(key, planet);
+                self.upload_chunk_buffers(key, v, i, wv, wi);
             }
         }
     }
@@ -2191,7 +2202,8 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&i),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | blas_input,
             });
-        let blas = self.hw_rt.is_some().then(|| {
+        // an empty chunk has nothing to trace (and a BLAS needs triangles)
+        let blas = (self.hw_rt.is_some() && !i.is_empty()).then(|| {
             HwRt::build_blas(
                 &self.device,
                 &self.queue,
@@ -2227,21 +2239,7 @@ impl Renderer {
             label: None,
         });
 
-        let mut min = Vec3::splat(f32::MAX);
-        let mut max = Vec3::splat(f32::MIN);
-        if v.is_empty() {
-            min = Vec3::ZERO;
-            max = Vec3::ZERO;
-        } else {
-            for vert in v.iter().chain(&wv) {
-                // the water surface can lie far above the sea floor
-                let p = Vec3::from_array(vert.pos);
-                min = min.min(p);
-                max = max.max(p);
-            }
-        }
-        let real_center = (min + max) * 0.5;
-        let real_radius = min.distance(max) * 0.5;
+        let (real_center, real_radius) = mesh_bounds(&v, &wv);
         if self.near_ao(real_center, real_radius) {
             self.ao_geometry_epoch += 1;
         }
@@ -2847,6 +2845,9 @@ impl Renderer {
             // targets with vs_lod; fading meshes are dithered (fs_geom discards), so they work in the
             // G-buffer too
             let draw = |pass: &mut wgpu::RenderPass, mesh: &ChunkMesh| {
+                if mesh.num_inds == 0 {
+                    return; // an empty chunk (its water, if any, is drawn in the water pass)
+                }
                 pass.set_bind_group(1, &mesh.bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh.v_buf.slice(..));
                 if let Some(morph) = &mesh.morph {
@@ -4561,6 +4562,23 @@ pub(crate) mod tests {
 
     // every generated planet (radius 40..=250, solar_system.rs) is streamed whole as voxel chunks; the
     // bigger ones /system add makes (up to radius 500) keep the LOD quadtree
+    #[test]
+    fn mesh_bounds_cover_terrain_and_water() {
+        let at = |x: f32, y: f32, z: f32| Vertex {
+            pos: [x, y, z],
+            color: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            water: 0.0,
+            edge: Vertex::NO_EDGE,
+        };
+        assert_eq!(mesh_bounds(&[], &[]), (Vec3::ZERO, 0.0));
+        // water only (an empty chunk's water): the bounds sit on the water, not at the origin
+        let (c, r) = mesh_bounds(&[], &[at(10.0, 0.0, 0.0), at(12.0, 0.0, 0.0)]);
+        assert_eq!((c, r), (Vec3::new(11.0, 0.0, 0.0), 1.0));
+        let (c, r) = mesh_bounds(&[at(0.0, 0.0, 0.0)], &[at(0.0, 4.0, 0.0)]);
+        assert_eq!((c, r), (Vec3::new(0.0, 2.0, 0.0), 2.0));
+    }
+
     #[test]
     fn generated_planets_are_all_voxel() {
         assert!(all_voxel(2 * 250));

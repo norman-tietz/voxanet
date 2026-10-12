@@ -1197,6 +1197,27 @@ mod tests {
         assert_manifold(&planet);
     }
 
+    // the last chunk of a face is one column wide when res = 32·n + 1 (Rilo #7, res 417): its cells all
+    // belong to the next face's chunks, so it meshes empty — the renderer has to store such a chunk as
+    // loaded (Renderer::process_load_queue), or it is requested again forever
+    #[test]
+    fn a_one_column_edge_chunk_can_be_empty() {
+        let planet = PlanetData::new(33);
+        let empty: Vec<ChunkKey> = (0..6u8)
+            .flat_map(|face| {
+                (0..2)
+                    .flat_map(move |u_idx| (0..2).map(move |v_idx| ChunkKey { face, u_idx, v_idx }))
+            })
+            .filter(|&k| build_chunk_lowpoly(k, &planet).0.is_empty())
+            .collect();
+        assert!(!empty.is_empty());
+        // only one-column edge chunks, never a full one
+        assert!(
+            empty.iter().all(|k| k.u_idx == 1 || k.v_idx == 1),
+            "{empty:?}"
+        );
+    }
+
     // how far the drawn surface over a column centre (layer coordinate smooth + 1) lies from the top of
     // its top block (h + 1), in layers, over every column: (max, 99th percentile, mean, share > 1 layer)
     fn smooth_mismatch(planet: &PlanetData) -> (f32, f32, f32, f32) {
