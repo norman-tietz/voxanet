@@ -222,9 +222,53 @@ impl TerrainShape {
         g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + land_offset(self.planet_type)
     }
 
-    // Task 2 replaces this placeholder: lunar highlands, maria and three crater layers
-    fn cratered(&self, _g: &NoiseGenerator, _dir: Vec3) -> f32 {
-        1.0
+    // the three crater layers of Cratered: cell size in world units at sea level, depth of the bowl and
+    // height of the rim as shares of the relief, how sharp the rim is
+    fn layer_params(layer: CraterLayer) -> (f32, f32, f32, f32, Vec3) {
+        match layer {
+            CraterLayer::Large => (150.0, 0.16, 0.025, 0.10, Vec3::new(2.5, -7.1, 4.4)), // old, worn, shallow
+            CraterLayer::Medium => (55.0, 0.12, 0.030, 0.07, Vec3::new(-6.3, 1.9, 8.2)),
+            CraterLayer::Small => (20.0, 0.10, 0.030, 0.05, Vec3::new(9.1, 5.5, -3.7)), // fresh, deep, sharp
+        }
+    }
+
+    // one crater layer's height contribution in layers: a smooth bowl inside the crater, a raised rim at its
+    // edge, nothing between craters; fades to 0 at the cell boundary (no cliffs)
+    pub(crate) fn crater_layer(&self, g: &NoiseGenerator, dir: Vec3, layer: CraterLayer) -> f32 {
+        let (blocks, bowl_depth, rim_height, rim_width, salt) = Self::layer_params(layer);
+        let (f1, f2, h) = self.cells(g, dir, blocks, salt);
+        // half of the cells hold a crater, radius 0.2..0.42 of the cell by the cell's hash
+        if h < 0.45 {
+            return 0.0;
+        }
+        let rc = 0.25 + 0.2 * (h - 0.45) / 0.55;
+        let bowl = smoothstep(rc, rc * 0.4, f1) * bowl_depth;
+        let rim = (-((f1 - rc) / rim_width).powi(2)).exp() * rim_height;
+        (rim - bowl) * self.relief * smoothstep(0.0, EDGE_FADE, f2 - f1)
+    }
+
+    // 1 on the maria (the low part of the continent mask, about 30 % of the surface), 0 on the highlands
+    pub(crate) fn mare_mask(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        1.0 - smoothstep(MARE_LO, MARE_HI, self.continent(g, dir))
+    }
+
+    // lunar highlands with craters at three sizes and a few large smooth maria; heights never below the
+    // fill (liquid-less planets are filled flat up to sea level, so a deeper floor would be a plateau)
+    fn cratered(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
+        let r = self.relief;
+        let mare = self.mare_mask(g, dir);
+        let highland =
+            0.30 * r + g.fbm(dir * self.hill_freq + Vec3::new(1.3, 8.1, -2.2), 4) * 0.10 * r;
+        let large = self.crater_layer(g, dir, CraterLayer::Large);
+        let medium = self.crater_layer(g, dir, CraterLayer::Medium);
+        let small = self.crater_layer(g, dir, CraterLayer::Small);
+        // maria are flooded: only the small fresh craters survive, at a quarter of their strength
+        let craters = (large + medium) * (1.0 - mare) + small * (1.0 - 0.75 * mare);
+        let surface = highland * (1.0 - mare) + craters;
+        // the fill: a smooth floor at MIN_FLOOR (never below), maria sit exactly on it
+        let floor = MIN_FLOOR;
+        let h = floor + softplus_above(surface - floor, 0.5);
+        self.soft_cap(h)
     }
 
     // height above (or below) sea level for a direction on the unit sphere, before lakes are carved
@@ -465,6 +509,25 @@ pub(crate) fn land_offset(t: PlanetType) -> f32 {
 // Volcanic fissures: one noise octave per this many world units
 // per-cell features fade to 0 over this much f2 - f1 (cell units) so they have no cliffs at cell boundaries
 const EDGE_FADE: f32 = 0.1;
+const MARE_LO: f32 = -0.09; // continent-mask values below this are full mare ...
+const MARE_HI: f32 = 0.04; // ... above this, highlands (tune so the mare share is 0.22..0.38)
+const MIN_FLOOR: f32 = 1.0; // layers above sea level: liquid-less planets are filled flat to sea level
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CraterLayer {
+    Large,
+    Medium,
+    Small,
+}
+
+// a smooth max(x, 0): x for x >> 0, 0 for x << 0 (`k` layers of blend), so a floor has no crease
+fn softplus_above(x: f32, k: f32) -> f32 {
+    if x > 8.0 * k {
+        x
+    } else {
+        k * (1.0 + (x / k).exp()).ln()
+    }
+}
 const FISSURE_PERIOD: f32 = 40.0;
 // the band reaches out to this distance from the crossing (half depth at half of it), so >= 2 units wide
 const FISSURE_WIDTH: f32 = 6.0;
@@ -1287,5 +1350,143 @@ mod tests {
             let _ = PlanetTerrain::for_type(500, 3, t, t.def().liquid.is_some());
             println!("{t:?}: {:?}", start.elapsed());
         }
+    }
+
+    #[test]
+    fn cratered_never_dips_below_the_fill() {
+        for (res, seed) in [(64, 3), (80, 5), (256, 11), (500, 19)] {
+            let (s, g) = shape_of(PlanetType::Cratered, res, seed);
+            for d in fib_dirs(20000) {
+                let h = s.natural_height(&g, d);
+                assert!(h.is_finite() && h >= MIN_FLOOR - 1e-4, "res {res}: {h}");
+            }
+        }
+    }
+
+    #[test]
+    fn cratered_has_maria_on_about_a_third_of_the_surface() {
+        let (s, g) = shape_of(PlanetType::Cratered, 256, 11);
+        let dirs = fib_dirs(20000);
+        let mare =
+            dirs.iter().filter(|&&d| s.mare_mask(&g, d) > 0.5).count() as f32 / dirs.len() as f32;
+        println!("mare share {mare}");
+        assert!((0.22..=0.38).contains(&mare), "{mare}");
+    }
+
+    #[test]
+    fn mare_floors_are_flat_and_highlands_are_rough() {
+        let (s, g) = shape_of(PlanetType::Cratered, 256, 11);
+        let r = s.relief;
+        let dirs = fib_dirs(20000);
+        let mare: Vec<f32> = dirs
+            .iter()
+            .filter(|&&d| s.mare_mask(&g, d) > 0.9)
+            .map(|&d| s.natural_height(&g, d))
+            .collect();
+        let high: Vec<f32> = dirs
+            .iter()
+            .filter(|&&d| s.mare_mask(&g, d) < 0.1)
+            .map(|&d| s.natural_height(&g, d))
+            .collect();
+        assert!(mare.len() > 500 && high.len() > 500);
+        let flat = mare.iter().filter(|&&h| h <= MIN_FLOOR + 0.1 * r).count();
+        assert!(
+            flat as f32 >= 0.7 * mare.len() as f32,
+            "{flat} of {}",
+            mare.len()
+        );
+        let sd = |v: &[f32]| {
+            let m = v.iter().sum::<f32>() / v.len() as f32;
+            (v.iter().map(|h| (h - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        assert!(
+            sd(&high) > 2.0 * sd(&mare),
+            "{} vs {}",
+            sd(&high),
+            sd(&mare)
+        );
+    }
+
+    // each layer digs bowls and raises rims, and the crater sizes grow from Small to Large: along a
+    // great circle the sign of the layer changes less often the larger its cells
+    #[test]
+    fn the_three_crater_layers_have_three_sizes() {
+        let (s, g) = shape_of(PlanetType::Cratered, 500, 11);
+        let a = fib_dirs(64)[7];
+        let b = a.cross(Vec3::new(0.3, 0.9, 0.31)).normalize();
+        let changes = |layer: CraterLayer| {
+            let mut prev = 0.0_f32;
+            let (mut n, mut lo, mut hi) = (0, 0.0_f32, 0.0_f32);
+            for i in 0..6000 {
+                let t = std::f32::consts::TAU * i as f32 / 6000.0;
+                let v = s.crater_layer(&g, (a * t.cos() + b * t.sin()).normalize(), layer);
+                lo = lo.min(v);
+                hi = hi.max(v);
+                if v * prev < 0.0 {
+                    n += 1;
+                }
+                if v != 0.0 {
+                    prev = v;
+                }
+            }
+            assert!(lo < 0.0 && hi > 0.0, "{layer:?}: bowls and rims");
+            n
+        };
+        let (large, medium, small) = (
+            changes(CraterLayer::Large),
+            changes(CraterLayer::Medium),
+            changes(CraterLayer::Small),
+        );
+        println!("sign changes large {large} medium {medium} small {small}");
+        assert!(large < medium && medium < small);
+    }
+
+    // no cliffs at cell boundaries: no step between neighbouring columns beyond what Toxic (also cellular
+    // craters) has
+    #[test]
+    fn cratered_has_no_cliffs() {
+        let max_step = |t: PlanetType| {
+            let (s, g) = shape_of(t, 500, 11);
+            let mut worst = 0.0_f32;
+            for k in 0..16 {
+                let pts = circle(k, 500, 1.0, 4000.0);
+                for w in pts.windows(2) {
+                    worst =
+                        worst.max((s.natural_height(&g, w[0]) - s.natural_height(&g, w[1])).abs());
+                }
+            }
+            worst
+        };
+        let (c, t) = (max_step(PlanetType::Cratered), max_step(PlanetType::Toxic));
+        println!("max step cratered {c} toxic {t}");
+        assert!(c <= 1.5 * t.max(1.0), "{c} vs {t}");
+    }
+
+    #[test]
+    fn cratered_is_deterministic_and_seed_dependent() {
+        let (a, ga) = shape_of(PlanetType::Cratered, 128, 1);
+        let (b, gb) = shape_of(PlanetType::Cratered, 128, 1);
+        let (c, gc) = shape_of(PlanetType::Cratered, 128, 2);
+        let d = Vec3::new(0.3, 0.5, 0.8).normalize();
+        assert_eq!(a.natural_height(&ga, d), b.natural_height(&gb, d));
+        let differs = fib_dirs(200)
+            .iter()
+            .any(|&d| a.natural_height(&ga, d) != c.natural_height(&gc, d));
+        assert!(differs);
+    }
+
+    // bake time at res 500 against Toxic's (run on purpose: cargo test --release cratered_bake -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn cratered_bake_time_is_at_most_twice_toxics() {
+        let time = |t: PlanetType| {
+            let start = std::time::Instant::now();
+            let _ =
+                crate::planet::noise::PlanetTerrain::for_type(500, 11, t, t.def().liquid.is_some());
+            start.elapsed().as_secs_f32()
+        };
+        let (c, t) = (time(PlanetType::Cratered), time(PlanetType::Toxic));
+        println!("bake cratered {c:.3}s toxic {t:.3}s");
+        assert!(c <= 2.0 * t, "{c} vs {t}");
     }
 }
