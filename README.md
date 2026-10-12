@@ -52,7 +52,7 @@ The app starts in first-person mode with the mouse cursor locked to the window.
 | `Space` | Jump |
 | `Left Ctrl` (hold) | Sprint (2× speed on foot, faster while flying, boost in space) |
 | `F` | First person only: take off when walking or swimming (an automatic climb to a height that depends on the planet's relief, staying below its highest peaks; `F` again stops it and hovers); land when flying (an automatic descent that eases in near the ground and levels your roll; `F` again cancels it; refused over lava or toxic sludge). During the automatic climb or descent `A` / `D` and `Q` / `E` are ignored |
-| `G` | Open/close the galaxy view: 300 solar systems in a spiral, coloured by star type; drag to rotate, wheel to zoom, click to select (name, star type, distance, planets or "unexplored"), click again or `Enter` to jump there. You arrive at the edge of that system, looking at its star |
+| `G` | Open/close the galaxy view: 300 solar systems in a spiral, coloured by star type; drag to rotate, wheel to zoom, click to select (name, star type, distance, planets or "unexplored"), click again or `Enter` to jump there: you turn toward it, accelerate until the stars stretch into light-speed streaks, and brake into the new system — 3 to 8 seconds depending on the distance — arriving at its edge, looking at its star |
 | `M` | Open/close the solar-system map: the star and all planets with their orbits; drag to rotate, wheel to zoom, click or `1`–`9` to select a planet (info panel), click again or `Enter` to fly there. The flight climbs from the surface into space and travels to the planet's orbit in 6–12 s; a movement key, `Esc` or turning the view takes over |
 | `K` | Toggle first/third person (third person also releases the mouse cursor) |
 | `Escape` | Release/recapture the mouse cursor without leaving first person (mouse look is detached while released); click back into the view to recapture |
@@ -135,7 +135,7 @@ Press the key left of `1` (`` ` `` on US, `^` on German layouts) to open or clos
 | `/perf <seconds> [label]` | Record frame and GPU times for that many seconds and append a summary (median, mean, 95th percentile, maximum per render pass) as one JSON line to `perf.log`; `--bench <seconds>` does the same from a frozen, reproducible start and quits |
 | `/weather [on\|off\|auto\|clear\|rain\|storm\|snow\|particles [on\|off]]` | Show the weather where you stand, force a weather around you for testing (`auto` returns to the natural weather; `snow` falls as ash on volcanic planets), turn the falling rain, snow, ash and dust on or off, or turn weather off |
 | `/galaxy [n]` | Toggle the galaxy view, or open it with system `n` selected |
-| `/jump <n>` | Jump to solar system `n` of the galaxy |
+| `/jump <n>` | Jump to solar system `n` of the galaxy (the light-speed flight, as from the galaxy view) |
 | `/map [n]` | Toggle the solar-system map, or open it with planet `n` selected |
 | `/travel <n>` | Fly to planet `n`'s orbit (as from the map) |
 | `/system home` | Return to the start planet, standing at local noon; from another solar system, jump back to the start system first |

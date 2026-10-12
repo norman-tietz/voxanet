@@ -343,6 +343,9 @@ pub struct SpaceRenderer {
     background_pipeline: wgpu::RenderPipeline,
     ring_pipeline: wgpu::RenderPipeline, // the map's orbit rings and travel line (line list)
     galaxy_star_pipeline: wgpu::RenderPipeline, // the galaxy view's star sprites (instanced)
+    warp_pipeline: wgpu::RenderPipeline, // the jump's light-speed streaks over the frame (space/warp.rs)
+    warp_buf: wgpu::Buffer,
+    warp_bind: wgpu::BindGroup,
     galaxy_star_buf: wgpu::Buffer,
     ring_buf: wgpu::Buffer,
     v_buf: wgpu::Buffer,
@@ -879,6 +882,81 @@ impl SpaceRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // the jump's streak pass: its own shader and uniform; alpha (the scene fade) darkens what's there,
+        // the streaks add on top
+        let warp_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Warp Shader"),
+            source: wgpu::ShaderSource::Wgsl(crate::space::warp::WARP_SHADER.into()),
+        });
+        let warp_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("warp_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let warp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Warp Uniform"),
+            size: std::mem::size_of::<crate::space::warp::WarpUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let warp_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("warp_bind"),
+            layout: &warp_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: warp_buf.as_entire_binding(),
+            }],
+        });
+        let warp_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Warp Pipeline"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("warp_pipeline_layout"),
+                    bind_group_layouts: &[Some(&warp_layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &warp_shader,
+                entry_point: Some("vs_warp"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &warp_shader,
+                entry_point: Some("fs_warp"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let galaxy_star_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Galaxy Stars"),
             size: (MAX_GALAXY_STARS * std::mem::size_of::<GalaxyStarInstance>()) as u64,
@@ -905,6 +983,9 @@ impl SpaceRenderer {
             ring_buf,
             galaxy_star_pipeline,
             galaxy_star_buf,
+            warp_pipeline,
+            warp_buf,
+            warp_bind,
             v_buf,
             i_buf,
             num_indices: indices.len() as u32,
@@ -1313,6 +1394,51 @@ impl SpaceRenderer {
 
     // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
     // belong to the old one
+    // the jump's streaks over the finished frame in `color_view` (space/warp.rs), seen from `camera`
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_warp(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_view: &wgpu::TextureView,
+        camera: &SpaceCamera,
+        screen: (f32, f32),
+        speed: f32,
+        fade: f32,
+        travel_dir: Vec3,
+        time: f32,
+    ) {
+        let u = crate::space::warp::WarpUniform {
+            ray_dirs: Self::ray_dirs(camera.rotation, camera.fov_y, screen.0 / screen.1),
+            vanish: [travel_dir.x, travel_dir.y, travel_dir.z, time],
+            params: [speed, fade, screen.0, screen.1],
+        };
+        queue.write_buffer(&self.warp_buf, 0, bytemuck::cast_slice(&[u]));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Warp Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    depth_slice: None,
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.warp_pipeline);
+            pass.set_bind_group(0, &self.warp_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
     pub fn clear_system_caches(&mut self) {
         self.planet_meshes.clear();
         self.near_impostor = None;

@@ -207,7 +207,8 @@ pub struct Renderer {
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
     perf_message: Option<String>, // its finished summary, for the console
-    pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs)
+    pub travel_hud: Option<String>,
+    pub warp: Option<(f32, f32, Vec3)>, // a jump's streaks: speed, scene fade, travel direction (main.rs Jump) // a running trip's target and countdown, under the compass (main.rs)
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
@@ -1181,6 +1182,7 @@ impl Renderer {
             perf: None,
             perf_message: None,
             travel_hud: None,
+            warp: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -3501,6 +3503,20 @@ impl Renderer {
             &crate::space::render::Layout::Real,
             &[],
         );
+        // a jump's light-speed streaks over the scene, under the HUD (space/warp.rs)
+        if let Some((speed, fade, dir)) = self.warp {
+            self.system.draw_warp(
+                &self.device,
+                &self.queue,
+                &view,
+                camera,
+                screen,
+                speed,
+                fade,
+                dir,
+                (t % 3600.0) as f32,
+            );
+        }
         self.update_fps();
         let heat = crate::space::solar_system::star_heat(
             camera.position.distance(system.star.position()),

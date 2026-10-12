@@ -304,34 +304,40 @@ struct Game {
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
 }
 
-// a jump to another solar system (spec docs/superpowers/specs/2026-10-12-galaxy-design.md §2): the frame
-// fades to black, the systems switch, it fades back in (sub-project 3 replaces the fade with the flight)
-const JUMP_FADE_SECS: f32 = 0.4;
+// a jump to another solar system as a light-speed flight (spec docs/superpowers/specs/2026-10-12-warp-jump-design.md,
+// timeline in space/warp.rs): from the surface the travel climb first, then in space: align toward the
+// target, accelerate into streaks, switch unseen at light speed, brake into the new system. /system home
+// from another system ends with the start planet installed under a short black fade.
+const HOME_FADE_SECS: f32 = 0.4;
+
+enum JumpStage {
+    Climb, // planet mode: climbing to the liftoff handover; in space: about to start the flight
+    Fly {
+        started: Instant,
+        duration: f32,
+        prev_frac: f32,
+        initial_fwd: glam::Vec3, // where the view looked when the flight started (the align turn)
+    },
+    HomeFadeIn(Instant), // /system home: the start planet installed, fading in from black
+}
 
 struct Jump {
     target: usize,
-    started: Instant,
+    then_home: bool, // /system home from another system: home runs at the end of the flight
+    dir: glam::Vec3, // galaxy direction from the old system to the target (galaxy axes = system axes)
     switched: bool,
-    then_home: bool, // /system home from another system: home runs right after the switch
+    stage: JumpStage,
 }
 
 impl Jump {
-    fn new(target: usize, then_home: bool) -> Self {
+    fn new(target: usize, then_home: bool, dir: glam::Vec3) -> Self {
         Self {
             target,
-            started: Instant::now(),
-            switched: false,
             then_home,
+            dir,
+            switched: false,
+            stage: JumpStage::Climb,
         }
-    }
-
-    // the fade back in starts now, from black: after the switch's work (and a synchronous home bake),
-    // which can outlast the fade out and would otherwise skip the fade in
-    fn begin_fade_in(&mut self) {
-        let fade_out = std::time::Duration::from_secs_f32(JUMP_FADE_SECS);
-        self.started = Instant::now()
-            .checked_sub(fade_out)
-            .unwrap_or_else(Instant::now);
     }
 
     // `/system home` from another system while this jump runs: one still on its way to the start system
@@ -344,14 +350,27 @@ impl Jump {
         goes_home
     }
 
-    // the black fade's opacity `elapsed` seconds in: rising before the switch, falling after it
-    fn fade(elapsed: f32) -> f32 {
-        if elapsed < JUMP_FADE_SECS {
-            elapsed / JUMP_FADE_SECS
-        } else {
-            (1.0 - (elapsed - JUMP_FADE_SECS) / JUMP_FADE_SECS).clamp(0.0, 1.0)
-        }
+    // the climb or the flight: the jump owns space flight and blocks the player's input
+    fn flies(&self) -> bool {
+        !matches!(self.stage, JumpStage::HomeFadeIn(_))
     }
+}
+
+// the galaxy direction from the current system to `target` (the jump's travel direction)
+fn jump_direction(universe: &crate::space::universe::Universe, target: usize) -> glam::Vec3 {
+    let from = universe.galaxy.systems[universe.current].position;
+    let to = universe.galaxy.systems[target].position;
+    (to - from).normalize_or(glam::DVec3::NEG_Z).as_vec3()
+}
+
+// the black fade after /system home's bake at the end of a jump, `elapsed` seconds in
+fn home_fade(elapsed: f32) -> f32 {
+    (1.0 - elapsed / HOME_FADE_SECS).clamp(0.0, 1.0)
+}
+
+// the jump owns the controls (no movement, Esc, M, G) while it climbs or flies
+fn jump_blocks_input(jump: &Option<Jump>) -> bool {
+    jump.as_ref().is_some_and(|j| j.flies())
 }
 
 // an automatic flight to a planet's orbit (space/travel.rs): climbing from the surface (planet mode), or
@@ -695,7 +714,14 @@ impl Game {
         // physics & player Update (once per tick: movement and turning speeds are per second)
         match mode {
             GameMode::Planet => {
-                let climbing = matches!(travel, Some(Travel::Climb { .. }));
+                let climbing = matches!(travel, Some(Travel::Climb { .. }))
+                    || matches!(
+                        jump,
+                        Some(Jump {
+                            stage: JumpStage::Climb,
+                            ..
+                        })
+                    );
                 if climbing {
                     // the climb moves the player itself: update_player mustn't integrate it again
                     player.velocity = glam::Vec3::ZERO;
@@ -725,6 +751,65 @@ impl Game {
                 let radius = system.planets[*loaded_world].radius;
                 if crate::player::landing::should_lift_off(player.position.length() / radius) {
                     lift_off_from = Some(*loaded_world);
+                }
+            }
+            GameMode::Space if jump_blocks_input(jump) => {
+                // a jump's flight (space/warp.rs): no manual flight, no capture or heat push; the view turns
+                // toward the target, the streaks speed up and down, the switch comes at light speed
+                controller.mouse_delta = (0.0, 0.0);
+                let j = jump.as_mut().expect("a jump flies");
+                if let JumpStage::Climb = j.stage {
+                    // the first space frame: fly from here, in space axes (the galaxy direction holds there)
+                    let t = clock.now();
+                    if let FlightFrame::Captured(_) = *flight_frame {
+                        space_flight.change_frame(*flight_frame, FlightFrame::Free, system, t);
+                        *flight_frame = FlightFrame::Free;
+                    }
+                    space_flight.velocity = glam::DVec3::ZERO;
+                    space_flight.roll_rate = 0.0;
+                    space_flight.turn_rate = 0.0;
+                    let ly = universe.galaxy.distance_ly(universe.current, j.target);
+                    let duration = crate::space::warp::jump_duration(ly);
+                    println!(
+                        "Jumping to {} ({ly:.1} ly, {duration:.1} s)",
+                        universe.galaxy.systems[j.target].name
+                    );
+                    j.stage = JumpStage::Fly {
+                        started: now,
+                        duration,
+                        prev_frac: 0.0,
+                        initial_fwd: space_flight.rotation * glam::Vec3::NEG_Z,
+                    };
+                }
+                if let JumpStage::Fly {
+                    started,
+                    duration,
+                    prev_frac,
+                    initial_fwd,
+                } = &mut j.stage
+                {
+                    use crate::space::warp;
+                    let frac = started.elapsed().as_secs_f32() / *duration;
+                    // the align turn: from where the view looked to the travel direction over the align
+                    // phase, incremental so the roll stays
+                    let k = {
+                        let x = (frac / warp::ALIGN).clamp(0.0, 1.0);
+                        x * x * (3.0 - 2.0 * x)
+                    };
+                    let desired = glam::Quat::IDENTITY
+                        .slerp(glam::Quat::from_rotation_arc(*initial_fwd, j.dir), k)
+                        * *initial_fwd;
+                    let cur = space_flight.rotation * glam::Vec3::NEG_Z;
+                    space_flight.rotation = (glam::Quat::from_rotation_arc(cur, desired)
+                        * space_flight.rotation)
+                        .normalize();
+                    if warp::crosses_switch(*prev_frac, frac) {
+                        j.switched = true; // the switch block below parks and takes the systems
+                    }
+                    *prev_frac = frac;
+                    renderer.warp = Some((warp::speed(frac), warp::scene_fade(frac), j.dir));
+                    let name = &universe.galaxy.systems[j.target].name;
+                    renderer.travel_hud = Some(format!("Jumping to {name}..."));
                 }
             }
             GameMode::Space if space_arm(travel) == SpaceArm::Autopilot => {
@@ -1050,20 +1135,31 @@ impl Game {
             } else {
                 close_map(map, controller);
                 close_map(galaxy_view, controller);
-                *jump = Some(Jump::new(n, false));
+                *travel = None;
+                renderer.travel_hud = None;
+                if *mode == GameMode::Planet {
+                    controller.fly_mode = true;
+                    player.landing = false;
+                    player.taking_off = None;
+                }
+                let dir = jump_direction(universe, n);
+                *jump = Some(Jump::new(n, false, dir));
             }
         }
-        if let Some(j) = jump {
-            let elapsed = j.started.elapsed().as_secs_f32();
-            if !j.switched && elapsed >= JUMP_FADE_SECS {
-                j.switched = true;
+        // the switch, decided by the flight in the space-mode arm (JumpStage::Fly): park the current system,
+        // take the target (generated on its first visit), arrive at its edge; the voxel world stays installed
+        // with its edits until a planet here is baked. Unseen: at light speed, the scene faded out.
+        if let Some(target) = jump
+            .as_ref()
+            .filter(|j| j.switched && j.flies())
+            .map(|j| j.target)
+        {
+            if universe.current != target {
                 let from = universe.galaxy.systems[universe.current].position;
-                let to = universe.galaxy.systems[j.target].position;
-                // park the current system, take the target (generated on its first visit); the voxel
-                // world stays installed with its edits until a planet here is baked
+                let to = universe.galaxy.systems[target].position;
                 let placeholder = crate::space::solar_system::SolarSystem::generate(0);
                 let old = std::mem::replace(system, placeholder);
-                *system = match universe.switch(j.target, old) {
+                *system = match universe.switch(target, old) {
                     Ok(next) => next,
                     Err((back, _)) => back,
                 };
@@ -1074,22 +1170,15 @@ impl Game {
                 }
                 *bake_rx = None;
                 *baking = None;
-                *travel = None;
-                renderer.travel_hud = None;
-                let (pos, rot) = crate::space::universe::Universe::arrival_pose(
+                // the arrival point; the view keeps its aligned rotation (already looking along the
+                // travel direction, at the new star), so the streaks don't turn at the switch
+                let (pos, _) = crate::space::universe::Universe::arrival_pose(
                     system,
                     (from - to).normalize_or(glam::DVec3::Z),
                 );
-                *space_flight = crate::space::solar_system::SpaceFlight::new(pos);
-                space_flight.rotation = rot;
+                space_flight.position = pos;
+                space_flight.velocity = glam::DVec3::ZERO;
                 *flight_frame = FlightFrame::Free;
-                *mode = GameMode::Space;
-                controller.fly_mode = false;
-                // arrival: "mode Space, map closed" — whatever was opened during the fade out (or
-                // before /system home) closes, restoring the mouse, before the controls are set
-                close_map(map, controller);
-                close_map(galaxy_view, controller);
-                enter_space_controls(controller, map);
                 let entry = &universe.galaxy.systems[universe.current];
                 console.log(
                     &format!(
@@ -1099,16 +1188,40 @@ impl Game {
                     ),
                     [1.0, 1.0, 1.0],
                 );
-                if j.then_home {
-                    console.system_request = Some(crate::app::cmd::SystemRequest::Home);
-                }
-                j.begin_fade_in();
             }
-            let elapsed = j.started.elapsed().as_secs_f32();
-            renderer.set_fade(Jump::fade(elapsed));
-            if elapsed >= 2.0 * JUMP_FADE_SECS {
-                *jump = None;
-                renderer.set_fade(0.0);
+        }
+        // the end of a flight: the controls back, /system home's step, or done
+        if let Some(j) = jump.as_mut() {
+            match &mut j.stage {
+                JumpStage::Fly {
+                    started, duration, ..
+                } if crate::space::warp::phase(started.elapsed().as_secs_f32() / *duration)
+                    == crate::space::warp::Phase::Done =>
+                {
+                    renderer.warp = None;
+                    renderer.travel_hud = None;
+                    controller.fly_mode = false;
+                    // "mode Space, map closed" (overlays were blocked during the flight anyway)
+                    close_map(map, controller);
+                    close_map(galaxy_view, controller);
+                    enter_space_controls(controller, map);
+                    if j.then_home {
+                        renderer.set_fade(1.0);
+                        console.system_request = Some(crate::app::cmd::SystemRequest::Home);
+                        j.stage = JumpStage::HomeFadeIn(Instant::now());
+                    } else {
+                        *jump = None;
+                    }
+                }
+                JumpStage::HomeFadeIn(start) => {
+                    let e = start.elapsed().as_secs_f32();
+                    renderer.set_fade(home_fade(e));
+                    if e >= HOME_FADE_SECS {
+                        renderer.set_fade(0.0);
+                        *jump = None;
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(request) = console.system_request.take() {
@@ -1126,7 +1239,19 @@ impl Game {
                                 renderer.show_status("Jump in progress.");
                             }
                         }
-                        None => *jump = Some(Jump::new(0, true)),
+                        None => {
+                            let dir = jump_direction(universe, 0);
+                            close_map(map, controller);
+                            close_map(galaxy_view, controller);
+                            *travel = None;
+                            renderer.travel_hud = None;
+                            if *mode == GameMode::Planet {
+                                controller.fly_mode = true;
+                                player.landing = false;
+                                player.taking_off = None;
+                            }
+                            *jump = Some(Jump::new(0, true, dir));
+                        }
                     }
                 }
                 SystemRequest::Home => {
@@ -1152,9 +1277,13 @@ impl Game {
                         *impostor_generation = generation;
                         *loaded_world = i;
                         *loaded_system = 0;
-                        // the bake ran under the black frame of the jump home: fade in from black now
-                        if let Some(j) = jump.as_mut().filter(|j| j.switched && j.then_home) {
-                            j.begin_fade_in();
+                        // the bake ran under the black frame at the end of the jump home: fade in from now
+                        if let Some(Jump {
+                            stage: JumpStage::HomeFadeIn(start),
+                            ..
+                        }) = jump.as_mut()
+                        {
+                            *start = Instant::now();
                             renderer.set_fade(1.0);
                         }
                     }
@@ -1320,6 +1449,8 @@ impl Game {
                     ),
                     [1.0, 0.5, 0.0],
                 );
+            } else if jump.is_some() {
+                renderer.show_status("Jump in progress.");
             } else if *mode == GameMode::Planet && *loaded_world == n {
                 renderer.show_status("You are here.");
             } else {
@@ -1453,7 +1584,9 @@ impl Game {
                         return;
                     }
                     PhysicalKey::Code(KeyCode::Escape) => {
-                        if self.map.is_some() {
+                        if jump_blocks_input(&self.jump) {
+                            renderer.show_status("Jump in progress.");
+                        } else if self.map.is_some() {
                             close_map(&mut self.map, controller);
                         } else if self.galaxy_view.is_some() {
                             close_map(&mut self.galaxy_view, controller);
@@ -1516,6 +1649,16 @@ impl Game {
                     return;
                 }
             }
+        }
+
+        // a jump owns the controls while it climbs or flies (not cancellable, overlays blocked)
+        if jump_blocks_input(&self.jump)
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. }
+            )
+        {
+            return;
         }
 
         // the open map or galaxy view takes the keyboard and mouse (space/map.rs MapView)
@@ -2042,38 +2185,57 @@ mod tests {
     }
 
     #[test]
-    fn the_fade_in_restarts_from_black_after_the_switch() {
-        let mut j = Jump::new(1, true);
-        j.started = Instant::now() - std::time::Duration::from_secs(5); // a slow switch / home bake
-        assert_eq!(Jump::fade(j.started.elapsed().as_secs_f32()), 0.0);
-        j.begin_fade_in();
-        let f = Jump::fade(j.started.elapsed().as_secs_f32());
-        assert!(f > 0.9, "fade {f}");
+    fn the_jump_owns_the_controls_until_it_has_flown() {
+        let d = glam::Vec3::X;
+        assert!(!jump_blocks_input(&None));
+        let mut j = Jump::new(3, false, d);
+        assert!(j.flies(), "climbing");
+        assert!(jump_blocks_input(&Some(Jump::new(3, false, d))));
+        j.stage = JumpStage::Fly {
+            started: Instant::now(),
+            duration: 4.0,
+            prev_frac: 0.0,
+            initial_fwd: d,
+        };
+        assert!(j.flies(), "flying");
+        j.stage = JumpStage::HomeFadeIn(Instant::now());
+        assert!(!j.flies(), "home's fade-in gives the controls back");
     }
 
     #[test]
     fn home_during_a_jump_waits_for_it() {
+        let d = glam::Vec3::X;
         // on its way to the start system: home on arrival
-        let mut j = Jump::new(0, false);
+        let mut j = Jump::new(0, false, d);
         assert!(j.queue_home());
         assert!(j.then_home);
         // anywhere else, or already switched: left alone
-        let mut j = Jump::new(4, false);
+        let mut j = Jump::new(4, false, d);
         assert!(!j.queue_home());
         assert!(!j.then_home);
-        let mut j = Jump::new(0, false);
+        let mut j = Jump::new(0, false, d);
         j.switched = true;
         assert!(!j.queue_home());
         assert!(!j.then_home);
     }
 
     #[test]
-    fn the_jump_fades_out_then_in() {
-        assert_eq!(Jump::fade(0.0), 0.0);
-        assert!((Jump::fade(JUMP_FADE_SECS * 0.5) - 0.5).abs() < 1e-6);
-        assert!((Jump::fade(JUMP_FADE_SECS) - 1.0).abs() < 1e-6);
-        assert!((Jump::fade(JUMP_FADE_SECS * 1.5) - 0.5).abs() < 1e-6);
-        assert_eq!(Jump::fade(JUMP_FADE_SECS * 3.0), 0.0);
+    fn home_fades_in_from_black() {
+        assert_eq!(home_fade(0.0), 1.0);
+        assert!((home_fade(HOME_FADE_SECS * 0.5) - 0.5).abs() < 1e-6);
+        assert_eq!(home_fade(HOME_FADE_SECS * 2.0), 0.0);
+    }
+
+    // the warp's streaks are drawn over the space scene, under the HUD
+    #[test]
+    fn the_warp_is_drawn_after_the_space_scene() {
+        let r = include_str!("render/renderer.rs");
+        let f = &r[r.find("pub fn render_space(").unwrap()..];
+        let f = &f[..f.find("\n    pub fn ").unwrap_or(f.len())];
+        let scene = f.find("self.system.render(").unwrap();
+        let warp = f.find("self.system.draw_warp(").unwrap();
+        let hud = f.find("self.render_space_overlay(").unwrap();
+        assert!(scene < warp && warp < hud);
     }
 
     // Review Focus 2: edits are kept per (system, planet): A#3's edits come back for A#3, never for B#3

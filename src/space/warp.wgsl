@@ -46,24 +46,27 @@ fn fs_warp(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let phi = atan2(dot(dir, b), dot(dir, a)); // angle around it
     let sector = floor((phi + PI) / (2.0 * PI) * SECTORS);
     let sector_frac = fract((phi + PI) / (2.0 * PI) * SECTORS);
+    // each sector streams at its own pace and phase, so the stars don't line up in rings
+    let lane = warp_hash(vec2<f32>(sector, 17.0));
     // radial coordinate: log of the angle, streaming outward with time × speed
-    let lt = log(max(theta, 0.002));
-    let flow = warp.vanish.w * (0.4 + 2.6 * speed);
+    let lt = log(max(theta, 0.002)) + lane.x * RINGS * 7.0;
+    let flow = warp.vanish.w * (0.4 + 2.6 * speed) * (0.7 + 0.6 * lane.y);
     let len = 0.05 + speed * 1.1 * (0.6 + theta); // streak length in log-angle units
+    // the streak's half-width as an angle on screen, the same everywhere (a sector widens with theta)
+    let across = abs(sector_frac - 0.5) * (2.0 * PI / SECTORS) * max(sin(theta), 0.02);
+    let width = 1.0 - smoothstep(0.0006, 0.0022, across);
     var light = vec3<f32>(0.0);
     let cell0 = floor((lt - flow) / RINGS);
     for (var k = 0; k < MAX_CELLS; k++) {
         let cell = cell0 - f32(k);
         let h = warp_hash(vec2<f32>(sector, cell));
-        if (h.x > 0.35) { continue; } // most cells empty
+        if (h.x > 0.14) { continue; } // most cells empty
         // the star's head and the streak trailing behind it (toward the vanishing point)
         let head = (cell + h.y) * RINGS + flow;
         let along = (head - lt) / len; // 0 at the head, 1 at the tail
         if (along < 0.0 || along > 1.0) { continue; }
-        let across = abs(sector_frac - 0.5) * 2.0; // 0 on the streak's axis
-        let width = 1.0 - smoothstep(0.15, 0.6, across);
-        let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.85, 0.7), h.x / 0.35);
-        light += tint * width * (1.0 - along) * (1.0 - along) * 1.6;
+        let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.85, 0.7), h.x / 0.14);
+        light += tint * width * (1.0 - along) * (1.0 - along) * 1.8;
     }
     // a faint blue glow around the vanishing point at speed, red-shifted toward the edges
     let glow = exp(-theta * 6.0) * 0.25 * speed * speed;
