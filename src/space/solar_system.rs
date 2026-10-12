@@ -153,7 +153,7 @@ pub struct SolarSystem {
     pub seed: u64, // generation seed: planets added later (/system add) are seeded from it too
 }
 
-const PLANET_COUNT: usize = 7;
+const PLANET_COUNT: usize = 8;
 const INNER_ORBIT_RADIUS: f64 = 8_000.0;
 const ORBIT_RADIUS_GROWTH: f64 = 1.5; // each planet this many times farther out than the last
 const INNER_ORBIT_PERIOD_SECS: f64 = 180.0; // at INNER_ORBIT_RADIUS; Kepler beyond (orbit_speed_for)
@@ -698,6 +698,35 @@ mod tests {
     use super::*;
     use crate::player::controller::FlightKeys;
 
+    #[test]
+    fn the_start_system_has_eight_planets_with_cratered_last() {
+        let s = SolarSystem::generate(1);
+        assert_eq!(s.planets.len(), 8);
+        for (i, p) in s.planets.iter().enumerate() {
+            assert_eq!(p.planet_type, PlanetType::ALL[i]);
+        }
+        assert_eq!(s.planets[7].planet_type, PlanetType::Cratered);
+    }
+
+    // the new outermost planet leaves #1-#7 as they were: all of a planet's data comes from (seed, index)
+    #[test]
+    fn the_first_seven_planets_are_unchanged() {
+        let s = SolarSystem::generate(1);
+        for i in 0..7 {
+            let (r, phase, tilt, node) = orbit_for(1, i);
+            let p = &s.planets[i];
+            assert_eq!(p.orbit_radius, r);
+            assert_eq!(p.orbit_phase, phase);
+            assert_eq!(p.orbit_tilt, tilt);
+            assert_eq!(p.orbit_node, node);
+            assert_eq!(p.radius, planet_radius_for(1, i));
+            assert_eq!(p.noise_seed, noise_seed_for(1, i));
+        }
+        // the outermost keeps the neighbour gap and the system stays inside the planet cap
+        assert!(s.planets[7].orbit_radius >= s.planets[6].orbit_radius * 1.29);
+        assert!(s.planets.len() <= MAX_PLANETS);
+    }
+
     // a bake with stored edits contains them; one without doesn't
     #[test]
     fn bake_with_edits_restores_them() {
@@ -738,9 +767,9 @@ mod tests {
     fn added_planet_continues_the_orbit_progression_and_is_deterministic() {
         let mut a = SolarSystem::generate(1);
         let i = a.add_planet(PlanetType::Ice, 120.0).unwrap();
-        assert_eq!(i, 7);
-        let p = a.planets[7];
-        let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(7);
+        assert_eq!(i, PLANET_COUNT);
+        let p = a.planets[PLANET_COUNT];
+        let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(PLANET_COUNT as i32);
         assert!(p.orbit_radius >= 0.9 * base && p.orbit_radius <= 1.15 * base);
         assert!(
             p.orbit_radius > a.planets[6].orbit_radius * 1.25,
@@ -748,10 +777,10 @@ mod tests {
         );
         assert_eq!(p.planet_type, PlanetType::Ice);
         assert_eq!(p.radius, 120.0);
-        assert_eq!(p.noise_seed, noise_seed_for(1, 7));
+        assert_eq!(p.noise_seed, noise_seed_for(1, PLANET_COUNT));
         let mut b = SolarSystem::generate(1);
         b.add_planet(PlanetType::Ice, 120.0).unwrap();
-        assert_eq!(a.planets[7], b.planets[7]);
+        assert_eq!(a.planets[PLANET_COUNT], b.planets[PLANET_COUNT]);
     }
 
     #[test]
@@ -1243,9 +1272,9 @@ mod tests {
     }
 
     #[test]
-    fn generate_produces_seven_planets() {
+    fn generate_produces_eight_planets() {
         let g = SolarSystem::generate(1);
-        assert_eq!(g.planets.len(), 7);
+        assert_eq!(g.planets.len(), 8);
     }
 
     #[test]
