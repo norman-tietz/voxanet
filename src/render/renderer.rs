@@ -2585,6 +2585,10 @@ impl Renderer {
             timer.poll(&self.device);
         }
         self.perf_tick("planet");
+        // the installed planet's storminess shifts the storm thresholds; a change outdates the maps
+        if self.weather.set_storminess(planet.traits.storminess) {
+            self.weather_changed();
+        }
         // before the backdrop, which draws clouds too
         self.update_sky_maps(time);
 

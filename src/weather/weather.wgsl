@@ -11,6 +11,7 @@ const WEATHER_EVOLVE_CYCLES: f32 = 3.0;      // laps of the shape-changing offse
 const WEATHER_EVOLVE_RADIUS: f32 = 0.6;      // that offset's circle radius in noise space
 const STORM_LO: f32 = 0.46;                   // noise -> storm smoothstep (tuned: ~30 % with storm > 0.5)
 const STORM_HI: f32 = 0.62;
+const STORM_SHIFT: f32 = 0.12;               // threshold shift per unit of storminess below 1 (PlanetTraits)
 const RAIN_LO: f32 = 0.3;                    // storm -> precipitation smoothstep
 const RAIN_HI: f32 = 0.8;
 const SNOW_LAT_LO: f32 = 0.6;                // |dir.y| band where precipitation turns to snow (Rain kind)
@@ -25,6 +26,7 @@ const STORM_COVER: f32 = 0.35;               // added to the raw cloud noise at 
 struct WeatherForce {
     dir_value: vec4<f32>, // xyz: the forced region's centre direction, w: forced storm value
     timing: vec4<f32>,
+    shape: vec4<f32>,     // x: storm threshold shift, STORM_SHIFT * (1 - storminess)
 }
 
 fn weather_rotate(v: vec3<f32>, k: vec3<f32>, a: f32) -> vec3<f32> {
@@ -56,7 +58,7 @@ fn weather_force_weight(dir: vec3<f32>, t: f32, f: WeatherForce) -> f32 {
 
 fn weather_storm(dir: vec3<f32>, t: f32, f: WeatherForce) -> f32 {
     if (f.timing.w < 0.5) { return 0.0; }
-    let s = smoothstep(STORM_LO, STORM_HI, weather_noise(dir, t));
+    let s = smoothstep(STORM_LO + f.shape.x, STORM_HI + f.shape.x, weather_noise(dir, t));
     return mix(s, f.dir_value.w, weather_force_weight(dir, t, f));
 }
 

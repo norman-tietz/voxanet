@@ -82,7 +82,7 @@ const FORCE_EDGE_HI: f32 = 0.65;
 pub const STORM_COVER: f32 = 0.35;
 
 #[cfg(test)]
-const CONSTANTS: [(&str, f32); 17] = [
+const CONSTANTS: [(&str, f32); 18] = [
     ("WEATHER_PERIOD", WEATHER_PERIOD),
     ("WEATHER_SCALE", WEATHER_SCALE),
     ("WEATHER_SPIN_CYCLES", WEATHER_SPIN_CYCLES),
@@ -99,8 +99,16 @@ const CONSTANTS: [(&str, f32); 17] = [
     ("FORCE_EDGE_LO", FORCE_EDGE_LO),
     ("FORCE_EDGE_HI", FORCE_EDGE_HI),
     ("STORM_COVER", STORM_COVER),
+    ("STORM_SHIFT", STORM_SHIFT),
     ("WEATHER_AGE_LOOKBACK", WEATHER_AGE_LOOKBACK),
 ];
+
+pub const STORM_SHIFT: f32 = 0.12; // threshold shift per unit of storminess below 1 (PlanetTraits)
+
+// the storm threshold shift of a planet's storminess; exactly 0 at 1.0
+pub fn storm_shift(storminess: f32) -> f32 {
+    STORM_SHIFT * (1.0 - storminess)
+}
 
 const ACTIVE_END: f32 = 1e9; // WeatherForce.timing.y while a force is active
 
@@ -110,6 +118,7 @@ const ACTIVE_END: f32 = 1e9; // WeatherForce.timing.y while a force is active
 pub struct WeatherForce {
     pub dir_value: [f32; 4], // xyz: forced region centre, w: forced storm value
     pub timing: [f32; 4], // x: start, y: end (ACTIVE_END while active), z: snow share (< 0: none), w: on
+    pub shape: [f32; 4],  // x: storm threshold shift (storm_shift)
 }
 
 fn fract(x: f32) -> f32 {
@@ -191,7 +200,7 @@ pub fn storm(dir: Vec3, t: f32, f: &WeatherForce) -> f32 {
     if f.timing[3] < 0.5 {
         return 0.0;
     }
-    let s = smoothstep(STORM_LO, STORM_HI, noise(dir, t));
+    let s = smoothstep(STORM_LO + f.shape[0], STORM_HI + f.shape[0], noise(dir, t));
     let w = weather_force_weight(dir, t, f);
     s + (f.dir_value[3] - s) * w
 }
@@ -334,6 +343,7 @@ pub struct WeatherSettings {
     pub particles: bool,
     pub fog: fog::FogSettings,
     pub lightning: lightning::LightningSettings,
+    storminess: f32, // the installed planet's (PlanetTraits)
     force: Option<ForceState>,
 }
 
@@ -344,6 +354,7 @@ impl Default for WeatherSettings {
             particles: true,
             fog: fog::FogSettings::default(),
             lightning: lightning::LightningSettings::default(),
+            storminess: 1.0,
             force: None,
         }
     }
@@ -405,6 +416,13 @@ impl WeatherCommand {
 }
 
 impl WeatherSettings {
+    // the installed planet's storminess; true when it changed, so the maps rebake
+    pub fn set_storminess(&mut self, s: f32) -> bool {
+        let changed = s != self.storminess;
+        self.storminess = s;
+        changed
+    }
+
     // the bake's WeatherForce (weather.wgsl)
     pub fn force_uniform(&self) -> WeatherForce {
         let on = if self.on { 1.0 } else { 0.0 };
@@ -412,12 +430,14 @@ impl WeatherSettings {
             Some(f) => WeatherForce {
                 dir_value: [f.dir.x, f.dir.y, f.dir.z, f.force.storm()],
                 timing: [f.start, f.end, f.force.snow_share(), on],
+                shape: [storm_shift(self.storminess), 0.0, 0.0, 0.0],
             },
             // no force: a region that never weighs in (start in the far future is unsafe across the
             // wrap, so the weight is cut by an empty region instead)
             None => WeatherForce {
                 dir_value: [0.0, 0.0, 0.0, 0.0],
                 timing: [0.0, ACTIVE_END, -1.0, on],
+                shape: [storm_shift(self.storminess), 0.0, 0.0, 0.0],
             },
         }
     }
@@ -821,6 +841,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_storminess_reports_a_change() {
+        let mut w = WeatherSettings::default();
+        assert!(!w.set_storminess(1.0));
+        assert!(w.set_storminess(1.4));
+        assert!(!w.set_storminess(1.4));
+        assert_eq!(w.force_uniform().shape[0], storm_shift(1.4));
+    }
+
+    #[test]
+    fn stormier_planets_have_more_storm() {
+        let share = |s: f32| {
+            let mut w = WeatherSettings::default();
+            w.set_storminess(s);
+            let f = w.force_uniform();
+            let mut n = 0;
+            for i in 0..4000 {
+                let k = i as f32;
+                let dir =
+                    Vec3::new((k * 0.37).sin(), (k * 0.11).cos(), (k * 0.73).sin()).normalize();
+                if storm(dir, 100.0, &f) > 0.5 {
+                    n += 1;
+                }
+            }
+            n
+        };
+        assert!(share(1.5) > share(1.0) && share(1.0) > share(0.5));
+        assert_eq!(storm_shift(1.0), 0.0);
+    }
+
     fn auto() -> WeatherForce {
         WeatherSettings::default().force_uniform()
     }
@@ -906,6 +956,7 @@ mod tests {
         let f = WeatherForce {
             dir_value: [calm.x, calm.y, calm.z, 1.0],
             timing: [0.0, 300.0, -1.0, 1.0],
+            shape: [0.0; 4],
         };
         let after = sample(calm, 320.0, &f);
         assert!(after[1] > 0.3, "still wet 20 s after: {after:?}");
