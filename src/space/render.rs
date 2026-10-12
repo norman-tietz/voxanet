@@ -6,6 +6,7 @@
 
 use crate::render::deferred::DEPTH_FORMAT;
 use crate::space::solar_system::{Planet, SolarSystem, SpaceFlight};
+use crate::weather::lightning::LightningSettings;
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
@@ -345,6 +346,8 @@ pub fn project(camera: &SpaceCamera, offset: Vec3, screen: (f32, f32)) -> Option
 pub struct SpaceRenderer {
     pub fog_scale: f32, // the storm fog setting (0 = off), Renderer sets it every frame
     pub fog_wind: Vec3, // the storm fog's scrolled offset
+    pub weather_force: crate::weather::WeatherForce, // the forced weather, for the lightning schedule
+    pub lightning: LightningSettings, // lightning on/rate (off with the weather), Renderer sets it every frame
     pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
     pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
     camera_buf: wgpu::Buffer,
@@ -986,6 +989,8 @@ impl SpaceRenderer {
             plastic: crate::render::plastic::PlasticSettings::default().impostor_uniform(),
             fog_scale: 1.0,
             fog_wind: Vec3::ZERO,
+            weather_force: crate::weather::WeatherSettings::default().force_uniform(),
+            lightning: LightningSettings::default(),
             light: crate::render::light::LightSettings::default().uniform(),
             camera_buf,
             camera_bind,
@@ -1083,6 +1088,8 @@ impl SpaceRenderer {
                 self.plastic,
                 self.light,
                 self.fog_scale,
+                &self.weather_force,
+                &self.lightning,
             ));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
@@ -1232,6 +1239,8 @@ impl SpaceRenderer {
         plastic: [f32; 4],
         light: [f32; 4],
         fog_scale: f32,
+        force: &crate::weather::WeatherForce,
+        lightning: &LightningSettings,
     ) -> PlanetUniform {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
@@ -1239,6 +1248,23 @@ impl SpaceRenderer {
         let atmosphere = p.planet_type.def().atmosphere;
         let model = glam::Mat3::from_quat(p.orientation(t));
         let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
+        // lightning on this planet (weather/lightning.rs): the whole planet's cells, from the camera's
+        // place in the planet's frame; the same schedule as the voxel frame, so the handover matches
+        let cam_in_planet = model.transpose() * -camera_relative;
+        let strikes = if lightning.on {
+            crate::weather::lightning::active_strikes(
+                crate::weather::WeatherKind::for_planet(p.planet_type),
+                lightning.rate,
+                p.voxel_resolution() as f32 / 2.0,
+                cam_in_planet,
+                f32::MAX,
+                (t % 3600.0) as f32,
+                force,
+            )
+        } else {
+            vec![]
+        };
+        let flash = crate::weather::lightning::flash_at(&strikes, cam_in_planet);
         PlanetUniform {
             offset: [
                 camera_relative.x,
@@ -1276,8 +1302,8 @@ impl SpaceRenderer {
                 ));
                 [f.tint[0], f.tint[1], f.tint[2], f.peak * fog_scale]
             },
-            flash: [0.0; 4],
-            strikes: [[0.0; 4]; 6],
+            flash: [flash, 0.0, 0.0, 0.0],
+            strikes: crate::weather::lightning::gpu_strikes(&strikes),
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1323,6 +1349,8 @@ impl SpaceRenderer {
                 self.plastic,
                 self.light,
                 self.fog_scale,
+                &self.weather_force,
+                &self.lightning,
             )]),
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1592,12 +1620,70 @@ mod tests {
         // + plastic, + atmosphere, + fog_tint, + flash, + strikes
     }
 
+    fn quiet_force() -> crate::weather::WeatherForce {
+        crate::weather::WeatherSettings::default().force_uniform()
+    }
+
+    // a storm on a stormy planet shows strikes in its uniform; none without lightning
+    #[test]
+    fn planet_uniform_carries_the_strikes_of_a_storm() {
+        let system = SolarSystem::generate(1);
+        // the biggest stormy planet: the most cells to hold a strike
+        let i = (0..system.planets.len())
+            .filter(|&i| {
+                crate::weather::lightning::kind_rate(crate::weather::WeatherKind::for_planet(
+                    system.planets[i].planet_type,
+                )) > 0.0
+            })
+            .max_by_key(|&i| system.planets[i].voxel_resolution())
+            .expect("a stormy planet exists");
+        let mut s = crate::weather::WeatherSettings::default();
+        s.apply(
+            crate::weather::WeatherCommand::Force(crate::weather::Force::Storm),
+            crate::weather::WeatherKind::Rain,
+            Vec3::Y,
+            0.0,
+        );
+        s.tick(1000.0);
+        let force = s.force_uniform();
+        let on = LightningSettings::default();
+        let off = LightningSettings { on: false, ..on };
+        let mut seen = false;
+        let mut t = 2000.0;
+        while t < 2600.0 {
+            let cam = Vec3::new(0.0, 0.0, -2000.0);
+            let u = SpaceRenderer::planet_uniform(
+                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &on,
+            );
+            seen |= u.strikes.iter().any(|s| s[3] > 0.0);
+            let n = SpaceRenderer::planet_uniform(
+                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &off,
+            );
+            assert!(n.strikes.iter().all(|s| s[3] == 0.0));
+            t += 0.25;
+        }
+        assert!(
+            seen,
+            "planet {i} r {}",
+            system.planets[i].voxel_resolution()
+        );
+    }
+
     #[test]
     fn planet_uniform_carries_the_density_of_its_type() {
         let system = SolarSystem::generate(1);
         for (i, p) in system.planets.iter().enumerate() {
-            let u =
-                SpaceRenderer::planet_uniform(&system, i, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 1.0);
+            let u = SpaceRenderer::planet_uniform(
+                &system,
+                i,
+                Vec3::ZERO,
+                0.0,
+                [0.0; 4],
+                [0.0; 4],
+                1.0,
+                &quiet_force(),
+                &LightningSettings::default(),
+            );
             assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
         }
     }
@@ -1606,10 +1692,28 @@ mod tests {
     #[test]
     fn planet_uniform_carries_the_storm_fog_of_its_type() {
         let system = SolarSystem::generate(1);
-        let on =
-            SpaceRenderer::planet_uniform(&system, 0, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 1.0);
-        let off =
-            SpaceRenderer::planet_uniform(&system, 0, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 0.0);
+        let on = SpaceRenderer::planet_uniform(
+            &system,
+            0,
+            Vec3::ZERO,
+            0.0,
+            [0.0; 4],
+            [0.0; 4],
+            1.0,
+            &quiet_force(),
+            &LightningSettings::default(),
+        );
+        let off = SpaceRenderer::planet_uniform(
+            &system,
+            0,
+            Vec3::ZERO,
+            0.0,
+            [0.0; 4],
+            [0.0; 4],
+            0.0,
+            &quiet_force(),
+            &LightningSettings::default(),
+        );
         let kind = crate::weather::WeatherKind::for_planet(system.planets[0].planet_type);
         let want = crate::weather::fog::storm_fog(kind);
         assert_eq!(on.fog_tint[3], want.peak);

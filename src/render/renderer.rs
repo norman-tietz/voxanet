@@ -2567,6 +2567,11 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
+        self.system.weather_force = self.weather_force;
+        self.system.lightning = crate::weather::lightning::LightningSettings {
+            on: self.weather.on && self.weather.lightning.on,
+            ..self.weather.lightning
+        };
         self.system.light = self.light.uniform();
         self.update_console_mesh(console.height_fraction);
 
@@ -3636,6 +3641,11 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
+        self.system.weather_force = self.weather_force;
+        self.system.lightning = crate::weather::lightning::LightningSettings {
+            on: self.weather.on && self.weather.lightning.on,
+            ..self.weather.lightning
+        };
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after Space mode bakes the map whole
@@ -3747,6 +3757,11 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
+        self.system.weather_force = self.weather_force;
+        self.system.lightning = crate::weather::lightning::LightningSettings {
+            on: self.weather.on && self.weather.lightning.on,
+            ..self.weather.lightning
+        };
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         let out = match self.surface.get_current_texture() {
