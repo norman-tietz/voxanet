@@ -1,4 +1,5 @@
 pub mod fog;
+pub mod lightning;
 pub mod precipitation;
 // weather.rs
 // The deterministic weather (spec docs/superpowers/specs/2026-10-11-weather-design.md): a Rust mirror of
