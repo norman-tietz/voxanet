@@ -150,6 +150,13 @@ pub fn near_impostor_mesh(data: &crate::planet::data::PlanetData) -> (Vec<Vertex
 // same formula TerrainShape::new uses internally (its own `relief` field is private) — kept here
 // as the single place both this function and any future caller derive "this planet's peak height"
 // from, without needing to widen TerrainShape's field visibility too
+// radius above which the storm haze thins on the impostor: the planet's radius plus its terrain relief
+// (the voxel engine uses the radius of its highest natural peak; this is the same height without a bake)
+pub fn storm_base(planet: &crate::space::solar_system::Planet) -> f32 {
+    let r = planet.voxel_resolution() as f32 / 2.0;
+    r + shape_relief(r)
+}
+
 fn shape_relief(radius: f32) -> f32 {
     (3.0 * radius.sqrt()).min(0.2 * radius)
 }

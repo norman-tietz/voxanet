@@ -2665,6 +2665,7 @@ impl Renderer {
             time,
             crate::weather::fog::sun_elevation(cam_pos, sun_dir),
             sea_radius,
+            CoordSystem::get_layer_radius(planet.terrain.height_range().1 + 1, planet.resolution),
             self.fog_wind,
         )
         .uniform();

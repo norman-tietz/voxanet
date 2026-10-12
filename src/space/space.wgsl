@@ -117,7 +117,7 @@ struct PlanetUniform {
     light: vec4<f32>,         // x: ground bounce, y: wrap lighting (light.rs)
     weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: vec4<f32>,
-    atmosphere: vec4<f32>,    // x: atmosphere density (1 = full, 0 = vacuum)
+    atmosphere: vec4<f32>,    // x: atmosphere density (1 = full, 0 = vacuum), y: radius of the highest terrain (storm fog base)
     fog_tint: vec4<f32>,      // rgb: the storm fog's tint, w: peak extinction x setting (0 = off)
     model: mat3x3<f32>,     // planet frame -> space rotation: the planet's spin at this time
 }
@@ -233,7 +233,7 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     // storm fog like the engine's (atmosphere.wgsl): the storm over the camera from the weather map, the
     // wind-scrolled structure shared with the voxel frame; no ground mist out here
     let cam_storm = select(0.0, weather_at(normalize(cam)).x, planet.fog_tint.w > 0.0);
-    let fog = FogState(cam_storm, planet.fog_tint.w, 0.0, 0.0, planet.fog_tint.rgb, camera.fog.xyz);
+    let fog = FogState(cam_storm, planet.fog_tint.w, 0.0, 0.0, planet.atmosphere.y, planet.fog_tint.rgb, camera.fog.xyz);
     var color = atmo_air_fog(lit, in.local_pos, cam, L, a, fog, ws.x);
 
     // clouds in front of the surface, like the engine's shade_pixel

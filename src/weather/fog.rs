@@ -15,14 +15,19 @@ pub const STRUCT_MAX_DIST: f32 = 300.0; // the structure taps lie within this of
 pub const MIST_HEIGHT: f32 = 10.0; // e-folding height of the mist, blocks (MIST_HEIGHT)
 pub const MIST_EXTINCTION: f32 = 0.02; // per unit at mist 1, at the surface (MIST_EXTINCTION)
 
+pub const STORM_HEIGHT: f32 = 30.0; // e-folding height of the storm haze above the highest peak, blocks (STORM_HEIGHT)
+pub const MIST_REGION_HEIGHT: f32 = 150.0; // the camera's mist fades out with its height over this (MIST_REGION_HEIGHT)
+
 // (WGSL name in atmosphere.wgsl, value)
-pub const CONSTANTS: [(&str, f32); 6] = [
+pub const CONSTANTS: [(&str, f32); 8] = [
     ("FOG_STORM_LO", STORM_LO),
     ("FOG_STRUCTURE", STRUCTURE),
     ("FOG_STRUCT_SCALE", STRUCT_SCALE),
     ("FOG_STRUCT_MAX_DIST", STRUCT_MAX_DIST),
     ("MIST_HEIGHT", MIST_HEIGHT),
     ("MIST_EXTINCTION", MIST_EXTINCTION),
+    ("STORM_HEIGHT", STORM_HEIGHT),
+    ("MIST_REGION_HEIGHT", MIST_REGION_HEIGHT),
 ];
 
 pub fn storm_weight(storm: f32) -> f32 {
@@ -38,8 +43,8 @@ pub struct StormFog {
 
 pub fn storm_fog(kind: WeatherKind) -> StormFog {
     let (peak, tint) = match kind {
-        WeatherKind::Dust => (0.07, [0.55, 0.40, 0.22]), // sandstorm
-        WeatherKind::Ash => (0.06, [0.14, 0.13, 0.13]),  // ash cloud
+        WeatherKind::Dust => (0.07, [0.45, 0.28, 0.12]), // sandstorm
+        WeatherKind::Ash => (0.06, [0.03, 0.028, 0.028]), // ash cloud
         WeatherKind::Snow => (0.08, [0.80, 0.82, 0.88]), // blizzard whiteout
         WeatherKind::AcidRain => (0.012, [0.40, 0.45, 0.12]), // acid haze
         WeatherKind::Rain => (0.004, [0.50, 0.52, 0.56]), // rain haze
@@ -86,6 +91,51 @@ pub fn mist_optical_depth(mist: f32, h0: f32, h1: f32, dist: f32) -> f32 {
     mist * MIST_EXTINCTION * mean * dist
 }
 
+// mean of exp(-h / H) along a straight climb from height h0 to h1 (both clamped to >= 0)
+fn mean_falloff(h0: f32, h1: f32, scale: f32) -> f32 {
+    let (h0, h1) = (h0.max(0.0), h1.max(0.0));
+    let (e0, e1) = ((-h0 / scale).exp(), (-h1 / scale).exp());
+    let dh = h1 - h0;
+    if dh.abs() > 1e-3 {
+        scale * (e0 - e1) / dh
+    } else {
+        e0
+    }
+}
+
+// atmo_storm_optical_depth: the haze's optical depth over `dist`. Heights are measured above `storm_base`
+// (the radius of the planet's highest peak), so on the ground the factor is exactly 1 and the haze keeps its
+// extinction there, and falls off with STORM_HEIGHT above it; from altitude only the storm at the shaded
+// point counts (the camera's own weight fades with its height).
+#[allow(clippy::too_many_arguments)]
+pub fn storm_optical_depth(
+    peak: f32,
+    storm_cam: f32,
+    storm_there: f32,
+    structure: f32,
+    h0: f32,
+    h1: f32,
+    dist: f32,
+) -> f32 {
+    let w = storm_weight(camera_storm_mix(storm_cam, storm_there, h0));
+    if w * peak <= 0.0 || dist <= 0.0 {
+        return 0.0;
+    }
+    peak * w * structure * mean_falloff(h0, h1, STORM_HEIGHT) * dist
+}
+
+// the storm value the haze uses: the mean of the camera's and the shaded point's near the ground, the
+// shaded point's alone from altitude
+pub fn camera_storm_mix(storm_cam: f32, storm_there: f32, h0: f32) -> f32 {
+    let k = (-h0.max(0.0) / STORM_HEIGHT).exp();
+    storm_there + (0.5 * (storm_cam + storm_there) - storm_there) * k
+}
+
+// the camera's mist fades out with its height above the mist base (MIST_REGION_HEIGHT)
+pub fn mist_region_weight(h0: f32) -> f32 {
+    (-h0.max(0.0) / MIST_REGION_HEIGHT).exp()
+}
+
 // The structure's scroll offset (planet frame, units): integrated here, not time × wind, so gusts do
 // not jump when the wind changes.
 pub fn advance_wind(wind: Vec3, dir: Vec3, storm: f32, dt: f32) -> Vec3 {
@@ -115,10 +165,11 @@ impl Default for FogSettings {
 // the fog values at the camera, for the GPU
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FogParams {
-    pub storm: f32,     // the storm over the camera
-    pub peak: f32,      // the type's extinction × density; 0 = off
-    pub mist: f32,      // 0..1 (× the setting)
-    pub mist_base: f32, // radius the mist's height is measured from (the sea surface)
+    pub storm: f32,      // the storm over the camera
+    pub peak: f32,       // the type's extinction × density; 0 = off
+    pub mist: f32,       // 0..1 (× the setting)
+    pub mist_base: f32,  // radius the mist's height is measured from (the sea surface)
+    pub storm_base: f32, // radius of the highest natural peak: the storm haze thins above it
     pub tint: [f32; 3],
     pub wind: Vec3,
 }
@@ -139,6 +190,7 @@ impl FogParams {
         t: f32,
         sun_elevation: f32,
         mist_base: f32,
+        storm_base: f32,
         wind: Vec3,
     ) -> Self {
         let sf = storm_fog(kind);
@@ -151,6 +203,7 @@ impl FogParams {
                 0.0
             },
             mist_base,
+            storm_base,
             tint: sf.tint,
             wind,
         }
@@ -161,7 +214,7 @@ impl FogParams {
         [
             [self.storm, self.peak, self.mist, self.mist_base],
             [self.tint[0], self.tint[1], self.tint[2], 0.0],
-            [self.wind.x, self.wind.y, self.wind.z, 0.0],
+            [self.wind.x, self.wind.y, self.wind.z, self.storm_base],
         ]
     }
 }
@@ -335,6 +388,7 @@ mod tests {
             10.0,
             0.0,
             100.0,
+            120.0,
             Vec3::ZERO,
         );
         let u = p.uniform();
@@ -352,6 +406,7 @@ mod tests {
             10.0,
             0.0,
             100.0,
+            120.0,
             Vec3::ZERO,
         );
         let u = p.uniform();
@@ -369,6 +424,7 @@ mod tests {
             10.0,
             0.0,
             100.0,
+            120.0,
             wind,
         );
         let u = p.uniform();
@@ -377,5 +433,44 @@ mod tests {
         assert_eq!(u[0][3], 100.0);
         assert_eq!(&u[1][..3], &storm_fog(kind(PlanetType::Desert)).tint);
         assert_eq!(&u[2][..3], &[1.0, 2.0, 3.0]);
+        assert_eq!(u[2][3], 120.0);
+    }
+
+    #[test]
+    fn storm_haze_from_orbit_stays_thin() {
+        // straight down from 3 planet radii through the atmosphere, structure 1
+        let r = 250.0_f32;
+        let base = 1.05 * r;
+        let dist = r * 1.2 * 1.6 - r; // the chord inside the atmosphere sphere, an upper bound
+        for t in PlanetType::ALL {
+            let sf = storm_fog(kind(t));
+            let tau = storm_optical_depth(sf.peak, 1.0, 1.0, 1.0, 3.0 * r - base, 0.0, dist);
+            assert!(tau < 2.5, "{t:?}: {tau}");
+        }
+    }
+
+    #[test]
+    fn storm_haze_on_the_ground_is_unchanged() {
+        let (peak, dist) = (0.07, 120.0);
+        let tau = storm_optical_depth(peak, 1.0, 1.0, 1.3, 0.0, 0.0, dist);
+        assert_eq!(tau, peak * storm_weight(1.0) * 1.3 * dist);
+        assert_eq!(
+            storm_optical_depth(peak, 0.0, 0.0, 1.0, 0.0, 0.0, dist),
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_camera_storm_weight_fades_with_height() {
+        assert_eq!(camera_storm_mix(1.0, 0.0, 0.0), 0.5);
+        assert!((camera_storm_mix(1.0, 0.0, 1000.0) - 0.0).abs() < 1e-6);
+        assert_eq!(camera_storm_mix(0.3, 0.7, 50.0).max(0.0) > 0.5, true);
+    }
+
+    #[test]
+    fn the_camera_mist_fades_with_height() {
+        assert_eq!(mist_region_weight(0.0), 1.0);
+        assert!((mist_region_weight(MIST_REGION_HEIGHT) - (-1.0_f32).exp()).abs() < 1e-6);
+        assert!(mist_region_weight(600.0) < 0.02);
     }
 }

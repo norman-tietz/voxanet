@@ -15,7 +15,7 @@ struct Global {
     weather: vec4<f32>, // x: overcast at the camera, y: storm there (weather.rs overcast)
     fog: vec4<f32>,      // x: storm at the camera, y: storm fog extinction at storm 1 (0 = off), z: ground mist, w: mist base radius (weather/fog.rs)
     fog_tint: vec4<f32>, // rgb: the storm haze's colour
-    fog_wind: vec4<f32>, // xyz: the structure's scroll offset
+    fog_wind: vec4<f32>, // xyz: the structure's scroll offset, w: storm_base (radius of the highest peak)
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -500,9 +500,9 @@ fn triplanar_detail(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 fn engine_fog() -> FogState {
     // under the sea surface the underwater tint wins: no storm or mist haze there
     if (length(global.camera_pos.xyz) < global.screen.z) {
-        return FogState(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+        return FogState(0.0, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
     }
-    return FogState(global.fog.x, global.fog.y, global.fog.z, global.fog.w, global.fog_tint.rgb, global.fog_wind.xyz);
+    return FogState(global.fog.x, global.fog.y, global.fog.z, global.fog.w, global.fog_wind.w, global.fog_tint.rgb, global.fog_wind.xyz);
 }
 
 fn engine_atmosphere() -> Atmosphere {

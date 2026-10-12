@@ -1266,7 +1266,8 @@ impl SpaceRenderer {
             light,
             weather_rule: crate::weather::WeatherKind::for_planet(p.planet_type).rule(),
             weather_cover: crate::weather::WeatherKind::for_planet(p.planet_type).cover(),
-            atmosphere: [atmosphere.density, 0.0, 0.0, 0.0],
+            // y: the storm fog's base, the planet's radius plus the relief the impostor mesh uses
+            atmosphere: [atmosphere.density, super::impostor::storm_base(p), 0.0, 0.0],
             fog_tint: {
                 let f = crate::weather::fog::storm_fog(crate::weather::WeatherKind::for_planet(
                     p.planet_type,

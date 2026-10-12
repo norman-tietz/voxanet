@@ -38,6 +38,8 @@ const FOG_STRUCT_SCALE: f32 = 0.02;    // structure noise cells per unit
 const FOG_STRUCT_MAX_DIST: f32 = 300.0; // the structure taps lie within this of the camera
 const MIST_HEIGHT: f32 = 10.0;         // mist e-folding height, blocks
 const MIST_EXTINCTION: f32 = 0.02;     // per unit at mist 1, at the surface
+const STORM_HEIGHT: f32 = 30.0;        // storm haze e-folding height above the highest peak, blocks
+const MIST_REGION_HEIGHT: f32 = 150.0; // the camera's mist fades out with its height over this
 const MIST_COLOR = vec3<f32>(0.75, 0.78, 0.82);
 
 // a planet's atmosphere: radius (world units, = voxel resolution / 2) and its planet type's colours
@@ -63,6 +65,7 @@ struct FogState {
     peak: f32,       // extinction per unit at storm 1 (the planet type's, x the setting); 0 = no storm fog
     mist: f32,       // 0..1 ground mist at the camera
     mist_base: f32,  // radius the mist's height is measured from (the sea surface)
+    storm_base: f32, // radius of the planet's highest natural peak: the storm haze thins above it
     tint: vec3<f32>, // the storm haze's colour at full daylight
     wind: vec3<f32>, // the structure's scroll offset (planet frame, units)
 }
@@ -268,16 +271,26 @@ fn fog_storm_weight(storm: f32) -> f32 {
 // point, times 3 noise taps along the ray (world-anchored, scrolling with the wind) so it comes in drifting
 // walls instead of an even grey. Exactly 0 without a storm.
 fn atmo_storm_optical_depth(f: FogState, storm_there: f32, cam: vec3<f32>, pos: vec3<f32>, dist: f32) -> f32 {
-    let w = fog_storm_weight(0.5 * (f.storm + storm_there));
+    // heights above the highest peak (0 below it, so on the ground the falloff is exactly 1); from altitude
+    // only the storm at the shaded point counts (fog.rs storm_optical_depth)
+    let h0 = max(length(cam) - f.storm_base, 0.0);
+    let h1 = max(length(pos) - f.storm_base, 0.0);
+    let storm_mix = mix(storm_there, 0.5 * (f.storm + storm_there), exp(-h0 / STORM_HEIGHT));
+    let w = fog_storm_weight(storm_mix);
     if (w * f.peak <= 0.0 || dist <= 0.0) { return 0.0; }
     let dir = (pos - cam) / max(distance(pos, cam), 1e-6);
     let reach = min(dist, FOG_STRUCT_MAX_DIST);
+    // the structure is anchored in the world and drifts with the wind: sample behind the offset
     let o = f.wind;
-    let n = (value_noise3((cam + dir * reach * 0.2 + o) * FOG_STRUCT_SCALE)
-           + value_noise3((cam + dir * reach * 0.5 + o) * FOG_STRUCT_SCALE)
-           + value_noise3((cam + dir * reach * 0.8 + o) * FOG_STRUCT_SCALE)) / 3.0;
+    let n = (value_noise3((cam + dir * reach * 0.2 - o) * FOG_STRUCT_SCALE)
+           + value_noise3((cam + dir * reach * 0.5 - o) * FOG_STRUCT_SCALE)
+           + value_noise3((cam + dir * reach * 0.8 - o) * FOG_STRUCT_SCALE)) / 3.0;
     let structure = 1.0 + FOG_STRUCTURE * (n - 0.5) * 2.0;
-    return f.peak * w * structure * dist;
+    let e0 = exp(-h0 / STORM_HEIGHT);
+    let e1 = exp(-h1 / STORM_HEIGHT);
+    let dh = h1 - h0;
+    let falloff = select(e0, STORM_HEIGHT * (e0 - e1) / dh, abs(dh) > 1e-3);
+    return f.peak * w * structure * falloff * dist;
 }
 
 // the mist's optical depth: density mist * MIST_EXTINCTION * exp(-h / MIST_HEIGHT), h the height above the
@@ -290,7 +303,8 @@ fn atmo_mist_optical_depth(f: FogState, cam: vec3<f32>, pos: vec3<f32>, dist: f3
     let e1 = exp(-h1 / MIST_HEIGHT);
     let dh = h1 - h0;
     let mean = select(e0, MIST_HEIGHT * (e0 - e1) / dh, abs(dh) > 1e-3);
-    return f.mist * MIST_EXTINCTION * mean * dist;
+    // the mist at the camera belongs to the ground: fades out with the camera's height
+    return f.mist * exp(-h0 / MIST_REGION_HEIGHT) * MIST_EXTINCTION * mean * dist;
 }
 
 // exp² air fog toward the sky the camera would see in that direction, so there's no seam between
@@ -311,7 +325,7 @@ fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec
     if (extra > 0.0) {
         // the haze is lit by the day: sand tan, ash grey, snow white by day, dark at night
         let day = atmo_ambient_daylight(world_pos, L);
-        let storm_col = f.tint * day * 1.2;
+        let storm_col = f.tint * day * (1.0 - OVERCAST_DIM * a.overcast);
         let mist_col = mix(fog_col, MIST_COLOR * day, 0.5);
         let base = (dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5);
         fog_col = mix(fog_col, mix(mist_col, storm_col, ts / extra), extra / (base + extra));
