@@ -123,6 +123,12 @@ pub struct FogParams {
     pub wind: Vec3,
 }
 
+// the sine of the sun's elevation over the camera's local horizon (`cam` from the planet centre)
+pub fn sun_elevation(cam: Vec3, sun_dir: Vec3) -> f32 {
+    cam.try_normalize()
+        .map_or(0.0, |up| up.dot(sun_dir.normalize_or_zero()))
+}
+
 impl FogParams {
     #[allow(clippy::too_many_arguments)]
     pub fn at_camera(
@@ -161,6 +167,19 @@ impl FogParams {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sun_elevation_is_the_sine_of_the_sun_above_the_local_horizon() {
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        assert!((sun_elevation(up * 100.0, up) - 1.0).abs() < 1e-6);
+        assert!(sun_elevation(up * 100.0, Vec3::X).abs() < 1e-6);
+        assert!((sun_elevation(up * 100.0, -up) + 1.0).abs() < 1e-6);
+        assert_eq!(
+            sun_elevation(Vec3::ZERO, up),
+            0.0,
+            "no direction at the centre"
+        );
+    }
+
     #[test]
     fn wgsl_constants_match_the_rust_mirror() {
         let w = include_str!("../render/atmosphere.wgsl");

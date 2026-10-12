@@ -228,6 +228,7 @@ pub struct Renderer {
     pub location_hud: String, // the solar system and planet you're at, bottom left in both modes (main.rs)
     pub warp: Option<(f32, f32, Vec3)>, // a jump's streaks: speed, scene fade, travel direction (main.rs Jump)
     warp_flow: Option<(f64, f32)>, // their flow (warp::advance_flow) and the clock it was advanced to
+    pub fog_wind: glam::Vec3,      // the storm fog's scrolled offset (weather/fog.rs)
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
@@ -1207,6 +1208,7 @@ impl Renderer {
             location_hud: String::new(),
             warp: None,
             warp_flow: None,
+            fog_wind: glam::Vec3::ZERO,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -2638,6 +2640,29 @@ impl Renderer {
             cam_pos.length() / (planet.resolution as f32 * 0.5).max(1.0),
         );
 
+        let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
+        // storm and mist fog over the camera (weather/fog.rs); the structure scrolls with the wind
+        let cam_dir = cam_pos.normalize_or_zero();
+        self.fog_wind =
+            crate::weather::fog::advance_wind(self.fog_wind, cam_dir, storm_here, precip_dt);
+        let sea_radius =
+            CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution);
+        let fog_settings = crate::weather::fog::FogSettings {
+            on: self.weather.on && self.weather.fog.on,
+            ..self.weather.fog
+        };
+        let fog = crate::weather::fog::FogParams::at_camera(
+            kind,
+            &fog_settings,
+            storm_here,
+            cam_dir,
+            time,
+            crate::weather::fog::sun_elevation(cam_pos, sun_dir),
+            sea_radius,
+            self.fog_wind,
+        )
+        .uniform();
+
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
@@ -2673,9 +2698,9 @@ impl Renderer {
             plastic_ext: self.plastic.uniform_ext(),
             light: self.light.uniform(),
             weather: [overcast, storm_here, 0.0, 0.0],
-            fog: [0.0; 4],
-            fog_tint: [0.0; 4],
-            fog_wind: [0.0; 4],
+            fog: fog[0],
+            fog_tint: fog[1],
+            fog_wind: fog[2],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -2712,7 +2737,6 @@ impl Renderer {
             angular_radius,
             star_frame,
         );
-        let kind = crate::weather::WeatherKind::for_planet(planet.planet_type);
         biome_data.weather_rule = kind.rule();
         biome_data.weather_cover = kind.cover();
         // lens flare: the sun projected far along its direction; none once the sun is below the planet's
