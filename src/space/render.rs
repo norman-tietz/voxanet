@@ -150,6 +150,11 @@ const LOD_NEAR_DISTANCE_MULTIPLIER: f32 = 6.0;
 
 // draw order for the atmosphere shells: farthest first. They blend without writing depth, so
 // two overlapping glows only composite correctly back to front
+// does the planet have an atmosphere to draw a shell for (density 0 = vacuum)
+pub fn has_atmosphere(planet: &Planet) -> bool {
+    planet.planet_type.def().atmosphere.density > 0.0
+}
+
 fn back_to_front(distances: &[(usize, f32)]) -> Vec<usize> {
     let mut sorted = distances.to_vec();
     sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1152,6 +1157,7 @@ impl SpaceRenderer {
             pass.set_index_buffer(self.i_buf.slice(..), wgpu::IndexFormat::Uint32);
             let shells: Vec<(usize, f32)> = (0..system.planets.len())
                 .filter(|&i| content.draws_planet(i))
+                .filter(|&i| has_atmosphere(&system.planets[i]))
                 .map(|i| {
                     (
                         i,
@@ -1535,6 +1541,23 @@ mod tests {
         // planet index order 0, 1, 2 at distances 500, 3000, 1200: the farthest shell blends first
         let order = back_to_front(&[(0, 500.0), (1, 3000.0), (2, 1200.0)]);
         assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn only_planets_with_an_atmosphere_get_a_shell() {
+        use crate::planet::biome::PlanetType;
+        let system = SolarSystem::generate(1);
+        for p in &system.planets {
+            assert_eq!(has_atmosphere(p), p.planet_type != PlanetType::Cratered);
+        }
+    }
+
+    #[test]
+    fn a_cratered_planet_has_no_atmosphere_shell() {
+        use crate::planet::biome::PlanetType;
+        let mut system = SolarSystem::generate(1);
+        system.add_planet(PlanetType::Cratered, 100.0).unwrap();
+        assert!(!has_atmosphere(system.planets.last().unwrap()));
     }
     use crate::space::solar_system::SolarSystem;
 
