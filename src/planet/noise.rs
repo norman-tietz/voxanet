@@ -223,28 +223,52 @@ impl TerrainShape {
     }
 
     // the three crater layers of Cratered: cell size in world units at sea level, depth of the bowl and
-    // height of the rim as shares of the relief, how sharp the rim is
-    fn layer_params(layer: CraterLayer) -> (f32, f32, f32, f32, Vec3) {
-        match layer {
-            CraterLayer::Large => (150.0, 0.16, 0.025, 0.10, Vec3::new(2.5, -7.1, 4.4)), // old, worn, shallow
-            CraterLayer::Medium => (55.0, 0.12, 0.030, 0.07, Vec3::new(-6.3, 1.9, 8.2)),
-            CraterLayer::Small => (20.0, 0.10, 0.030, 0.05, Vec3::new(9.1, 5.5, -3.7)), // fresh, deep, sharp
+    // height of the rim as shares of the relief, how sharp the rim is, the salt, and the least bowl depth and
+    // rim height in whole layers (on small planets the relief is a few layers and the shares would vanish)
+    fn layer_params(layer: CraterLayer) -> LayerParams {
+        let (blocks, bowl, rim, rim_width, salt, min_bowl, min_rim) = match layer {
+            CraterLayer::Large => (
+                150.0,
+                0.16,
+                0.025,
+                0.10,
+                Vec3::new(2.5, -7.1, 4.4),
+                3.0,
+                1.3,
+            ), // old, worn, shallow
+            CraterLayer::Medium => (55.0, 0.12, 0.030, 0.07, Vec3::new(-6.3, 1.9, 8.2), 2.5, 1.3),
+            CraterLayer::Small => (20.0, 0.10, 0.030, 0.05, Vec3::new(9.1, 5.5, -3.7), 1.5, 1.0), // fresh, deep, sharp
+        };
+        LayerParams {
+            blocks,
+            bowl,
+            rim,
+            rim_width,
+            salt,
+            min_bowl,
+            min_rim,
         }
+    }
+
+    // the crater cells shrink with the planet below radius 250 (never under 8 world units), so a small
+    // planet keeps a sensible number of craters of a sensible relative size; unchanged from radius 250 up
+    fn crater_cell(&self, blocks: f32) -> f32 {
+        (blocks * (self.resolution as f32 / 2.0 / 250.0).min(1.0)).max(8.0)
     }
 
     // one crater layer's height contribution in layers: a smooth bowl inside the crater, a raised rim at its
     // edge, nothing between craters; fades to 0 at the cell boundary (no cliffs)
     pub(crate) fn crater_layer(&self, g: &NoiseGenerator, dir: Vec3, layer: CraterLayer) -> f32 {
-        let (blocks, bowl_depth, rim_height, rim_width, salt) = Self::layer_params(layer);
-        let (f1, f2, h) = self.cells(g, dir, blocks, salt);
-        // half of the cells hold a crater, radius 0.2..0.42 of the cell by the cell's hash
+        let p = Self::layer_params(layer);
+        let (f1, f2, h) = self.cells(g, dir, self.crater_cell(p.blocks), p.salt);
+        // half of the cells hold a crater, radius 0.25..0.45 of the cell by the cell's hash
         if h < 0.45 {
             return 0.0;
         }
         let rc = 0.25 + 0.2 * (h - 0.45) / 0.55;
-        let bowl = smoothstep(rc, rc * 0.4, f1) * bowl_depth;
-        let rim = (-((f1 - rc) / rim_width).powi(2)).exp() * rim_height;
-        (rim - bowl) * self.relief * smoothstep(0.0, EDGE_FADE, f2 - f1)
+        let bowl = smoothstep(rc, rc * 0.4, f1) * (p.bowl * self.relief).max(p.min_bowl);
+        let rim = (-((f1 - rc) / p.rim_width).powi(2)).exp() * (p.rim * self.relief).max(p.min_rim);
+        (rim - bowl) * smoothstep(0.0, EDGE_FADE, f2 - f1)
     }
 
     // 1 on the maria (the low part of the continent mask, about 30 % of the surface), 0 on the highlands
@@ -257,8 +281,9 @@ impl TerrainShape {
     fn cratered(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
         let r = self.relief;
         let mare = self.mare_mask(g, dir);
-        let highland =
-            0.30 * r + g.fbm(dir * self.hill_freq + Vec3::new(1.3, 8.1, -2.2), 4) * 0.10 * r;
+        // the highlands are high enough to hold the large bowls
+        let base = (0.30 * r).max(Self::layer_params(CraterLayer::Large).min_bowl + 2.0);
+        let highland = base + g.fbm(dir * self.hill_freq + Vec3::new(1.3, 8.1, -2.2), 4) * 0.10 * r;
         let large = self.crater_layer(g, dir, CraterLayer::Large);
         let medium = self.crater_layer(g, dir, CraterLayer::Medium);
         let small = self.crater_layer(g, dir, CraterLayer::Small);
@@ -506,12 +531,21 @@ pub(crate) fn land_offset(t: PlanetType) -> f32 {
     }
 }
 
-// Volcanic fissures: one noise octave per this many world units
 // per-cell features fade to 0 over this much f2 - f1 (cell units) so they have no cliffs at cell boundaries
 const EDGE_FADE: f32 = 0.1;
 const MARE_LO: f32 = -0.09; // continent-mask values below this are full mare ...
 const MARE_HI: f32 = 0.04; // ... above this, highlands (tune so the mare share is 0.22..0.38)
 const MIN_FLOOR: f32 = 1.0; // layers above sea level: liquid-less planets are filled flat to sea level
+
+struct LayerParams {
+    blocks: f32,
+    bowl: f32,
+    rim: f32,
+    rim_width: f32,
+    salt: Vec3,
+    min_bowl: f32,
+    min_rim: f32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CraterLayer {
@@ -528,6 +562,8 @@ fn softplus_above(x: f32, k: f32) -> f32 {
         k * (1.0 + (x / k).exp()).ln()
     }
 }
+
+// Volcanic fissures: one noise octave per this many world units
 const FISSURE_PERIOD: f32 = 40.0;
 // the band reaches out to this distance from the crossing (half depth at half of it), so >= 2 units wide
 const FISSURE_WIDTH: f32 = 6.0;
@@ -1412,33 +1448,80 @@ mod tests {
     #[test]
     fn the_three_crater_layers_have_three_sizes() {
         let (s, g) = shape_of(PlanetType::Cratered, 500, 11);
-        let a = fib_dirs(64)[7];
-        let b = a.cross(Vec3::new(0.3, 0.9, 0.31)).normalize();
+        let axes = fib_dirs(24);
+        let circles: Vec<(Vec3, Vec3)> = (0..10)
+            .map(|i| {
+                let a = axes[i * 2 + 1];
+                (
+                    a,
+                    a.cross(Vec3::new(0.3, 0.9, 0.31 + 0.1 * i as f32))
+                        .normalize(),
+                )
+            })
+            .collect();
         let changes = |layer: CraterLayer| {
-            let mut prev = 0.0_f32;
-            let (mut n, mut lo, mut hi) = (0, 0.0_f32, 0.0_f32);
-            for i in 0..6000 {
-                let t = std::f32::consts::TAU * i as f32 / 6000.0;
-                let v = s.crater_layer(&g, (a * t.cos() + b * t.sin()).normalize(), layer);
-                lo = lo.min(v);
-                hi = hi.max(v);
-                if v * prev < 0.0 {
-                    n += 1;
-                }
-                if v != 0.0 {
-                    prev = v;
+            let mut total = 0;
+            for &(a, b) in &circles {
+                let mut prev = 0.0_f32;
+                for i in 0..6000 {
+                    let t = std::f32::consts::TAU * i as f32 / 6000.0;
+                    let v = s.crater_layer(&g, (a * t.cos() + b * t.sin()).normalize(), layer);
+                    if v * prev < 0.0 {
+                        total += 1;
+                    }
+                    if v != 0.0 {
+                        prev = v;
+                    }
                 }
             }
-            assert!(lo < 0.0 && hi > 0.0, "{layer:?}: bowls and rims");
-            n
+            total as f32 / circles.len() as f32
         };
         let (large, medium, small) = (
             changes(CraterLayer::Large),
             changes(CraterLayer::Medium),
             changes(CraterLayer::Small),
         );
-        println!("sign changes large {large} medium {medium} small {small}");
+        println!("average sign changes large {large} medium {medium} small {small}");
         assert!(large < medium && medium < small);
+    }
+
+    // the start system's Cratered planet is tiny (res 111): its craters must still show in whole layers
+    const START_RES: u32 = 111;
+    const START_SEED: u32 = 1558184414;
+
+    #[test]
+    fn small_planet_craters_are_visible_in_whole_layers() {
+        let (s, g) = shape_of(PlanetType::Cratered, START_RES, START_SEED);
+        let dirs = fib_dirs(40000);
+        for layer in [CraterLayer::Large, CraterLayer::Medium] {
+            let vals: Vec<f32> = dirs.iter().map(|&d| s.crater_layer(&g, d, layer)).collect();
+            let lo = vals.iter().cloned().fold(0.0_f32, f32::min);
+            let hi = vals.iter().cloned().fold(0.0_f32, f32::max);
+            println!("{layer:?}: bowl {lo} rim {hi}");
+            assert!(lo <= -2.0, "{layer:?} bowl {lo}");
+            assert!(hi >= 1.0, "{layer:?} rim {hi}");
+        }
+    }
+
+    #[test]
+    fn small_planet_has_terraces_of_heights_and_a_flat_share() {
+        let (s, g) = shape_of(PlanetType::Cratered, START_RES, START_SEED);
+        let dirs = fib_dirs(40000);
+        let mut levels = std::collections::HashSet::new();
+        let mut floor = 0;
+        for &d in &dirs {
+            let h = s.natural_height(&g, d);
+            if h <= 1.5 {
+                floor += 1;
+            }
+            if s.mare_mask(&g, d) < 0.1 {
+                levels.insert(h.round() as i32);
+            }
+        }
+        let share = floor as f32 / dirs.len() as f32;
+        println!("highland levels {} floor share {share}", levels.len());
+        assert!(levels.len() >= 6, "{levels:?}");
+        assert!((0.15..=0.6).contains(&share), "{share}");
     }
 
     // no cliffs at cell boundaries: no step between neighbouring columns beyond what Toxic (also cellular
