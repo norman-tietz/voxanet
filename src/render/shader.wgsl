@@ -1175,7 +1175,18 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
         }
         alpha = 0.6;
     }
-    return vec4<f32>(post_process(fog(color, in.world_pos)), alpha * local.params.x);
+    // clouds in front of the surface (seen from above the cloud shell), as shade_pixel composites them
+    // over terrain: the floor behind already has them over it in the frame, so "clouds over the water"
+    // with the water's own alpha blends to clouds over the water-covered floor (exact before
+    // post-processing); without it the liquid was drawn on top of the clouds, sharp fragments of
+    // plasma or water floating in the cloud cover
+    var shaded = fog(color, in.world_pos);
+    let cloud_t = sphere_hit(global.camera_pos.xyz, -V, global.camera_pos.w * CLOUD_ALT);
+    if (cloud_t > 0.0 && cloud_t < water_dist) {
+        let cl = cloud_shade(global.camera_pos.xyz - V * cloud_t, -V, cloud_t, L);
+        shaded = cl.rgb * cl.a + shaded * (1.0 - cl.a);
+    }
+    return vec4<f32>(post_process(shaded), alpha * local.params.x);
 }
 
 // shadow-resolution G-buffer (rt_blur.rs g_pos / g_nrm) from the full-resolution one, nearest pixel

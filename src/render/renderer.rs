@@ -208,6 +208,7 @@ pub struct Renderer {
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
     perf_message: Option<String>, // its finished summary, for the console
     pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs)
+    pub location_hud: String, // the solar system and planet you're at, bottom left in both modes (main.rs)
     pub warp: Option<(f32, f32, Vec3)>, // a jump's streaks: speed, scene fade, travel direction (main.rs Jump)
     warp_flow: Option<(f64, f32)>, // their flow (warp::advance_flow) and the clock it was advanced to
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
@@ -1183,6 +1184,7 @@ impl Renderer {
             perf: None,
             perf_message: None,
             travel_hud: None,
+            location_hud: String::new(),
             warp: None,
             warp_flow: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
@@ -3153,6 +3155,21 @@ impl Renderer {
             );
             hp_buf.shape_until_scroll(&mut self.font_system, false);
 
+            let mut location_buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+            location_buf.set_size(
+                Some(self.config.width as f32),
+                Some(self.config.height as f32),
+            );
+            location_buf.set_text(
+                &self.location_hud,
+                &Attrs::new()
+                    .family(Family::Monospace)
+                    .color(glyphon::Color::rgb(220, 220, 220)),
+                Shaping::Advanced,
+                None,
+            );
+            location_buf.shape_until_scroll(&mut self.font_system, false);
+
             // timed status line (show_status), centred in the upper part of the screen
             let status_text = self
                 .status
@@ -3271,6 +3288,21 @@ impl Renderer {
                 buffer: &hp_buf,
                 left: self.config.width as f32 - 120.0,
                 top: 62.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+
+            text_areas.push(TextArea {
+                buffer: &location_buf,
+                left: 10.0,
+                top: self.config.height as f32 - 30.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
@@ -4285,6 +4317,13 @@ impl Renderer {
             10.0,
             20.0,
             glyphon::Color::rgb(0, 255, 0),
+        ));
+        texts.push((
+            self.location_hud.clone(),
+            10.0,
+            self.config.height as f32 - 30.0,
+            16.0,
+            glyphon::Color::rgb(220, 220, 220),
         ));
         if let Some(hud) = &self.travel_hud {
             // a running trip: under the compass's label rows

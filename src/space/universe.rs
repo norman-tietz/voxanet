@@ -65,12 +65,33 @@ impl Universe {
         let rot = Quat::from_rotation_arc(Vec3::NEG_Z, (-dir).as_vec3());
         (pos, rot)
     }
+
+    // the HUD's location line (both modes): the current solar system's name, and the planet (`index`,
+    // 0-based) when you're on it or captured by it, labelled like the compass ("#7 Shattered")
+    pub fn location_label(&self, planet: Option<(usize, &str)>) -> String {
+        let system = &self.galaxy.systems[self.current].name;
+        match planet {
+            Some((i, kind)) => format!("{system} · #{} {kind}", i + 1),
+            None => system.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::space::galaxy::Galaxy;
+
+    #[test]
+    fn location_label_names_the_system_and_the_planet() {
+        let (u, _) = uni();
+        let name = u.galaxy.systems[0].name.clone();
+        assert_eq!(u.location_label(None), name);
+        assert_eq!(
+            u.location_label(Some((6, "Shattered"))),
+            format!("{name} · #7 Shattered")
+        );
+    }
 
     fn uni() -> (Universe, SolarSystem) {
         let g = Galaxy::generate(1);

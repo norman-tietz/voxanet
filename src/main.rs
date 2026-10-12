@@ -2041,6 +2041,15 @@ impl Game {
                     );
                     return;
                 }
+                // where you are, in the HUD of both modes: the planet you're on or captured by
+                let here = match (&self.mode, self.flight_frame) {
+                    (GameMode::Planet, _) => Some(self.loaded_world),
+                    (GameMode::Space, FlightFrame::Captured(i)) => Some(i),
+                    (GameMode::Space, FlightFrame::Free) => None,
+                };
+                renderer.location_hud = self.universe.location_label(
+                    here.map(|i| (i, self.system.planets[i].planet_type.def().name)),
+                );
                 match &self.mode {
                     GameMode::Planet => {
                         let i = self.loaded_world;
