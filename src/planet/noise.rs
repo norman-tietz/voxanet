@@ -222,6 +222,11 @@ impl TerrainShape {
         g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + land_offset(self.planet_type)
     }
 
+    // Task 2 replaces this placeholder: lunar highlands, maria and three crater layers
+    fn cratered(&self, _g: &NoiseGenerator, _dir: Vec3) -> f32 {
+        1.0
+    }
+
     // height above (or below) sea level for a direction on the unit sphere, before lakes are carved
     pub(crate) fn natural_height(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
         match self.planet_type {
@@ -232,6 +237,7 @@ impl TerrainShape {
             PlanetType::Toxic => self.toxic(g, dir),
             PlanetType::Ocean => self.ocean(g, dir),
             PlanetType::Shattered => self.shattered(g, dir),
+            PlanetType::Cratered => self.cratered(g, dir),
         }
     }
 

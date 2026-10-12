@@ -18,6 +18,7 @@ pub enum BlockType {
     Obsidian,
     Ember,
     Ice,
+    MoonDust,
 }
 
 impl BlockType {
@@ -34,6 +35,7 @@ impl BlockType {
             BlockType::Obsidian => [0.07, 0.06, 0.09],
             BlockType::Ember => [0.5, 0.22, 0.08],
             BlockType::Ice => [0.75, 0.88, 0.95],
+            BlockType::MoonDust => [0.58, 0.57, 0.55],
         }
     }
 
@@ -50,6 +52,7 @@ impl BlockType {
             BlockType::Obsidian => "Obsidian",
             BlockType::Ember => "Ember",
             BlockType::Ice => "Ice",
+            BlockType::MoonDust => "Moon dust",
         }
     }
 
@@ -201,6 +204,13 @@ pub fn placeable(palette: &Palette) -> [BlockType; 5] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn moon_dust_is_a_light_grey() {
+        let [r, g, b] = BlockType::MoonDust.color();
+        assert!(r > 0.4 && (r - g).abs() < 0.05 && (g - b).abs() < 0.08);
+        assert_eq!(BlockType::MoonDust.name(), "Moon dust");
+    }
+
     fn earth_palette() -> Palette {
         crate::planet::biome::PlanetType::EarthLike.def().palette
     }
@@ -263,6 +273,7 @@ mod tests {
             BlockType::Obsidian,
             BlockType::Ember,
             BlockType::Ice,
+            BlockType::MoonDust,
         ] {
             assert!(!ty.name().is_empty());
             let [r, g, b] = ty.color();
@@ -285,6 +296,7 @@ mod tests {
             BlockType::Basalt,
             BlockType::Obsidian,
             BlockType::Ember,
+            BlockType::MoonDust,
         ] {
             assert_eq!(ty.friction_scale(), 1.0);
         }

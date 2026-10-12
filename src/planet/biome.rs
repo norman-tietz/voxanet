@@ -18,10 +18,11 @@ pub enum PlanetType {
     Toxic,
     Ocean,
     Shattered,
+    Cratered,
 }
 
 impl PlanetType {
-    pub const ALL: [PlanetType; 7] = [
+    pub const ALL: [PlanetType; 8] = [
         PlanetType::EarthLike,
         PlanetType::Volcanic,
         PlanetType::Ice,
@@ -29,6 +30,7 @@ impl PlanetType {
         PlanetType::Toxic,
         PlanetType::Ocean,
         PlanetType::Shattered,
+        PlanetType::Cratered,
     ];
 
     // matches a planet type's name case-insensitively, ignoring spaces and hyphens ("Earth-like",
@@ -66,6 +68,7 @@ impl PlanetType {
                     cloud_light: [0.92, 0.94, 0.98],
                     cloud_dark: [0.16, 0.18, 0.24],
                     space_color: [0.010, 0.015, 0.030],
+                    density: 1.0,
                 },
             },
             PlanetType::Volcanic => PlanetTypeDef {
@@ -91,6 +94,7 @@ impl PlanetType {
                     cloud_light: [0.55, 0.45, 0.4],
                     cloud_dark: [0.12, 0.09, 0.08],
                     space_color: [0.03, 0.01, 0.015],
+                    density: 1.0,
                 },
             },
             PlanetType::Ice => PlanetTypeDef {
@@ -110,6 +114,7 @@ impl PlanetType {
                     cloud_light: [0.96, 0.97, 1.0],
                     cloud_dark: [0.55, 0.62, 0.72],
                     space_color: [0.02, 0.025, 0.04],
+                    density: 1.0,
                 },
             },
             PlanetType::Desert => PlanetTypeDef {
@@ -129,6 +134,7 @@ impl PlanetType {
                     cloud_light: [0.95, 0.90, 0.85],
                     cloud_dark: [0.70, 0.65, 0.60],
                     space_color: [0.04, 0.03, 0.02],
+                    density: 1.0,
                 },
             },
             PlanetType::Toxic => PlanetTypeDef {
@@ -154,6 +160,7 @@ impl PlanetType {
                     cloud_light: [0.4, 0.5, 0.3],
                     cloud_dark: [0.15, 0.2, 0.1],
                     space_color: [0.015, 0.025, 0.015],
+                    density: 1.0,
                 },
             },
             PlanetType::Ocean => PlanetTypeDef {
@@ -179,6 +186,29 @@ impl PlanetType {
                     cloud_light: [0.6, 0.65, 0.7],
                     cloud_dark: [0.2, 0.25, 0.35],
                     space_color: [0.01, 0.01, 0.02],
+                    density: 1.0,
+                },
+            },
+            PlanetType::Cratered => PlanetTypeDef {
+                name: "Cratered",
+                day_length_secs: 270.0, // long, slow days
+                liquid: None,
+                palette: Palette {
+                    peak: BlockType::MoonDust,
+                    rock: BlockType::Stone,      // crater walls
+                    beach: BlockType::Basalt,    // the maria: low flat ground
+                    ground: BlockType::MoonDust, // the highlands
+                    subsurface: BlockType::Basalt,
+                },
+                // no atmosphere: no sky, clouds or fog (density 0). `sky_zenith` is never seen as a
+                // sky; it is the dim cool fill light shadows get (a quarter of Earth-like's)
+                atmosphere: AtmosphereDef {
+                    sky_zenith: [0.065, 0.070, 0.080],
+                    sky_horizon_warm: [0.065, 0.070, 0.080],
+                    cloud_light: [0.0; 3],
+                    cloud_dark: [0.0; 3],
+                    space_color: [0.0; 3],
+                    density: 0.0,
                 },
             },
             PlanetType::Shattered => PlanetTypeDef {
@@ -204,6 +234,7 @@ impl PlanetType {
                     cloud_light: [0.7, 0.3, 0.9],
                     cloud_dark: [0.1, 0.02, 0.15],
                     space_color: [0.04, 0.01, 0.05],
+                    density: 1.0,
                 },
             },
         }
@@ -276,6 +307,8 @@ pub struct AtmosphereDef {
     pub cloud_light: [f32; 3],
     pub cloud_dark: [f32; 3],
     pub space_color: [f32; 3],
+    // 1.0 = a full atmosphere, 0.0 = vacuum: scales the sky, clouds, fog and storms (atmosphere.wgsl)
+    pub density: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -299,6 +332,50 @@ pub struct PlanetTypeDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cratered_is_an_airless_registered_type() {
+        assert_eq!(
+            PlanetType::from_name("cratered"),
+            Some(PlanetType::Cratered)
+        );
+        assert_eq!(
+            PlanetType::from_name("Cratered"),
+            Some(PlanetType::Cratered)
+        );
+        assert_eq!(PlanetType::ALL.len(), 8);
+        assert_eq!(*PlanetType::ALL.last().unwrap(), PlanetType::Cratered);
+        let d = PlanetType::Cratered.def();
+        assert_eq!(d.name, "Cratered");
+        assert!(d.liquid.is_none());
+        assert_eq!(d.atmosphere.density, 0.0);
+        assert_eq!(d.day_length_secs, 270.0);
+        assert_eq!(d.palette.ground, BlockType::MoonDust);
+        assert_eq!(d.palette.beach, BlockType::Basalt);
+        assert_eq!(d.palette.rock, BlockType::Stone);
+        assert_eq!(d.palette.subsurface, BlockType::Basalt);
+    }
+
+    #[test]
+    fn every_other_type_keeps_a_full_atmosphere() {
+        for t in PlanetType::ALL {
+            if t != PlanetType::Cratered {
+                assert_eq!(t.def().atmosphere.density, 1.0, "{t:?}");
+            }
+        }
+    }
+
+    // the airless fill light is about a quarter of Earth-like's sky fill
+    #[test]
+    fn cratered_fill_is_about_a_quarter_of_earth_likes() {
+        let lum = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+        let ratio = lum(PlanetType::Cratered.def().atmosphere.sky_zenith)
+            / lum(PlanetType::EarthLike.def().atmosphere.sky_zenith);
+        assert!((0.2..=0.3).contains(&ratio), "{ratio}");
+        let a = PlanetType::Cratered.def().atmosphere;
+        assert_eq!(a.space_color, [0.0; 3]);
+        assert_eq!(a.cloud_light, [0.0; 3]);
+    }
 
     // water and plasma swim and are harmless; lava and toxic sludge can't be swum in and hurt
     #[test]

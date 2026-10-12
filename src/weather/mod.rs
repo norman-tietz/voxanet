@@ -232,7 +232,7 @@ impl WeatherKind {
             PlanetType::Ice => WeatherKind::Snow,
             PlanetType::Volcanic => WeatherKind::Ash,
             PlanetType::Desert => WeatherKind::Dust,
-            PlanetType::Shattered => WeatherKind::None,
+            PlanetType::Shattered | PlanetType::Cratered => WeatherKind::None,
         }
     }
 
@@ -719,6 +719,14 @@ mod tests {
     use super::*;
     use crate::planet::biome::PlanetType;
     use glam::Vec3;
+
+    #[test]
+    fn cratered_has_no_weather() {
+        assert_eq!(
+            WeatherKind::for_planet(PlanetType::Cratered),
+            WeatherKind::None
+        );
+    }
 
     fn auto() -> WeatherForce {
         WeatherSettings::default().force_uniform()
