@@ -22,7 +22,9 @@ const DECAY: f32 = 0.07;
 const WRAP: f32 = 3600.0;
 
 // the glow and flash constants shared with atmosphere.wgsl (name there, value)
+#[cfg(test)]
 pub const GLOW_RADIUS: f32 = 0.13; // cloud glow radius, in planet radii at the cloud shell
+#[cfg(test)]
 pub const CONSTANTS: [(&str, f32); 1] = [("LIGHTNING_GLOW_RADIUS", GLOW_RADIUS)];
 
 #[derive(Clone, Copy, Debug, PartialEq)]

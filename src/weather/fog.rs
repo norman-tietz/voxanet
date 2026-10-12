@@ -8,17 +8,26 @@ use glam::Vec3;
 
 use super::{noise, rotate, smoothstep, WeatherKind};
 
+#[cfg(test)]
 pub const STORM_LO: f32 = 0.25; // storm value below which the fog does not start (FOG_STORM_LO)
+#[cfg(test)]
 pub const STRUCTURE: f32 = 0.6; // the storm density swings by this share around its mean (FOG_STRUCTURE)
+#[cfg(test)]
 pub const STRUCT_SCALE: f32 = 0.02; // structure noise cells per unit, ~50 units each (FOG_STRUCT_SCALE)
+#[cfg(test)]
 pub const STRUCT_MAX_DIST: f32 = 300.0; // the structure taps lie within this of the camera (FOG_STRUCT_MAX_DIST)
+#[cfg(test)]
 pub const MIST_HEIGHT: f32 = 10.0; // e-folding height of the mist, blocks (MIST_HEIGHT)
+#[cfg(test)]
 pub const MIST_EXTINCTION: f32 = 0.02; // per unit at mist 1, at the surface (MIST_EXTINCTION)
 
+#[cfg(test)]
 pub const STORM_HEIGHT: f32 = 30.0; // e-folding height of the storm haze above the highest peak, blocks (STORM_HEIGHT)
+#[cfg(test)]
 pub const MIST_REGION_HEIGHT: f32 = 150.0; // the camera's mist fades out with its height over this (MIST_REGION_HEIGHT)
 
 // (WGSL name in atmosphere.wgsl, value)
+#[cfg(test)]
 pub const CONSTANTS: [(&str, f32); 8] = [
     ("FOG_STORM_LO", STORM_LO),
     ("FOG_STRUCTURE", STRUCTURE),
@@ -30,6 +39,7 @@ pub const CONSTANTS: [(&str, f32); 8] = [
     ("MIST_REGION_HEIGHT", MIST_REGION_HEIGHT),
 ];
 
+#[cfg(test)]
 pub fn storm_weight(storm: f32) -> f32 {
     smoothstep(STORM_LO, 1.0, storm)
 }
@@ -76,6 +86,7 @@ pub fn mist_strength(kind: WeatherKind, dir: Vec3, t: f32, sun_elevation: f32) -
 // atmo_mist_optical_depth: the mist's optical depth along a path of length `dist` whose ends are `h0`
 // and `h1` blocks above the sea surface. The density mist · MIST_EXTINCTION · exp(-h / MIST_HEIGHT) along
 // a straight climb integrates exactly: the mean of exp(-h / H) is H (e0 − e1) / (h1 − h0).
+#[cfg(test)]
 pub fn mist_optical_depth(mist: f32, h0: f32, h1: f32, dist: f32) -> f32 {
     if mist <= 0.0 {
         return 0.0;
@@ -92,6 +103,7 @@ pub fn mist_optical_depth(mist: f32, h0: f32, h1: f32, dist: f32) -> f32 {
 }
 
 // mean of exp(-h / H) along a straight climb from height h0 to h1 (both clamped to >= 0)
+#[cfg(test)]
 fn mean_falloff(h0: f32, h1: f32, scale: f32) -> f32 {
     let (h0, h1) = (h0.max(0.0), h1.max(0.0));
     let (e0, e1) = ((-h0 / scale).exp(), (-h1 / scale).exp());
@@ -107,6 +119,7 @@ fn mean_falloff(h0: f32, h1: f32, scale: f32) -> f32 {
 // (the radius of the planet's highest peak), so on the ground the factor is exactly 1 and the haze keeps its
 // extinction there, and falls off with STORM_HEIGHT above it; from altitude only the storm at the shaded
 // point counts (the camera's own weight fades with its height).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn storm_optical_depth(
     peak: f32,
@@ -126,12 +139,14 @@ pub fn storm_optical_depth(
 
 // the storm value the haze uses: the mean of the camera's and the shaded point's near the ground, the
 // shaded point's alone from altitude
+#[cfg(test)]
 pub fn camera_storm_mix(storm_cam: f32, storm_there: f32, h0: f32) -> f32 {
     let k = (-h0.max(0.0) / STORM_HEIGHT).exp();
     storm_there + (0.5 * (storm_cam + storm_there) - storm_there) * k
 }
 
 // the camera's mist fades out with its height above the mist base (MIST_REGION_HEIGHT)
+#[cfg(test)]
 pub fn mist_region_weight(h0: f32) -> f32 {
     (-h0.max(0.0) / MIST_REGION_HEIGHT).exp()
 }

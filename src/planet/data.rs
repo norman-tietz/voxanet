@@ -223,6 +223,7 @@ impl PlanetData {
 
     // a planet baked for its type: liquid planets get lakes (decided here, at bake time; switching the
     // type later keeps the terrain)
+    #[cfg(test)]
     pub fn new_for_type(resolution: u32, seed: u32, planet_type: PlanetType) -> Self {
         Self::new_for_planet(resolution, seed, planet_type, PlanetTraits::NEUTRAL)
     }

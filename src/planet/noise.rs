@@ -93,6 +93,7 @@ pub(crate) struct TerrainShape {
 }
 
 impl TerrainShape {
+    #[cfg(test)]
     pub(crate) fn new(
         resolution: u32,
         g: &NoiseGenerator,
