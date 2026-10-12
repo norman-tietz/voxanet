@@ -96,6 +96,7 @@ pub struct BiomeUniform {
     pub star_frame: [f32; 4], // quaternion planet frame -> space, so the sky disc shows the star's own surface
     pub weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind), set by render
     pub weather_cover: [f32; 4],
+    pub atmosphere: [f32; 4], // x: atmosphere density (AtmosphereDef.density: 1 = full, 0 = vacuum)
 }
 
 impl BiomeUniform {
@@ -136,6 +137,7 @@ impl BiomeUniform {
             star_frame: star_frame.to_array(),
             weather_rule: [0.0; 4],
             weather_cover: [0.0; 4],
+            atmosphere: [def.atmosphere.density, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -1401,6 +1403,7 @@ impl Renderer {
         planet_mode: bool,
         camera: [f32; 4],
         light: [f32; 4],
+        density: f32, // the planet's atmosphere density (1 in space mode)
     ) -> bool {
         let Some(ndc) = ndc else {
             return false;
@@ -1436,6 +1439,7 @@ impl Renderer {
                 ],
                 camera,
                 light,
+                atmosphere: [density, 0.0, 0.0, 0.0],
             }]),
         );
         true
@@ -2619,8 +2623,10 @@ impl Renderer {
             .clamp(0.0, 1.0);
 
         // the weather over the camera (weather.rs): the overcast sky and the flare under storms
+        // no atmosphere (density 0): no storms either
+        let density = planet.planet_type.def().atmosphere.density;
         let storm_here =
-            crate::weather::storm(cam_pos.normalize_or_zero(), time, &self.weather_force);
+            crate::weather::storm(cam_pos.normalize_or_zero(), time, &self.weather_force) * density;
         let overcast = crate::weather::overcast(
             storm_here,
             cam_pos.length() / (planet.resolution as f32 * 0.5).max(1.0),
@@ -2736,6 +2742,7 @@ impl Renderer {
                     planet.resolution as f32 * 0.5,
                 ],
                 [sun_dir.x, sun_dir.y, sun_dir.z, time],
+                density,
             )
         };
         self.queue
@@ -3582,6 +3589,7 @@ impl Renderer {
             false,
             [0.0; 4],
             [0.0; 4],
+            1.0,
         );
         self.render_space_overlay(&view, camera, system, t, heat, flare, console);
         if let Some(path) = self.screenshot_request.take() {
@@ -4729,7 +4737,7 @@ pub(crate) mod tests {
     // the weather rule and cover)
     #[test]
     fn biome_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<BiomeUniform>(), 15 * 16);
+        assert_eq!(std::mem::size_of::<BiomeUniform>(), 16 * 16);
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did
@@ -4865,6 +4873,51 @@ pub(crate) mod tests {
             f.contains("textureSampleLevel(src_cube"),
             "the filter samples the source in direction space"
         );
+    }
+
+    // every use of the atmosphere density is a multiply or an early return (no division by it)
+    #[test]
+    fn the_density_scales_the_sky_the_clouds_the_fog_and_the_storm() {
+        let atmo = include_str!("atmosphere.wgsl");
+        let clouds = include_str!("clouds.wgsl");
+        assert!(
+            atmo.contains("planet_r: f32, density: f32) -> f32"),
+            "sky opacity takes the density"
+        );
+        assert!(atmo.contains("return thick * day * density;"));
+        assert!(atmo.contains("* a.density"));
+        assert!(
+            clouds.contains("a.density <= 0.0"),
+            "cloud shade returns early without an atmosphere"
+        );
+        assert!(
+            clouds.contains("planet_r: f32, density: f32) -> f32"),
+            "cloud shadow takes the density"
+        );
+        for src in [atmo, clouds, SCENE_SHADER] {
+            for line in src.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                assert!(
+                    !line.contains("/ a.density") && !line.contains("/ density"),
+                    "never divide by the density: {line}"
+                );
+            }
+        }
+        assert!(SCENE_SHADER.contains("biome.atmosphere.x"));
+    }
+
+    // an Earth-like frame carries density 1, Cratered 0
+    #[test]
+    fn the_biome_uniform_carries_the_density() {
+        use crate::planet::biome::PlanetType;
+        let star = crate::space::solar_system::SolarSystem::generate(1).star;
+        for t in PlanetType::ALL {
+            let u = BiomeUniform::from_def(&t.def(), &star, 0.0, glam::Quat::IDENTITY);
+            assert_eq!(
+                u.atmosphere[0],
+                if t == PlanetType::Cratered { 0.0 } else { 1.0 },
+                "{t:?}"
+            );
+        }
     }
 
     #[test]

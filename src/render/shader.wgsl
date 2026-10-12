@@ -53,6 +53,7 @@ struct Biome {
     star_frame: vec4<f32>,   // quaternion: planet frame -> space (Planet::orientation)
     weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: vec4<f32>,
+    atmosphere: vec4<f32>,    // x: atmosphere density (1 = full, 0 = vacuum)
 }
 @group(0) @binding(3) var<uniform> biome: Biome;
 
@@ -508,12 +509,13 @@ fn engine_atmosphere() -> Atmosphere {
         biome.star_frame,
         global.screen.w,
         global.weather.x,
+        biome.atmosphere.x,
     );
 }
 
 fn cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>) -> f32 {
     // the visible clouds, storms included (clouds.wgsl)
-    return atmo_cloud_shadow_map(world_pos, L, global.camera_pos.w);
+    return atmo_cloud_shadow_map(world_pos, L, global.camera_pos.w, biome.atmosphere.x);
 }
 
 // `dist`: from the camera to `hit` (picks the cloud map's level of detail)
@@ -526,7 +528,7 @@ fn clouds(origin: vec3<f32>, ray_dir: vec3<f32>, L: vec3<f32>) -> vec4<f32> {
 }
 
 fn sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> f32 {
-    return atmo_sky_opacity(ray_dir, cam_pos, L, global.camera_pos.w);
+    return atmo_sky_opacity(ray_dir, cam_pos, L, global.camera_pos.w, biome.atmosphere.x);
 }
 
 fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
@@ -595,7 +597,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
     // storms are overcast: less fill light under them
-    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * ws.x);
+    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * ws.x * biome.atmosphere.x);
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)

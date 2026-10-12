@@ -114,6 +114,7 @@ struct PlanetUniform {
     light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
     weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: [f32; 4],
+    atmosphere: [f32; 4], // x: atmosphere density (AtmosphereDef.density)
     model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 
@@ -1250,6 +1251,7 @@ impl SpaceRenderer {
             light,
             weather_rule: crate::weather::WeatherKind::for_planet(p.planet_type).rule(),
             weather_cover: crate::weather::WeatherKind::for_planet(p.planet_type).cover(),
+            atmosphere: [atmosphere.density, 0.0, 0.0, 0.0],
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1536,11 +1538,20 @@ mod tests {
     }
     use crate::space::solar_system::SolarSystem;
 
-    // PlanetUniform must mirror space.wgsl's PlanetUniform: 14 vec4s + a mat3x3 (3 × 16 bytes)
+    // PlanetUniform must mirror space.wgsl's PlanetUniform: 15 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PlanetUniform>(), 14 * 16 + 3 * 16);
-        // + plastic
+        assert_eq!(std::mem::size_of::<PlanetUniform>(), 15 * 16 + 3 * 16);
+        // + plastic, + atmosphere
+    }
+
+    #[test]
+    fn planet_uniform_carries_the_density_of_its_type() {
+        let system = SolarSystem::generate(1);
+        for (i, p) in system.planets.iter().enumerate() {
+            let u = SpaceRenderer::planet_uniform(&system, i, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4]);
+            assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
+        }
     }
 
     #[test]

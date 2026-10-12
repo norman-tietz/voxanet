@@ -12,6 +12,7 @@ struct Flare {
     mode: vec4<f32>,   // x: 0 system depth taps, 1 G-buffer taps; y: tap radius px; zw: screen size
     camera: vec4<f32>, // planet mode: camera position (planet frame), planet radius
     light: vec4<f32>,  // planet mode: direction to the sun, cloud time
+    atmosphere: vec4<f32>, // x: atmosphere density (1 = full, 0 = vacuum)
 }
 @group(0) @binding(0) var<uniform> flare: Flare;
 @group(0) @binding(1) var g_dist: texture_2d<f32>;
@@ -51,7 +52,7 @@ fn cloud_dimming() -> f32 {
     if (flare.mode.x < 0.5) {
         return 1.0;
     }
-    return atmo_cloud_shadow(flare.camera.xyz, flare.light.xyz, flare.light.w, flare.camera.w);
+    return atmo_cloud_shadow(flare.camera.xyz, flare.light.xyz, flare.light.w, flare.camera.w, flare.atmosphere.x);
 }
 
 struct FlareOut {

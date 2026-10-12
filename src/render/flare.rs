@@ -75,6 +75,7 @@ pub struct FlareUniform {
     pub mode: [f32; 4], // x: 0 = system depth taps, 1 = G-buffer taps; y: tap radius px; zw: screen size
     pub camera: [f32; 4], // planet mode: camera position in the planet frame (xyz), planet radius (w)
     pub light: [f32; 4],  // planet mode: direction to the sun (xyz), cloud time (w)
+    pub atmosphere: [f32; 4], // x: atmosphere density (1 = full, 0 = vacuum)
 }
 
 #[cfg(test)]
@@ -155,6 +156,6 @@ mod tests {
 
     #[test]
     fn flare_uniform_is_six_vec4s() {
-        assert_eq!(std::mem::size_of::<FlareUniform>(), 6 * 16);
+        assert_eq!(std::mem::size_of::<FlareUniform>(), 7 * 16);
     }
 }

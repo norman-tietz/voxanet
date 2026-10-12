@@ -46,6 +46,7 @@ struct Atmosphere {
     star_frame: vec4<f32>, // quaternion: planet frame -> space, so the disc shows the star's own surface
     time: f32,            // seconds, for the star's boiling surface
     overcast: f32,        // 0..1 storm overhead (weather.rs overcast): greys and dims the dome
+    density: f32,         // 1 = full atmosphere, 0 = vacuum (planet/biome.rs AtmosphereDef.density)
 }
 
 // --- TONE MAPPING (ACES) ---
@@ -130,11 +131,11 @@ fn sphere_hit(origin: vec3<f32>, dir: vec3<f32>, radius: f32) -> f32 {
 // --- CLOUDS ---
 
 // how much direct sunlight at `world_pos` survives the cloud shell on the way to the sun
-fn atmo_cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32, planet_r: f32) -> f32 {
+fn atmo_cloud_shadow(world_pos: vec3<f32>, L: vec3<f32>, t: f32, planet_r: f32, density: f32) -> f32 {
     let hit_t = sphere_hit(world_pos, L, planet_r * CLOUD_ALT);
     if (hit_t < 0.0) { return 1.0; }
     let coverage = cloud_coverage_fast(normalize(world_pos + L * hit_t), t);
-    return 1.0 - coverage * CLOUD_SHADOW_STRENGTH;
+    return 1.0 - density * coverage * CLOUD_SHADOW_STRENGTH;
 }
 
 // --- SKY ---
@@ -157,13 +158,13 @@ fn atmo_ambient_daylight(pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
 // how opaque the sky is along the ray, for blending it over what lies behind (the solar system): thick,
 // sunlit atmosphere = 1; open space and the night side = 0. Daylight is the sun's elevation at the
 // ray's closest point to the planet (for a camera on the ground looking up: the camera itself).
-fn atmo_sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, planet_r: f32) -> f32 {
+fn atmo_sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, planet_r: f32, density: f32) -> f32 {
     let s_star = max(-dot(cam_pos, ray_dir), 0.0);
     let closest_point = cam_pos + ray_dir * s_star;
     let up = closest_point / max(length(closest_point), 1e-4);
     let day = smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L));
     let thick = smoothstep(SKY_SPACE_LIMB, SKY_OPAQUE_LIMB, atmo_limb(ray_dir, cam_pos, planet_r));
-    return thick * day;
+    return thick * day * density;
 }
 
 // atmosphere seen beyond the clouds: a stylised gradient from deep space into a blue dome that warms
@@ -223,7 +224,7 @@ fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
 // the sky as it looks over a black background — for fog and water reflections, which can't see what
 // lies behind: at night and in space they fade toward dark like the sky itself, not toward blue
 fn atmo_sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
-    return atmo_sky_gradient(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r);
+    return atmo_sky_gradient(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r, a.density);
 }
 
 // length of the segment from the camera to `world_pos` that lies inside the atmosphere (the sphere at
@@ -248,9 +249,9 @@ fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec
     // before); from orbit the empty space in between adds no haze — otherwise a planet seen from a few
     // radii out faded into a flat sky-coloured disc
     let dist = atmo_fog_distance(cam_pos, world_pos, a.planet_r);
-    let fog_factor = 1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5));
+    let fog_factor = (1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5))) * a.density;
     let ray_dir = normalize(world_pos - cam_pos);
-    let fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r);
+    let fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r, a.density);
     return mix(lit, fog_col, clamp(fog_factor, 0.0, 1.0));
 }
 
@@ -285,7 +286,7 @@ struct Plastic {
 fn atmo_env_analytic(R: vec3<f32>, pos: vec3<f32>, L: vec3<f32>, ground: vec3<f32>,
                      ambient: vec3<f32>, roughness: f32, a: Atmosphere) -> vec3<f32> {
     let up = normalize(pos);
-    let sky = atmo_sky_dome(R, pos, L, a) * atmo_sky_opacity(R, pos, L, a.planet_r);
+    let sky = atmo_sky_dome(R, pos, L, a) * atmo_sky_opacity(R, pos, L, a.planet_r, a.density);
     let env = mix(ground, sky, smoothstep(-0.1, 0.1, dot(R, up)));
     return mix(env, ambient, clamp(roughness, 0.05, 1.0));
 }

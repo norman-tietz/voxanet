@@ -29,6 +29,7 @@ fn cloud_coverage(dir: vec3<f32>, lod: f32) -> f32 {
 // `pixel_size` is a screen pixel's width at the hit (radians per pixel x distance): it picks the mip
 // level, explicitly, since this runs in non-uniform control flow where derivatives aren't allowed.
 fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3<f32>, a: Atmosphere) -> vec4<f32> {
+    if (a.density <= 0.0) { return vec4<f32>(0.0); }
     let up = normalize(hit);
     let thickness = a.planet_r * CLOUD_THICKNESS;
     let radial = max(abs(dot(ray_dir, up)), 0.05);
@@ -39,14 +40,14 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
     let footprint = pixel_size / length(hit) / sqrt(radial);
     let lod = clamp(log2(footprint / CLOUD_MAP_TEXEL), 0.0, CLOUD_MAP_MIPS - 1.0);
 
-    var density = 0.0;
+    var cover = 0.0;
     for (var i = 0; i < 4; i++) {
         let s = (f32(i) + 0.5) / 4.0 - 0.5;
-        density += cloud_coverage(normalize(hit + ray_dir * (s * span)), lod);
+        cover += cloud_coverage(normalize(hit + ray_dir * (s * span)), lod);
     }
-    density *= 0.25;
+    cover *= 0.25;
     // storm clouds: darker, little silver lining (the weather map at the hit)
-    let storm = weather_at(up).x;
+    let storm = weather_at(up).x * a.density;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
     let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * STORM_DARK_LEVEL, storm * STORM_DARKEN) * a.sun_color * 0.55;
@@ -54,7 +55,7 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
     let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
-    return vec4<f32>((lit + silver) * daylight, clamp(density, 0.0, 1.0));
+    return vec4<f32>((lit + silver) * daylight, clamp(cover, 0.0, 1.0) * a.density);
 }
 
 // clouds along an arbitrary ray (camera view ray, or a water reflection ray); empty if it misses the
@@ -73,10 +74,10 @@ const STORM_SHADOW: f32 = 0.25;    // extra sunlight blocked under storm clouds
 
 // how much direct sunlight survives the visible clouds (the cloud map, storms included) on the way to
 // the sun; the flare shader has no cloud map and keeps atmo_cloud_shadow's own noise
-fn atmo_cloud_shadow_map(world_pos: vec3<f32>, L: vec3<f32>, planet_r: f32) -> f32 {
+fn atmo_cloud_shadow_map(world_pos: vec3<f32>, L: vec3<f32>, planet_r: f32, density: f32) -> f32 {
     let hit_t = sphere_hit(world_pos, L, planet_r * CLOUD_ALT);
     if (hit_t < 0.0) { return 1.0; }
     let dir = normalize(world_pos + L * hit_t);
     let coverage = cloud_coverage(dir, CLOUD_SHADOW_LOD);
-    return 1.0 - coverage * (CLOUD_SHADOW_STRENGTH + weather_at(dir).x * STORM_SHADOW);
+    return 1.0 - density * coverage * (CLOUD_SHADOW_STRENGTH + weather_at(dir).x * STORM_SHADOW);
 }
