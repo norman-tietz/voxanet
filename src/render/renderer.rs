@@ -207,8 +207,9 @@ pub struct Renderer {
     precip_clock: Option<f64>, // the last planet frame's clock, for the particles' dt
     perf: Option<crate::app::perf::PerfRecorder>, // a running /perf or --bench recording (perf.rs)
     perf_message: Option<String>, // its finished summary, for the console
-    pub travel_hud: Option<String>,
-    pub warp: Option<(f32, f32, Vec3)>, // a jump's streaks: speed, scene fade, travel direction (main.rs Jump) // a running trip's target and countdown, under the compass (main.rs)
+    pub travel_hud: Option<String>, // a running trip's target and countdown, under the compass (main.rs)
+    pub warp: Option<(f32, f32, Vec3)>, // a jump's streaks: speed, scene fade, travel direction (main.rs Jump)
+    warp_flow: Option<(f64, f32)>, // their flow (warp::advance_flow) and the clock it was advanced to
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
@@ -1183,6 +1184,7 @@ impl Renderer {
             perf_message: None,
             travel_hud: None,
             warp: None,
+            warp_flow: None,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
             env_map,
             env_reset: true,
@@ -1363,6 +1365,12 @@ impl Renderer {
         planet
             .cell_at(cam_pos)
             .map_or(0.0, |id| planet.water_surface_radius(id.face, id.u, id.v))
+    }
+
+    // how much of the space scene a jump leaves visible (1 − its scene fade; 1 without a jump): the HUD
+    // over the scene (compass markers, lens flare) fades with it
+    fn warp_scene(&self) -> f32 {
+        1.0 - self.warp.map_or(0.0, |w| w.1)
     }
 
     // the lens flare's uniform for a sun at `ndc` (None: behind the camera), with `angular_radius`;
@@ -3504,7 +3512,13 @@ impl Renderer {
             &[],
         );
         // a jump's light-speed streaks over the scene, under the HUD (space/warp.rs)
+        if self.warp.is_none() {
+            self.warp_flow = None;
+        }
         if let Some((speed, fade, dir)) = self.warp {
+            let (last, flow) = self.warp_flow.unwrap_or((t, 0.0));
+            let flow = crate::space::warp::advance_flow(flow, (t - last) as f32, speed);
+            self.warp_flow = Some((t, flow));
             self.system.draw_warp(
                 &self.device,
                 &self.queue,
@@ -3514,7 +3528,7 @@ impl Renderer {
                 speed,
                 fade,
                 dir,
-                (t % 3600.0) as f32,
+                flow,
             );
         }
         self.update_fps();
@@ -3528,7 +3542,9 @@ impl Renderer {
             on_screen.map_or(0.0, |s| s.1),
             on_screen.map_or(0.0, |s| s.2),
             camera.fov_y,
-            1.0 - heat, // the heat glow already dominates near the star
+            // the heat glow already dominates near the star; a jump fades it with the scene, so the new
+            // star's flare doesn't pop up over the streaks at the switch
+            (1.0 - heat) * self.warp_scene(),
             system.star.star_type.def(),
             false,
             [0.0; 4],
@@ -4188,7 +4204,9 @@ impl Renderer {
             texts.push((mark.to_string(), x - 4.0, COMPASS_TOP, 14.0, color));
         }
 
-        // markers: (label, x, color), surface distance so "0" means you're touching it
+        // markers: (label, x, color), surface distance so "0" means you're touching it; a jump fades them
+        // with the scene, so they don't jump from the old system's bodies to the new one's at the switch
+        let marker_alpha = (self.warp_scene() * 255.0).round() as u8;
         let mut markers: Vec<(String, f32, glyphon::Color)> = Vec::new();
         let mut add_marker = |name: String, pos: glam::DVec3, radius: f64, rgb: [f32; 3]| {
             let b =
@@ -4224,7 +4242,7 @@ impl Renderer {
             markers.push((
                 label,
                 x,
-                glyphon::Color::rgb(c(rgb[0]), c(rgb[1]), c(rgb[2])),
+                glyphon::Color::rgba(c(rgb[0]), c(rgb[1]), c(rgb[2]), marker_alpha),
             ));
         };
         add_marker(
@@ -4246,6 +4264,7 @@ impl Renderer {
         // stack overlapping labels into rows instead of drawing them on top of each other
         markers.sort_by(|a, b| a.1.total_cmp(&b.1));
         let mut row_ends: Vec<f32> = Vec::new();
+        markers.retain(|_| marker_alpha > 0);
         for (label, x, color) in markers {
             let w = label.chars().count() as f32 * MARKER_CHAR_WIDTH;
             let row = match row_ends.iter().position(|&end| end + 8.0 <= x) {

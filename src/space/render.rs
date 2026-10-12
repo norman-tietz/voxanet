@@ -1392,8 +1392,6 @@ impl SpaceRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
-    // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
-    // belong to the old one
     // the jump's streaks over the finished frame in `color_view` (space/warp.rs), seen from `camera`
     #[allow(clippy::too_many_arguments)]
     pub fn draw_warp(
@@ -1406,11 +1404,11 @@ impl SpaceRenderer {
         speed: f32,
         fade: f32,
         travel_dir: Vec3,
-        time: f32,
+        flow: f32,
     ) {
         let u = crate::space::warp::WarpUniform {
             ray_dirs: Self::ray_dirs(camera.rotation, camera.fov_y, screen.0 / screen.1),
-            vanish: [travel_dir.x, travel_dir.y, travel_dir.z, time],
+            vanish: [travel_dir.x, travel_dir.y, travel_dir.z, flow],
             params: [speed, fade, screen.0, screen.1],
         };
         queue.write_buffer(&self.warp_buf, 0, bytemuck::cast_slice(&[u]));
@@ -1439,6 +1437,8 @@ impl SpaceRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
+    // a jump to another solar system: the planet meshes (keyed by planet index) and the near impostor
+    // belong to the old one
     pub fn clear_system_caches(&mut self) {
         self.planet_meshes.clear();
         self.near_impostor = None;

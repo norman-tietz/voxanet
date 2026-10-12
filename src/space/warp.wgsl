@@ -6,7 +6,7 @@
 
 struct Warp {
     ray_dirs: array<vec4<f32>, 3>, // top-left ray, per screen width, per screen height
-    vanish: vec4<f32>,             // xyz: travel direction, w: time
+    vanish: vec4<f32>,             // xyz: travel direction, w: flow (warp.rs advance_flow)
     params: vec4<f32>,             // x: speed, y: scene fade, zw: screen size
 }
 @group(0) @binding(0) var<uniform> warp: Warp;
@@ -14,11 +14,24 @@ struct Warp {
 const PI: f32 = 3.14159265;
 const SECTORS: f32 = 220.0;   // cells around the vanishing point
 const RINGS: f32 = 0.12;      // cell size along log(angle from the vanishing point)
-const MAX_CELLS: i32 = 12;    // cells a streak can span
+const MAX_LEN: f32 = 0.9;     // longest streak in log-angle units
+const LEN_GAIN: f32 = 0.8;    // streak length per speed and per radian from the vanishing point
+const MAX_CELLS: i32 = 9;     // cells a streak can span: ceil(MAX_LEN / RINGS) + 1
+const DENSITY: f32 = 0.04;    // share of cells holding a star
+const BRIGHTNESS: f32 = 2.0;
 
-fn warp_hash(p: vec2<f32>) -> vec2<f32> {
-    var q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-    return fract(sin(q) * 43758.5453);
+fn pcg(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// two uniform values in [0, 1) for the integer cell (x, y), varied by `salt`; an integer hash, since the
+// sin() hash degenerates for large cell numbers
+fn warp_hash(x: f32, y: f32, salt: u32) -> vec2<f32> {
+    let h1 = pcg(bitcast<u32>(i32(x)) ^ pcg(bitcast<u32>(i32(y)) ^ pcg(salt)));
+    let h2 = pcg(h1);
+    return vec2<f32>(f32(h1 >> 8u), f32(h2 >> 8u)) / 16777216.0;
 }
 
 @vertex
@@ -47,27 +60,37 @@ fn fs_warp(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let sector = floor((phi + PI) / (2.0 * PI) * SECTORS);
     let sector_frac = fract((phi + PI) / (2.0 * PI) * SECTORS);
     // each sector streams at its own pace and phase, so the stars don't line up in rings
-    let lane = warp_hash(vec2<f32>(sector, 17.0));
-    // radial coordinate: log of the angle, streaming outward with time × speed
+    let lane = warp_hash(sector, 0.0, 1u);
+    // radial coordinate: log of the angle, streaming outward with the flow
     let lt = log(max(theta, 0.002)) + lane.x * RINGS * 7.0;
-    let flow = warp.vanish.w * (0.4 + 2.6 * speed) * (0.7 + 0.6 * lane.y);
-    let len = 0.05 + speed * 1.1 * (0.6 + theta); // streak length in log-angle units
+    let flow = warp.vanish.w * (0.7 + 0.6 * lane.y);
+    // streak length in log-angle units: longer with speed and away from the vanishing point, capped so
+    // the loop below covers it (MAX_CELLS × RINGS ≥ MAX_LEN + RINGS)
+    let len = min(0.04 + speed * LEN_GAIN * (0.5 + theta), MAX_LEN);
     // the streak's half-width as an angle on screen, the same everywhere (a sector widens with theta)
     let across = abs(sector_frac - 0.5) * (2.0 * PI / SECTORS) * max(sin(theta), 0.02);
-    let width = 1.0 - smoothstep(0.0006, 0.0022, across);
+    let width = 1.0 - smoothstep(0.0005, 0.0018, across);
     var light = vec3<f32>(0.0);
+    // the star in cell c has its head at (c + h.y)·RINGS + flow and its tail len behind it: this pixel can
+    // lie on the streaks of cells cell0 … cell0 + ceil(len / RINGS)
     let cell0 = floor((lt - flow) / RINGS);
+    let cells = i32(ceil(len / RINGS)) + 1;
     for (var k = 0; k < MAX_CELLS; k++) {
-        let cell = cell0 - f32(k);
-        let h = warp_hash(vec2<f32>(sector, cell));
-        if (h.x > 0.14) { continue; } // most cells empty
+        if (k >= cells) { break; }
+        let cell = cell0 + f32(k);
+        let h = warp_hash(sector, cell, 2u);
+        if (h.x > DENSITY) { continue; } // most cells empty
         // the star's head and the streak trailing behind it (toward the vanishing point)
         let head = (cell + h.y) * RINGS + flow;
-        let along = (head - lt) / len; // 0 at the head, 1 at the tail
+        let g = warp_hash(sector, cell, 3u); // its own length and brightness
+        let along = (head - lt) / (len * (0.5 + 0.5 * g.x)); // 0 at the head, 1 at the tail
         if (along < 0.0 || along > 1.0) { continue; }
-        let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.85, 0.7), h.x / 0.14);
-        light += tint * width * (1.0 - along) * (1.0 - along) * 1.8;
+        let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.85, 0.7), h.x / DENSITY);
+        let fall = 1.0 - along;
+        light += tint * width * fall * fall * BRIGHTNESS * (0.3 + 0.7 * g.y * g.y);
     }
+    // thinned out right at the vanishing point, where the sectors are narrower than a streak
+    light *= smoothstep(0.02, 0.2, theta);
     // a faint blue glow around the vanishing point at speed, red-shifted toward the edges
     let glow = exp(-theta * 6.0) * 0.25 * speed * speed;
     light = light * mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.8, 0.75), smoothstep(0.6, 1.4, theta) * speed)
