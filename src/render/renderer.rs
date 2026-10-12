@@ -3526,8 +3526,11 @@ impl Renderer {
                 (
                     "weather".into(),
                     format!(
-                        "on={} particles={} fog={}",
-                        self.weather.on, self.weather.particles, self.weather.fog.on
+                        "on={} particles={} fog={} lightning={}",
+                        self.weather.on,
+                        self.weather.particles,
+                        self.weather.fog.on,
+                        self.weather.lightning.on
                     ),
                 ),
                 ("gpu_timer".into(), self.gpu_timer.is_some().to_string()),

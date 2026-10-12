@@ -25,7 +25,7 @@ const HELP_LINES: [&str; 13] = [
     "  /ao [on|off|radius <v>|rays <n>|strength <v>|samples <n>|motion <fast> <slow>]",
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
-    "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <v>|mist <v>]]   /perf <seconds> [label]",
+    "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <v>|mist <v>]|lightning [on|off|rate <v>]]   /perf <seconds> [label]",
     "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <20-500>   /map [n]   /travel <n>",
     "  /galaxy [n]   /jump <n>",
     "  /screenshot <path>             help",
@@ -486,6 +486,17 @@ mod tests {
             c.weather_request,
             Some(crate::weather::WeatherCommand::Fog(
                 crate::weather::FogArg::Density(2.0)
+            ))
+        );
+    }
+
+    #[test]
+    fn weather_lightning_command_sets_a_request() {
+        let c = console_with(&["/weather lightning rate 2"]);
+        assert_eq!(
+            c.weather_request,
+            Some(crate::weather::WeatherCommand::Lightning(
+                crate::weather::LightningArg::Rate(2.0)
             ))
         );
     }

@@ -1561,6 +1561,7 @@ impl Game {
                         | WeatherCommand::Off
                         | WeatherCommand::Particles(_)
                         | WeatherCommand::Fog(_)
+                        | WeatherCommand::Lightning(_)
                 )
             {
                 console.log(

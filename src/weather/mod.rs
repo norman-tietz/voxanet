@@ -34,7 +34,7 @@ pub(crate) const WEATHER_BAKE_SHADER: &str = concat!(
 pub const SNAPSHOT_SECS: f64 = 5.0;
 const SLOTS: u32 = 3;
 pub const WEATHER_USAGE: &str =
-    "Usage: /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <0-3>|mist <0-3>]]";
+    "Usage: /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <0-3>|mist <0-3>]|lightning [on|off|rate <0-3>]]";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FogArg {
@@ -43,6 +43,14 @@ pub enum FogArg {
     Off,
     Density(f32),
     Mist(f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LightningArg {
+    Show,
+    On,
+    Off,
+    Rate(f32),
 }
 
 const WEATHER_PERIOD: f32 = 3600.0;
@@ -325,6 +333,7 @@ pub struct WeatherSettings {
     pub on: bool,
     pub particles: bool,
     pub fog: fog::FogSettings,
+    pub lightning: lightning::LightningSettings,
     force: Option<ForceState>,
 }
 
@@ -334,6 +343,7 @@ impl Default for WeatherSettings {
             on: true,
             particles: true,
             fog: fog::FogSettings::default(),
+            lightning: lightning::LightningSettings::default(),
             force: None,
         }
     }
@@ -348,6 +358,7 @@ pub enum WeatherCommand {
     Force(Force),
     Particles(Option<bool>),
     Fog(FogArg),
+    Lightning(LightningArg),
 }
 
 impl WeatherCommand {
@@ -378,6 +389,16 @@ impl WeatherCommand {
                 _ => Err(fog::FOG_USAGE),
             },
             ["fog", ..] => Err(fog::FOG_USAGE),
+            ["lightning"] => Ok(WeatherCommand::Lightning(LightningArg::Show)),
+            ["lightning", "on"] => Ok(WeatherCommand::Lightning(LightningArg::On)),
+            ["lightning", "off"] => Ok(WeatherCommand::Lightning(LightningArg::Off)),
+            ["lightning", "rate", v] => match v.parse::<f32>() {
+                Ok(v) if (0.0..=3.0).contains(&v) => {
+                    Ok(WeatherCommand::Lightning(LightningArg::Rate(v)))
+                }
+                _ => Err(lightning::USAGE),
+            },
+            ["lightning", ..] => Err(lightning::USAGE),
             _ => Err(WEATHER_USAGE),
         }
     }
@@ -455,6 +476,25 @@ impl WeatherSettings {
                         if self.fog.on { "on" } else { "off" },
                         self.fog.density,
                         self.fog.mist
+                    ),
+                    false,
+                );
+            }
+            WeatherCommand::Lightning(arg) => {
+                match arg {
+                    LightningArg::Show => {}
+                    LightningArg::On => self.lightning.on = true,
+                    LightningArg::Off => self.lightning.on = false,
+                    LightningArg::Rate(v) => {
+                        self.lightning.rate = v;
+                        self.lightning.on = true;
+                    }
+                }
+                return (
+                    format!(
+                        "Weather lightning: {} (rate {:.1})",
+                        if self.lightning.on { "on" } else { "off" },
+                        self.lightning.rate
                     ),
                     false,
                 );
@@ -1200,6 +1240,44 @@ mod tests {
         );
         assert_eq!(s.fog.mist, 0.5);
         assert!(msg.contains("fog"), "{msg}");
+    }
+
+    #[test]
+    fn weather_lightning_command_parses_and_applies_without_a_rebake() {
+        assert_eq!(
+            WeatherCommand::parse(&["lightning"]),
+            Ok(WeatherCommand::Lightning(LightningArg::Show))
+        );
+        assert_eq!(
+            WeatherCommand::parse(&["lightning", "off"]),
+            Ok(WeatherCommand::Lightning(LightningArg::Off))
+        );
+        assert_eq!(
+            WeatherCommand::parse(&["lightning", "rate", "2"]),
+            Ok(WeatherCommand::Lightning(LightningArg::Rate(2.0)))
+        );
+        assert!(WeatherCommand::parse(&["lightning", "rate", "9"]).is_err());
+        assert!(WeatherCommand::parse(&["lightning", "rate"]).is_err());
+
+        let mut s = WeatherSettings::default();
+        assert!(s.lightning.on);
+        let (_, rebake) = s.apply(
+            WeatherCommand::Lightning(LightningArg::Off),
+            WeatherKind::Rain,
+            Vec3::Y,
+            0.0,
+        );
+        assert!(!s.lightning.on && !rebake);
+        let (msg, _) = s.apply(
+            WeatherCommand::Lightning(LightningArg::Rate(0.5)),
+            WeatherKind::Rain,
+            Vec3::Y,
+            0.0,
+        );
+        assert!(
+            s.lightning.on && s.lightning.rate == 0.5 && msg.contains("lightning"),
+            "{msg}"
+        );
     }
 
     #[test]
