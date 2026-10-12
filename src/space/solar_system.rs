@@ -711,15 +711,32 @@ mod tests {
     // the new outermost planet leaves #1-#7 as they were: all of a planet's data comes from (seed, index)
     #[test]
     fn the_first_seven_planets_are_unchanged() {
+        // literal values for seed 1, recorded before the Cratered planet was added
+        const RADII: [f32; 7] = [
+            168.48273, 228.66467, 244.23021, 118.63764, 229.99347, 128.8151, 65.814064,
+        ];
+        const ORBIT_RADII: [f64; 7] = [
+            8265.632315539202,
+            12703.207739244883,
+            17481.896074639295,
+            28813.253273767295,
+            43261.14888753833,
+            65883.98870669717,
+            92760.43226435978,
+        ];
         let s = SolarSystem::generate(1);
         for i in 0..7 {
             let (r, phase, tilt, node) = orbit_for(1, i);
             let p = &s.planets[i];
+            assert!((p.radius - RADII[i]).abs() < 1e-3, "planet {i} radius");
+            assert!(
+                (p.orbit_radius - ORBIT_RADII[i]).abs() < 1e-3,
+                "planet {i} orbit"
+            );
             assert_eq!(p.orbit_radius, r);
             assert_eq!(p.orbit_phase, phase);
             assert_eq!(p.orbit_tilt, tilt);
             assert_eq!(p.orbit_node, node);
-            assert_eq!(p.radius, planet_radius_for(1, i));
             assert_eq!(p.noise_seed, noise_seed_for(1, i));
         }
         // the outermost keeps the neighbour gap and the system stays inside the planet cap
@@ -772,7 +789,7 @@ mod tests {
         let base = INNER_ORBIT_RADIUS * ORBIT_RADIUS_GROWTH.powi(PLANET_COUNT as i32);
         assert!(p.orbit_radius >= 0.9 * base && p.orbit_radius <= 1.15 * base);
         assert!(
-            p.orbit_radius > a.planets[6].orbit_radius * 1.25,
+            p.orbit_radius > a.planets[PLANET_COUNT - 1].orbit_radius * 1.25,
             "inside the last orbit"
         );
         assert_eq!(p.planet_type, PlanetType::Ice);

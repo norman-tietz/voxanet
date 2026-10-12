@@ -148,13 +148,13 @@ use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps generated +
 const LOD_MEDIUM_DISTANCE_MULTIPLIER: f32 = 13.0;
 const LOD_NEAR_DISTANCE_MULTIPLIER: f32 = 6.0;
 
-// draw order for the atmosphere shells: farthest first. They blend without writing depth, so
-// two overlapping glows only composite correctly back to front
 // does the planet have an atmosphere to draw a shell for (density 0 = vacuum)
 pub fn has_atmosphere(planet: &Planet) -> bool {
     planet.planet_type.def().atmosphere.density > 0.0
 }
 
+// draw order for the atmosphere shells: farthest first. They blend without writing depth, so
+// two overlapping glows only composite correctly back to front
 fn back_to_front(distances: &[(usize, f32)]) -> Vec<usize> {
     let mut sorted = distances.to_vec();
     sorted.sort_by(|a, b| b.1.total_cmp(&a.1));

@@ -597,7 +597,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
     // storms are overcast: less fill light under them
-    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * ws.x * biome.atmosphere.x);
+    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * (ws.x * biome.atmosphere.x));
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
