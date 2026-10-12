@@ -12,7 +12,7 @@ use crate::planet::noise::{NoiseGenerator, TerrainShape};
 use crate::space::solar_system::Planet;
 use glam::Vec3;
 
-// fractions of this planet's own peak height (shape_relief) above sea level — the same fractions
+// fractions of this planet's own peak height (TerrainShape::relief) above sea level — the same fractions
 // material.rs's natural_type uses for rock (45%) and snow (62%)
 const ROCK_LINE: f32 = 0.45;
 const SNOW_LINE: f32 = 0.62;
@@ -29,7 +29,13 @@ pub fn generate_planet_mesh(planet: &Planet, subdivision: u32) -> (Vec<Vertex>, 
     let def = planet.planet_type.def();
     let generator = NoiseGenerator::new(planet.noise_seed);
     // lakes like the baked planet (Planet::bake: liquid planet types)
-    let shape = TerrainShape::new(res, &generator, planet.planet_type, def.liquid.is_some());
+    let shape = TerrainShape::tweaked(
+        res,
+        &generator,
+        planet.planet_type,
+        def.liquid.is_some(),
+        planet.traits.terrain(),
+    );
 
     // TerrainShape returns offsets in layers from sea level, like the real engine's; per vertex the
     // carved height and, inside a lake below its level, that level
@@ -65,7 +71,7 @@ pub fn generate_planet_mesh(planet: &Planet, subdivision: u32) -> (Vec<Vertex>, 
         normals[c] += face_normal;
     }
 
-    let relief = shape_relief(res as f32 / 2.0);
+    let relief = shape.relief();
 
     let verts = (0..positions.len())
         .map(|i| {
@@ -154,11 +160,7 @@ pub fn near_impostor_mesh(data: &crate::planet::data::PlanetData) -> (Vec<Vertex
 // (the voxel engine uses the radius of its highest natural peak; this is the same height without a bake)
 pub fn storm_base(planet: &crate::space::solar_system::Planet) -> f32 {
     let r = planet.voxel_resolution() as f32 / 2.0;
-    r + shape_relief(r)
-}
-
-fn shape_relief(radius: f32) -> f32 {
-    (3.0 * radius.sqrt()).min(0.2 * radius)
+    r + (3.0 * r.sqrt() * planet.traits.relief).min(0.2 * r)
 }
 
 #[cfg(test)]
@@ -264,6 +266,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tweaked_impostor_matches_its_bake() {
+        let mut planet = test_planet(9, PlanetType::EarthLike);
+        planet.traits.relief = 1.4;
+        planet.traits.land_shift = 0.1;
+        let res = planet.voxel_resolution();
+        let g = NoiseGenerator::new(planet.noise_seed);
+        let shape =
+            TerrainShape::tweaked(res, &g, planet.planet_type, true, planet.traits.terrain());
+        let baked = PlanetTerrain::for_planet(
+            res,
+            planet.noise_seed,
+            planet.planet_type,
+            true,
+            planet.traits.terrain(),
+        );
+        let (lo, hi) = baked.height_range();
+        let sea = (res / 2) as f32;
+        let r = res as f32 / 2.0;
+        assert!((shape.relief() - (3.0 * r.sqrt() * 1.4).min(0.2 * r)).abs() < 1e-4);
+        assert!((hi as f32 - sea) <= 1.2 * shape.relief() + 1.0);
+        assert!(lo >= 1);
+        // the mesh is built from that shape
+        let (unit_verts, _) = crate::space::icosphere::generate(2);
+        let (verts, _) = generate_planet_mesh(&planet, 2);
+        for (dir, v) in unit_verts.iter().zip(&verts) {
+            let h = shape.sample(&g, *dir).height;
+            assert!(h <= 1.2 * shape.relief() + 1.0);
+            assert!(Vec3::from_array(v.pos).length() > 0.0);
+        }
+    }
+
     fn test_planet(noise_seed: u32, planet_type: PlanetType) -> Planet {
         Planet {
             orbit_radius: 8_000.0,
@@ -274,6 +308,7 @@ mod tests {
             radius: 100.0,
             planet_type,
             noise_seed,
+            traits: crate::planet::traits::PlanetTraits::NEUTRAL,
         }
     }
 

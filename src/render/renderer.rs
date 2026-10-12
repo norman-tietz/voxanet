@@ -3927,7 +3927,7 @@ impl Renderer {
             let lines = [
                 format!("#{} {}", i + 1, def.name),
                 format!("radius {:.0}", p.radius),
-                format!("day {:.0} s", def.day_length_secs),
+                format!("day {:.0} s", p.day_length()),
                 format!("liquid {}", def.liquid.map_or("none", |l| l.name)),
                 format!(
                     "distance {}",

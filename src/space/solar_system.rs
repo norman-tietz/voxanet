@@ -143,7 +143,8 @@ pub struct Planet {
     pub radius: f32,
     pub planet_type: PlanetType,
     pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/impostor.rs);
-                         // independent of planet_radius_for's hash so radius and terrain shape don't correlate
+    // independent of planet_radius_for's hash so radius and terrain shape don't correlate
+    pub traits: crate::planet::traits::PlanetTraits, // per-planet variation (NEUTRAL = the type exactly)
 }
 
 #[derive(Debug)]
@@ -186,6 +187,7 @@ impl SolarSystem {
                     radius: planet_radius_for(seed, i),
                     planet_type: PlanetType::ALL[i % PlanetType::ALL.len()],
                     noise_seed: noise_seed_for(seed, i),
+                    traits: crate::planet::traits::PlanetTraits::NEUTRAL,
                 }
             })
             .collect();
@@ -233,6 +235,7 @@ impl SolarSystem {
             radius,
             planet_type,
             noise_seed: noise_seed_for(self.seed, i),
+            traits: crate::planet::traits::PlanetTraits::NEUTRAL,
         });
         Ok(i)
     }
@@ -341,8 +344,12 @@ impl Planet {
 
     // how fast the planet's frame turns about +Y, rad/s (spin_angle)
     pub fn spin_rate(&self) -> f64 {
-        let day = self.planet_type.def().day_length_secs as f64;
-        std::f64::consts::TAU / day + self.orbit_speed
+        std::f64::consts::TAU / self.day_length() + self.orbit_speed
+    }
+
+    // seconds per solar day: the type's day length scaled by this planet's trait
+    pub fn day_length(&self) -> f64 {
+        self.planet_type.def().day_length_secs as f64 * self.traits.day_scale as f64
     }
 
     fn spin(&self, t: f64) -> DQuat {
@@ -389,10 +396,11 @@ impl Planet {
 
     // the real voxel planet for this planet: own seed, matching size, own planet type
     pub fn bake(&self) -> crate::planet::data::PlanetData {
-        crate::planet::data::PlanetData::new_for_type(
+        crate::planet::data::PlanetData::new_for_planet(
             self.voxel_resolution(),
             self.noise_seed,
             self.planet_type,
+            self.traits,
         )
     }
 
@@ -1209,6 +1217,26 @@ mod tests {
     // the spin includes the orbit rate, so a day lasts exactly the planet type's day length (the
     // same as on the home planet) despite the planet also moving around the star
     #[test]
+    fn the_solar_day_follows_the_scaled_day_length() {
+        let mut p = SolarSystem::generate(1).planets[2];
+        p.orbit_tilt = 0.0;
+        p.traits.day_scale = 1.5;
+        let day = p.day_length();
+        assert!((day - 1.5 * p.planet_type.def().day_length_secs as f64).abs() < 1e-9);
+        let star = DVec3::ZERO;
+        let a = p.sun_dir_in_planet_frame(star, 5.0);
+        let b = p.sun_dir_in_planet_frame(star, 5.0 + day);
+        assert!((a - b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn bake_carries_the_traits() {
+        let mut p = SolarSystem::generate(1).planets[6];
+        p.traits.gravity = 0.7;
+        assert_eq!(p.bake().traits.gravity, 0.7);
+    }
+
+    #[test]
     fn solar_day_equals_the_planet_types_day_length() {
         let g = SolarSystem::generate(1);
         // exact for an orbit in the common plane; on a tilted orbit (spin axis still +Y) the sun's height
@@ -1220,7 +1248,7 @@ mod tests {
         };
         for p in g.planets.iter().chain([&flat]) {
             let tolerance = 2.0 * p.orbit_tilt.sin() as f32 + 1e-3;
-            let day = p.planet_type.def().day_length_secs as f64;
+            let day = p.day_length();
             let morning = p.sun_dir_in_planet_frame(g.star.position(), 5.0);
             let next_morning = p.sun_dir_in_planet_frame(g.star.position(), 5.0 + day);
             let evening = p.sun_dir_in_planet_frame(g.star.position(), 5.0 + day / 2.0);
