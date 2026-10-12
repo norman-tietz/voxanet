@@ -1,3 +1,4 @@
+pub mod bolt;
 pub mod fog;
 pub mod lightning;
 pub mod precipitation;
