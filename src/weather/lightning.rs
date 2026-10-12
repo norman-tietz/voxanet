@@ -204,6 +204,22 @@ pub fn gpu_strikes(strikes: &[Strike]) -> [[f32; 4]; MAX_STRIKES] {
     out
 }
 
+// the strikes to draw this frame in the voxel frame: none with lightning or the weather off
+pub fn frame_strikes(
+    kind: WeatherKind,
+    settings: &LightningSettings,
+    weather_on: bool,
+    planet_radius: f32,
+    cam: Vec3,
+    t: f32,
+    force: &WeatherForce,
+) -> Vec<Strike> {
+    if !settings.on || !weather_on {
+        return vec![];
+    }
+    active_strikes(kind, settings.rate, planet_radius, cam, RANGE, t, force)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +514,25 @@ mod tests {
             }
             assert!(flash_at(&active_strikes(k, 3.0, R, cam, f32::MAX, 10.0, &f), cam).is_finite());
         }
+    }
+
+    #[test]
+    fn frame_strikes_are_empty_when_lightning_or_weather_is_off() {
+        let f = full_storm();
+        let k = kind(PlanetType::EarthLike);
+        let on = LightningSettings::default();
+        let off = LightningSettings { on: false, ..on };
+        let mut found = false;
+        let mut t = 0.0;
+        while t < 120.0 {
+            found |= !frame_strikes(k, &on, true, R, Vec3::Y * R, t, &f).is_empty();
+            assert!(frame_strikes(k, &off, true, R, Vec3::Y * R, t, &f).is_empty());
+            assert!(
+                frame_strikes(k, &on, false, R, Vec3::Y * R, t, &f).is_empty(),
+                "weather off"
+            );
+            t += 0.25;
+        }
+        assert!(found);
     }
 }

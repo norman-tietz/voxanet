@@ -232,6 +232,7 @@ pub struct Renderer {
     warp_flow: Option<(f64, f32)>, // their flow (warp::advance_flow) and the clock it was advanced to
     pub fog_wind: glam::Vec3,      // the storm fog's scrolled offset (weather/fog.rs)
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
+    pub strikes: Vec<crate::weather::lightning::Strike>, // this frame's lightning strikes near the camera
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
     env_reset: bool, // the environment map no longer fits: bake it whole on the next planet frame
@@ -1214,6 +1215,7 @@ impl Renderer {
             warp_flow: None,
             fog_wind: glam::Vec3::ZERO,
             weather_force: crate::weather::WeatherSettings::default().force_uniform(),
+            strikes: Vec::new(),
             env_map,
             env_reset: true,
 
@@ -2674,6 +2676,22 @@ impl Renderer {
         )
         .uniform();
 
+        // lightning (weather/lightning.rs): the strikes near the camera, the scene flash they cause
+        self.strikes = crate::weather::lightning::frame_strikes(
+            kind,
+            &self.weather.lightning,
+            self.weather.on,
+            planet.resolution as f32 * 0.5,
+            cam_pos,
+            time,
+            &self.weather_force,
+        );
+        let mut flash = crate::weather::lightning::flash_at(&self.strikes, cam_pos);
+        if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
+            flash *= 0.25; // under water
+        }
+        let strikes = crate::weather::lightning::gpu_strikes(&self.strikes);
+
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
@@ -2712,8 +2730,8 @@ impl Renderer {
             fog: fog[0],
             fog_tint: fog[1],
             fog_wind: fog[2],
-            flash: [0.0; 4],
-            strikes: [[0.0; 4]; 6],
+            flash: [flash, 0.0, 0.0, 0.0],
+            strikes,
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
