@@ -16,6 +16,8 @@ struct Global {
     fog: vec4<f32>,      // x: storm at the camera, y: storm fog extinction at storm 1 (0 = off), z: ground mist, w: mist base radius (weather/fog.rs)
     fog_tint: vec4<f32>, // rgb: the storm haze's colour
     fog_wind: vec4<f32>, // xyz: the structure's scroll offset, w: storm_base (radius of the highest peak)
+    flash: vec4<f32>,    // x: the lightning's scene flash at the camera (weather/lightning.rs)
+    strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame surface position, w intensity
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -521,6 +523,8 @@ fn engine_atmosphere() -> Atmosphere {
         global.screen.w,
         global.weather.x,
         biome.atmosphere.x,
+        global.flash.x,
+        global.strikes,
     );
 }
 
@@ -608,7 +612,8 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
     // storms are overcast: less fill light under them
-    let ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * (ws.x * biome.atmosphere.x));
+    var ambient_light = mix(ground, biome.sky_zenith.rgb * sky_light, hemi_factor) * sa.y * (1.0 - STORM_FILL_DROP * (ws.x * biome.atmosphere.x));
+    ambient_light += LIGHTNING_COLOR * global.flash.x * LIGHTNING_AMBIENT_GAIN * sa.y;
 
     // C. Fresnel Rim
     // Adds a subtle glow at grazing angles (atmosphere dust effect)
@@ -1129,7 +1134,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     let NdotL = max(dot(up, L), 0.0);
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
-    let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L);
+    let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L) + LIGHTNING_COLOR * global.flash.x * LIGHTNING_AMBIENT_GAIN;
     var color = body * (biome.sun.rgb * NdotL * shadow + sky_fill);
     if (glowing) {
         color = body * 2.5; // emissive: pushed above 1.0 so ACES gives it a hot, blown-out look

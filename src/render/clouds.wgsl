@@ -23,6 +23,21 @@ fn cloud_coverage(dir: vec3<f32>, lod: f32) -> f32 {
     return smoothstep(CLOUD_COVERAGE, CLOUD_COVERAGE + CLOUD_SOFTNESS, mix(a, b, cloud_params.slots.z));
 }
 
+// the glow strikes give the clouds around them: a Gaussian blob on the cloud shell around each strike's
+// point, in the lightning's colour (exactly 0 without strikes)
+fn lightning_cloud_glow(hit: vec3<f32>, a: Atmosphere) -> vec3<f32> {
+    var g = 0.0;
+    for (var i = 0; i < 6; i++) {
+        let s = a.strikes[i];
+        if (s.w > 0.0) {
+            let p = normalize(s.xyz) * length(hit);
+            let d = distance(hit, p) / (a.planet_r * LIGHTNING_GLOW_RADIUS * CLOUD_ALT);
+            g += s.w * exp(-d * d);
+        }
+    }
+    return LIGHTNING_COLOR * g * LIGHTNING_CLOUD_GAIN;
+}
+
 // cloud colour and coverage at `hit` (a point already known to be on the shell). Raymarches a short span
 // around it along the view ray instead of taking one sample: at a grazing/horizon angle that span covers
 // far more of the shell's thickness, so clouds naturally thicken and brighten near the horizon.
@@ -55,7 +70,8 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black
     let daylight = mix(CLOUD_NIGHT_BRIGHTNESS, 1.0, smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(up, L)));
-    return vec4<f32>((lit + silver) * daylight, clamp(cover, 0.0, 1.0) * a.density);
+    let glow = lightning_cloud_glow(hit, a) * (0.3 + 0.7 * clamp(cover, 0.0, 1.0));
+    return vec4<f32>((lit + silver) * daylight + glow, clamp(cover, 0.0, 1.0) * a.density);
 }
 
 // clouds along an arbitrary ray (camera view ray, or a water reflection ray); empty if it misses the

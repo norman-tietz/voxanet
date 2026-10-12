@@ -29,6 +29,12 @@ const CLOUD_NIGHT_BRIGHTNESS: f32 = 0.06;
 // sky light (ambient, ground bounce, rim) left on the night side, relative to daylight: dim and cool,
 // like moonlight, so terrain stays readable at night (atmo_ambient_daylight)
 const NIGHT_AMBIENT = vec3<f32>(0.10, 0.12, 0.17);
+// lightning (weather/lightning.rs mirrors the radius)
+const LIGHTNING_GLOW_RADIUS: f32 = 0.35;  // cloud glow radius at the shell, in planet radii
+const LIGHTNING_COLOR = vec3<f32>(0.55, 0.65, 1.0); // cool blue-white
+const LIGHTNING_CLOUD_GAIN: f32 = 6.0;    // how bright a strike makes the clouds around it
+const LIGHTNING_AMBIENT_GAIN: f32 = 1.2;  // sky fill added at full scene flash
+const LIGHTNING_DOME_GAIN: f32 = 0.6;     // the dome's brightening at full scene flash
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
 // storm and mist fog (weather/fog.rs mirrors these)
@@ -57,6 +63,8 @@ struct Atmosphere {
     time: f32,            // seconds, for the star's boiling surface
     overcast: f32,        // 0..1 storm overhead (weather.rs overcast): greys and dims the dome
     density: f32,         // 1 = full atmosphere, 0 = vacuum (planet/biome.rs AtmosphereDef.density)
+    flash: f32,           // 0..1 scene flash at the camera (weather/lightning.rs flash_at)
+    strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame position on the surface, w intensity
 }
 
 // the weather's fog at the camera (weather/fog.rs FogParams)
@@ -207,7 +215,7 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
     // an overcast sky: greyer and darker under a storm (up to 40 %)
     let grey = vec3<f32>(dot(dome, vec3<f32>(0.3, 0.59, 0.11)));
     let dull = mix(dome, grey, OVERCAST_GREY * a.overcast) * (1.0 - OVERCAST_DIM * a.overcast);
-    return mix(a.space_color, dull, limb);
+    return mix(a.space_color, dull + LIGHTNING_COLOR * a.flash * LIGHTNING_DOME_GAIN, limb);
 }
 
 // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it out

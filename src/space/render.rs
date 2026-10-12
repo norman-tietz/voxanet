@@ -115,8 +115,10 @@ struct PlanetUniform {
     light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
     weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: [f32; 4],
-    atmosphere: [f32; 4], // x: atmosphere density (AtmosphereDef.density)
+    atmosphere: [f32; 4],   // x: atmosphere density (AtmosphereDef.density)
     fog_tint: [f32; 4], // rgb: the storm fog's tint, w: its peak extinction x the setting (0 = off)
+    flash: [f32; 4],    // x: the lightning's scene flash at the impostor's camera
+    strikes: [[f32; 4]; 6], // active strikes: xyz planet-frame surface position, w intensity
     model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 
@@ -1274,6 +1276,8 @@ impl SpaceRenderer {
                 ));
                 [f.tint[0], f.tint[1], f.tint[2], f.peak * fog_scale]
             },
+            flash: [0.0; 4],
+            strikes: [[0.0; 4]; 6],
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1578,11 +1582,14 @@ mod tests {
     }
     use crate::space::solar_system::SolarSystem;
 
-    // PlanetUniform must mirror space.wgsl's PlanetUniform: 15 vec4s + a mat3x3 (3 × 16 bytes)
+    // PlanetUniform must mirror space.wgsl's PlanetUniform: 23 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PlanetUniform>(), 16 * 16 + 3 * 16);
-        // + plastic, + atmosphere, + fog_tint
+        assert_eq!(
+            std::mem::size_of::<PlanetUniform>(),
+            (16 + 1 + 6) * 16 + 3 * 16
+        );
+        // + plastic, + atmosphere, + fog_tint, + flash, + strikes
     }
 
     #[test]

@@ -119,6 +119,8 @@ struct PlanetUniform {
     weather_cover: vec4<f32>,
     atmosphere: vec4<f32>,    // x: atmosphere density (1 = full, 0 = vacuum), y: radius of the highest terrain (storm fog base)
     fog_tint: vec4<f32>,      // rgb: the storm fog's tint, w: peak extinction x setting (0 = off)
+    flash: vec4<f32>,         // x: the lightning's scene flash at the impostor's camera
+    strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame surface position, w intensity
     model: mat3x3<f32>,     // planet frame -> space rotation: the planet's spin at this time
 }
 
@@ -140,6 +142,8 @@ fn planet_atmosphere() -> Atmosphere {
         camera.screen.z,
         0.0, // no overcast: seen from outside, not standing under a storm
         planet.atmosphere.x,
+        planet.flash.x,
+        planet.strikes,
     );
 }
 
@@ -220,7 +224,8 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let sky_light = atmo_ambient_daylight(in.local_pos, L);
     // the engine's fill light: the ground's bounce in the surface's colour below, sky above (shade())
     let ground = atmo_ground_bounce(albedo, in.local_pos, L, sun, planet.light.x);
-    let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - STORM_FILL_DROP * (ws.x * a.density));
+    let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - STORM_FILL_DROP * (ws.x * a.density))
+        + LIGHTNING_COLOR * planet.flash.x * LIGHTNING_AMBIENT_GAIN;
     let rim = a.sky_zenith * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.2 * sky_light;
     // the voxel terrain's plastic (atmosphere.wgsl), base roughness, no shadows or AO out here
     let env = atmo_env_analytic(reflect(-V, N), in.local_pos, L, ground, ambient, wm.roughness, a);

@@ -71,6 +71,8 @@ pub struct GlobalUniform {
     pub fog: [f32; 4], // x: storm at the camera, y: storm fog extinction at storm 1, z: ground mist, w: mist base radius (weather/fog.rs)
     pub fog_tint: [f32; 4], // rgb: the storm haze's colour
     pub fog_wind: [f32; 4], // xyz: the structure's scroll offset
+    pub flash: [f32; 4], // x: the lightning's scene flash at the camera (weather/lightning.rs)
+    pub strikes: [[f32; 4]; 6], // active strikes: xyz planet-frame surface position, w intensity
 }
 
 #[repr(C)]
@@ -1085,6 +1087,8 @@ impl Renderer {
             fog: [0.0; 4],
             fog_tint: [0.0; 4],
             fog_wind: [0.0; 4],
+            flash: [0.0; 4],
+            strikes: [[0.0; 4]; 6],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2708,6 +2712,8 @@ impl Renderer {
             fog: fog[0],
             fog_tint: fog[1],
             fog_wind: fog[2],
+            flash: [0.0; 4],
+            strikes: [[0.0; 4]; 6],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -4989,6 +4995,12 @@ pub(crate) mod tests {
                 .contains("global.screen.z"),
             "the underwater check comes before the fog is returned"
         );
+    }
+
+    #[test]
+    fn the_scene_shader_flashes_and_glows() {
+        assert!(SCENE_SHADER.contains("a.flash") || SCENE_SHADER.contains("global.flash"));
+        assert!(SCENE_SHADER.contains("lightning_cloud_glow("));
     }
 
     #[test]
