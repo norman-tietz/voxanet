@@ -66,6 +66,21 @@ pub(crate) struct TerrainSample {
     pub lake: Option<usize>, // the lake whose region contains the direction
 }
 
+// per-planet terrain variation (PlanetTraits::terrain): relief scales R before its 20 %-of-radius cap,
+// land_shift adds to the continent mask's land_offset
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainTweaks {
+    pub relief: f32,
+    pub land_shift: f32,
+}
+
+impl TerrainTweaks {
+    pub const NEUTRAL: Self = Self {
+        relief: 1.0,
+        land_shift: 0.0,
+    };
+}
+
 pub(crate) struct TerrainShape {
     relief: f32,    // highest mountains above sea level, in layers
     hill_freq: f32, // noise frequencies on the unit sphere (cycles per radian)
@@ -73,6 +88,7 @@ pub(crate) struct TerrainShape {
     range_freq: f32,
     resolution: u32,
     planet_type: PlanetType,
+    land_shift: f32,
     lakes: Vec<Lake>,
 }
 
@@ -83,20 +99,43 @@ impl TerrainShape {
         planet_type: PlanetType,
         with_lakes: bool,
     ) -> Self {
+        Self::tweaked(
+            resolution,
+            g,
+            planet_type,
+            with_lakes,
+            TerrainTweaks::NEUTRAL,
+        )
+    }
+
+    pub(crate) fn tweaked(
+        resolution: u32,
+        g: &NoiseGenerator,
+        planet_type: PlanetType,
+        with_lakes: bool,
+        tweaks: TerrainTweaks,
+    ) -> Self {
         let radius = resolution as f32 / 2.0;
         let mut shape = Self {
-            relief: (3.0 * radius.sqrt()).min(0.2 * radius),
+            relief: (3.0 * radius.sqrt() * tweaks.relief).min(0.2 * radius),
             hill_freq: (radius / 35.0).max(2.0),
             ridge_freq: (radius / 120.0).max(2.5),
             range_freq: (radius / 400.0).max(1.5),
             resolution,
             planet_type,
+            land_shift: tweaks.land_shift,
             lakes: Vec::new(),
         };
         if with_lakes {
             shape.lakes = shape.place_lakes(g);
         }
         shape
+    }
+
+    // highest mountains above sea level, in layers (the impostors' colour bands use it)
+    #[allow(dead_code)]
+    pub(crate) fn relief(&self) -> f32 {
+        self.relief
     }
 
     pub(crate) fn lakes(&self) -> &[Lake] {
@@ -219,7 +258,9 @@ impl TerrainShape {
 
     // the continent mask (low-frequency, positive = land), including the type's land offset
     pub(crate) fn continent(&self, g: &NoiseGenerator, dir: Vec3) -> f32 {
-        g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4) + land_offset(self.planet_type)
+        g.fbm(dir * 1.3 + Vec3::new(17.1, 3.7, 9.2), 4)
+            + land_offset(self.planet_type)
+            + self.land_shift
     }
 
     // the three crater layers of Cratered: cell size in world units at sea level, depth of the bowl and
@@ -604,9 +645,20 @@ impl PlanetTerrain {
 
     // the terrain of a planet type (lakes only where the caller says so)
     pub fn for_type(resolution: u32, seed: u32, planet_type: PlanetType, lakes: bool) -> Self {
+        Self::for_planet(resolution, seed, planet_type, lakes, TerrainTweaks::NEUTRAL)
+    }
+
+    // the same with a planet's own relief and land share
+    pub fn for_planet(
+        resolution: u32,
+        seed: u32,
+        planet_type: PlanetType,
+        lakes: bool,
+        tweaks: TerrainTweaks,
+    ) -> Self {
         use rayon::prelude::*;
         let generator = NoiseGenerator::new(seed);
-        let shape = TerrainShape::new(resolution, &generator, planet_type, lakes);
+        let shape = TerrainShape::tweaked(resolution, &generator, planet_type, lakes, tweaks);
         let sea_level = resolution / 2;
         // index 0: the sea; k + 1: lake k
         let water_levels: Vec<u32> = std::iter::once(sea_level)

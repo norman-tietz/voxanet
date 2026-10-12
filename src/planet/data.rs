@@ -3,6 +3,7 @@
 use crate::planet::biome::PlanetType;
 use crate::planet::material::{self, BlockType};
 use crate::planet::noise::PlanetTerrain;
+use crate::planet::traits::PlanetTraits;
 use bytemuck::{Pod, Zeroable};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -192,6 +193,9 @@ pub struct PlanetData {
     // surface the low-poly terrain is drawn on (blocks stay the truth; lowpoly.rs)
     pub smooth: Arc<Vec<f32>>,
     pub planet_type: PlanetType,
+    // the planet's own variation (relief and land share are baked into the terrain; the rest is read
+    // by the renderer and physics)
+    pub traits: PlanetTraits,
     // the noise seed this planet was baked with (Planet::noise_seed, HOME_SEED for test planets);
     // edits record it so they're only restored onto the same terrain
     pub seed: u32,
@@ -208,21 +212,39 @@ impl PlanetData {
         println!("Generating Terrain Noise Map for res {}...", resolution);
         let terrain = PlanetTerrain::new(resolution, seed); // calculate once
         println!("Terrain Generation Complete.");
-        Self::from_terrain(resolution, seed, terrain, PlanetType::EarthLike)
+        Self::from_terrain(
+            resolution,
+            seed,
+            terrain,
+            PlanetType::EarthLike,
+            PlanetTraits::NEUTRAL,
+        )
     }
 
     // a planet baked for its type: liquid planets get lakes (decided here, at bake time; switching the
     // type later keeps the terrain)
     pub fn new_for_type(resolution: u32, seed: u32, planet_type: PlanetType) -> Self {
+        Self::new_for_planet(resolution, seed, planet_type, PlanetTraits::NEUTRAL)
+    }
+
+    // a planet baked for its type and its own traits (relief and land share shape the terrain; the rest
+    // is read by the renderer and physics)
+    pub fn new_for_planet(
+        resolution: u32,
+        seed: u32,
+        planet_type: PlanetType,
+        traits: PlanetTraits,
+    ) -> Self {
         println!("Generating Terrain Noise Map for res {}...", resolution);
-        let terrain = PlanetTerrain::for_type(
+        let terrain = PlanetTerrain::for_planet(
             resolution,
             seed,
             planet_type,
             planet_type.def().liquid.is_some(),
+            traits.terrain(),
         );
         println!("Terrain Generation Complete.");
-        Self::from_terrain(resolution, seed, terrain, planet_type)
+        Self::from_terrain(resolution, seed, terrain, planet_type, traits)
     }
 
     fn from_terrain(
@@ -230,6 +252,7 @@ impl PlanetData {
         seed: u32,
         terrain: PlanetTerrain,
         planet_type: PlanetType,
+        traits: PlanetTraits,
     ) -> Self {
         let smooth = Self::bake_smooth(&terrain, resolution, planet_type);
         Self {
@@ -239,6 +262,7 @@ impl PlanetData {
             terrain,
             smooth,
             planet_type,
+            traits,
             seed,
             cells: CellShape::Square,
         }
@@ -782,6 +806,61 @@ fn spawn_samples() -> impl Iterator<Item = glam::Vec3> {
 pub(crate) mod tests {
     use super::*;
     use crate::planet::biome::PlanetType;
+
+    #[test]
+    fn neutral_traits_bake_todays_terrain() {
+        let a = PlanetData::new_for_type(64, 7, PlanetType::Volcanic);
+        let b = PlanetData::new_for_planet(64, 7, PlanetType::Volcanic, PlanetTraits::NEUTRAL);
+        assert_eq!(a.terrain.height_range(), b.terrain.height_range());
+        for f in 0..6u8 {
+            for v in 0..64 {
+                for u in 0..64 {
+                    assert_eq!(a.terrain.get_height(f, u, v), b.terrain.get_height(f, u, v));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relief_scales_the_height_range() {
+        let traits = |relief| PlanetTraits {
+            relief,
+            ..PlanetTraits::NEUTRAL
+        };
+        let span = |p: &PlanetData| {
+            let (lo, hi) = p.terrain.height_range();
+            hi - lo
+        };
+        let flat = PlanetData::new_for_planet(400, 7, PlanetType::EarthLike, traits(0.7));
+        let rough = PlanetData::new_for_planet(400, 7, PlanetType::EarthLike, traits(1.4));
+        assert!(
+            span(&rough) > span(&flat),
+            "{} vs {}",
+            span(&rough),
+            span(&flat)
+        );
+    }
+
+    #[test]
+    fn land_shift_moves_the_land_share() {
+        let land = |shift| {
+            let p = PlanetData::new_for_planet(
+                64,
+                7,
+                PlanetType::EarthLike,
+                PlanetTraits {
+                    land_shift: shift,
+                    ..PlanetTraits::NEUTRAL
+                },
+            );
+            let sea = p.terrain.sea_level();
+            (0..6u8)
+                .flat_map(|f| (0..64).flat_map(move |v| (0..64).map(move |u| (f, u, v))))
+                .filter(|&(f, u, v)| p.terrain.get_height(f, u, v) > sea)
+                .count()
+        };
+        assert!(land(0.15) > land(0.0) && land(0.0) > land(-0.15));
+    }
 
     // res 32: small enough to generate fast in a test, large enough that continent noise
     // reliably produces both land and ocean columns
