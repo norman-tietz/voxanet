@@ -52,7 +52,7 @@ fn damage_this_tick(depth: Option<f32>, damage_rate: f32, dt: f32) -> f32 {
     }
 }
 
-// jump strength wading in a thick liquid: a 1.3-block hop (8 × 0.7 at gravity 12), enough for a
+// jump strength wading in a thick liquid: a 1.3-block hop (8 × 0.7 at gravity 12 × the planet's gravity), enough for a
 // one-block ledge out of it
 const THICK_JUMP: f32 = 0.7;
 
@@ -544,7 +544,7 @@ impl Player {
 
         // --- GRAVITY ---
         if !flying {
-            self.velocity -= up * Physics::GRAVITY * dt;
+            self.velocity -= up * Physics::GRAVITY * planet.traits.gravity * dt;
         }
         if let Some(l) = thick {
             let vert = self.velocity.dot(up);
@@ -635,7 +635,7 @@ impl Player {
 
         // buoyancy: balances gravity when floating with the head above water, slightly stronger below
         let lift = (depth / FLOAT_DEPTH).min(MAX_BUOYANCY);
-        self.velocity += up * Physics::GRAVITY * (lift - 1.0) * dt;
+        self.velocity += up * Physics::GRAVITY * planet.traits.gravity * (lift - 1.0) * dt;
         // water drag towards the swimming velocity
         self.velocity += (desired - self.velocity) * (WATER_DRAG * dt).min(1.0);
 
@@ -684,6 +684,35 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+
+    // a jump goes about 1/gravity as high
+    #[test]
+    fn low_gravity_jumps_higher() {
+        let apex = |gravity: f32| {
+            let mut planet = PlanetData::new(32);
+            planet.traits.gravity = gravity;
+            let mut player = Player::new();
+            let dir =
+                crate::meshing::gen::CoordSystem::get_block_center(0, 10, 10, 30, 32).normalize();
+            player.spawn(dir * crate::meshing::gen::CoordSystem::get_layer_radius(30, 32));
+            let start = player.position.length();
+            player.velocity = dir * 6.0;
+            let mut top = start;
+            for _ in 0..240 {
+                tick(
+                    &mut player,
+                    &planet,
+                    (0.0, 0.0),
+                    FlightKeys::default(),
+                    false,
+                );
+                top = top.max(player.position.length());
+            }
+            top - start
+        };
+        let ratio = apex(0.5) / apex(1.0);
+        assert!((ratio - 2.0).abs() < 0.2, "ratio {ratio}");
+    }
     use super::*;
     use crate::player::controller::FlightKeys;
 

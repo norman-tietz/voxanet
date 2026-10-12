@@ -3930,6 +3930,14 @@ impl Renderer {
                 format!("#{} {}", i + 1, def.name),
                 format!("radius {:.0}", p.radius),
                 format!("day {:.0} s", p.day_length()),
+                format!("gravity {:.1} g", p.traits.gravity),
+                if crate::weather::WeatherKind::for_planet(p.planet_type)
+                    == crate::weather::WeatherKind::None
+                {
+                    "no weather".to_string()
+                } else {
+                    format!("weather {}", weather_word(p.traits.storminess))
+                },
                 format!("liquid {}", def.liquid.map_or("none", |l| l.name)),
                 format!(
                     "distance {}",
@@ -5275,5 +5283,28 @@ pub(crate) mod tests {
         let keys = chunks_to_refresh(id, &planet);
         assert!(keys.iter().any(|k| k.face == 0));
         assert!(keys.iter().any(|k| k.face == 2), "{keys:?}");
+    }
+}
+
+// the map panel's word for a planet's storminess
+fn weather_word(storminess: f32) -> &'static str {
+    if storminess < 0.8 {
+        "calm"
+    } else if storminess > 1.2 {
+        "stormy"
+    } else {
+        "changeable"
+    }
+}
+
+#[cfg(test)]
+mod weather_word_tests {
+    use super::*;
+
+    #[test]
+    fn weather_words() {
+        assert_eq!(weather_word(0.5), "calm");
+        assert_eq!(weather_word(1.0), "changeable");
+        assert_eq!(weather_word(1.5), "stormy");
     }
 }
