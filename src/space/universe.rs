@@ -38,10 +38,15 @@ impl Universe {
         if target == self.current {
             return Err((current_system, "You are here."));
         }
-        let next = self
-            .parked
-            .remove(&target)
-            .unwrap_or_else(|| SolarSystem::generate(self.galaxy.systems[target].seed));
+        let next = self.parked.remove(&target).unwrap_or_else(|| {
+            let seed = self.galaxy.systems[target].seed;
+            // the start system keeps today's line-up (--seed, --biome, the showcase)
+            if target == 0 {
+                SolarSystem::generate(seed)
+            } else {
+                SolarSystem::generate_varied(seed)
+            }
+        });
         self.parked.insert(self.current, current_system);
         self.current = target;
         Ok(next)
@@ -147,6 +152,21 @@ mod tests {
         assert!(
             fwd.dot((s.star.position() - pos).normalize()) > 0.9999,
             "looking at the star"
+        );
+    }
+
+    #[test]
+    fn other_systems_are_varied_the_start_one_is_not() {
+        let (mut u, start) = uni();
+        let s = u.switch(5, start).unwrap();
+        assert_eq!(
+            s.planets,
+            SolarSystem::generate_varied(u.galaxy.systems[5].seed).planets
+        );
+        let back = u.switch(0, s).unwrap();
+        assert_eq!(
+            back.planets,
+            SolarSystem::generate(u.galaxy.systems[0].seed).planets
         );
     }
 }

@@ -35,6 +35,7 @@ pub struct StarTypeDef {
     pub corona_color: [f32; 3],
     pub corona_size: f32,   // glow falloff length in star radii
     pub sunlight: [f32; 3], // the planets' sunlight (Atmosphere.sun_color)
+    pub luminosity: f64,    // relative to the yellow star; sets the habitable distance (variety.rs)
 }
 
 const STAR_TYPES: [StarTypeDef; 5] = [
@@ -49,6 +50,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         corona_color: [1.0, 0.35, 0.15],
         corona_size: 0.35,
         sunlight: [1.72, 1.45, 1.12],
+        luminosity: 0.3,
     },
     StarTypeDef {
         name: "Orange",
@@ -61,6 +63,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         corona_color: [1.0, 0.55, 0.25],
         corona_size: 0.4,
         sunlight: [1.68, 1.48, 1.18],
+        luminosity: 0.6,
     },
     StarTypeDef {
         name: "Yellow",
@@ -73,6 +76,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         corona_color: [1.0, 0.8, 0.5],
         corona_size: 0.45,
         sunlight: [1.6, 1.5, 1.3],
+        luminosity: 1.0,
     },
     StarTypeDef {
         name: "White",
@@ -85,6 +89,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         corona_color: [0.85, 0.9, 1.0],
         corona_size: 0.5,
         sunlight: [1.52, 1.52, 1.48],
+        luminosity: 2.0,
     },
     StarTypeDef {
         name: "Blue giant",
@@ -97,6 +102,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         corona_color: [0.55, 0.7, 1.0],
         corona_size: 0.6,
         sunlight: [1.38, 1.5, 1.68],
+        luminosity: 4.0,
     },
 ];
 
@@ -202,6 +208,39 @@ impl SolarSystem {
         }
     }
 
+    // every system but the start one (Universe): 3-10 planets on the usual orbits, each type picked by
+    // its orbit's temperature around this star, each planet with its own traits (space/variety.rs)
+    pub fn generate_varied(seed: u64) -> Self {
+        let star_type = star_type_for(seed);
+        let planets = (0..crate::space::variety::planet_count(seed))
+            .map(|i| {
+                let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(seed, i);
+                let radius = planet_radius_for(seed, i);
+                let tau = crate::space::variety::temperature_index(orbit_radius, star_type);
+                let planet_type = crate::space::variety::pick_type(seed, i, tau);
+                Planet {
+                    orbit_radius,
+                    orbit_speed: orbit_speed_for(orbit_radius),
+                    orbit_phase,
+                    orbit_tilt,
+                    orbit_node,
+                    radius,
+                    planet_type,
+                    noise_seed: noise_seed_for(seed, i),
+                    traits: crate::space::variety::traits_for(seed, i, planet_type, radius),
+                }
+            })
+            .collect();
+        Self {
+            star: Star {
+                radius: star_type.def().radius,
+                star_type,
+            },
+            planets,
+            seed,
+        }
+    }
+
     // the planet a new game starts on: the first one of the preferred type (--biome), else #1
     pub fn start_planet_index(&self, preferred: PlanetType) -> usize {
         self.planets
@@ -249,7 +288,7 @@ fn orbit_speed_for(orbit_radius: f64) -> f64 {
 
 // a deterministic value in 0..1 for (system seed, planet index, `salt` naming what it's for): fmix64 as
 // planet_radius_for, with a salt per property so they don't correlate
-fn seeded_unit(seed: u64, index: usize, salt: u64) -> f64 {
+pub(crate) fn seeded_unit(seed: u64, index: usize, salt: u64) -> f64 {
     let mut h = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(index as u64)
@@ -704,6 +743,48 @@ pub fn format_distance(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generate_varied_is_deterministic() {
+        for seed in [2u64, 77, 4096] {
+            let (a, b) = (
+                SolarSystem::generate_varied(seed),
+                SolarSystem::generate_varied(seed),
+            );
+            assert_eq!(a.planets, b.planets);
+            assert_eq!(a.star.star_type, b.star.star_type);
+        }
+    }
+
+    #[test]
+    fn add_planet_extends_a_varied_system() {
+        let mut s = (0..2000u64)
+            .map(SolarSystem::generate_varied)
+            .find(|s| s.planets.len() == 3)
+            .expect("a 3-planet system");
+        let last = s.planets.last().unwrap().orbit_radius;
+        let i = s.add_planet(PlanetType::Ice, 100.0).unwrap();
+        assert_eq!(i, 3);
+        assert!(s.planets[3].orbit_radius > last);
+        assert_eq!(
+            s.planets[3].traits,
+            crate::planet::traits::PlanetTraits::NEUTRAL
+        );
+        while s.planets.len() < MAX_PLANETS {
+            s.add_planet(PlanetType::Ice, 100.0).unwrap();
+        }
+        assert!(s.add_planet(PlanetType::Ice, 100.0).is_err());
+    }
+
+    #[test]
+    fn the_start_generator_is_unchanged() {
+        let s = SolarSystem::generate(1);
+        assert_eq!(s.planets.len(), PLANET_COUNT);
+        for (i, p) in s.planets.iter().enumerate() {
+            assert_eq!(p.planet_type, PlanetType::ALL[i]);
+            assert_eq!(p.traits, crate::planet::traits::PlanetTraits::NEUTRAL);
+        }
+    }
     use crate::player::controller::FlightKeys;
 
     #[test]

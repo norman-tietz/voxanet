@@ -7,4 +7,5 @@ pub mod solar_system;
 pub mod star_shading;
 pub mod travel;
 pub mod universe;
+pub mod variety;
 pub mod warp;

@@ -376,6 +376,7 @@ mod tests {
     fn mapped_planets_never_overlap() {
         for seed in [1, 2, 8, 13] {
             no_overlap(&SolarSystem::generate(seed));
+            no_overlap(&SolarSystem::generate_varied(seed));
         }
     }
 
