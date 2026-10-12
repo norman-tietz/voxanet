@@ -2527,6 +2527,12 @@ impl Renderer {
     ) {
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.system.plastic = self.plastic.impostor_uniform();
+        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
+            self.weather.fog.density
+        } else {
+            0.0
+        };
+        self.system.fog_wind = self.fog_wind;
         self.system.light = self.light.uniform();
         self.update_console_mesh(console.height_fraction);
 
@@ -3553,6 +3559,12 @@ impl Renderer {
         self.perf_tick("system");
         // the impostors share the voxel terrain's plastic look (plastic.rs)
         self.system.plastic = self.plastic.impostor_uniform();
+        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
+            self.weather.fog.density
+        } else {
+            0.0
+        };
+        self.system.fog_wind = self.fog_wind;
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after Space mode bakes the map whole
@@ -3658,6 +3670,12 @@ impl Renderer {
         use crate::space::render::{project, Layout, RingVertex, SpaceCamera};
         self.perf_tick("map");
         self.system.plastic = self.plastic.impostor_uniform();
+        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
+            self.weather.fog.density
+        } else {
+            0.0
+        };
+        self.system.fog_wind = self.fog_wind;
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         let out = match self.surface.get_current_texture() {

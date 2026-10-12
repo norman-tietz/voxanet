@@ -49,6 +49,7 @@ struct SpaceCameraUniform {
     ray_dirs: [[f32; 4]; 3],
     forward: [f32; 4], // the view direction (xyz), for the star's reversed-Z depth
     pixel: [f32; 4],   // x: radians per screen pixel (cloud map level of detail)
+    fog: [f32; 4],     // xyz: the storm fog's scrolled offset (weather/fog.rs)
 }
 
 // the star's uniform for vs_star/fs_star (must match StarUniform in space.wgsl)
@@ -115,6 +116,7 @@ struct PlanetUniform {
     weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: [f32; 4],
     atmosphere: [f32; 4], // x: atmosphere density (AtmosphereDef.density)
+    fog_tint: [f32; 4], // rgb: the storm fog's tint, w: its peak extinction x the setting (0 = off)
     model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 
@@ -339,6 +341,8 @@ pub fn project(camera: &SpaceCamera, offset: Vec3, screen: (f32, f32)) -> Option
 }
 
 pub struct SpaceRenderer {
+    pub fog_scale: f32, // the storm fog setting (0 = off), Renderer sets it every frame
+    pub fog_wind: Vec3, // the storm fog's scrolled offset
     pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
     pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
     camera_buf: wgpu::Buffer,
@@ -978,6 +982,8 @@ impl SpaceRenderer {
 
         Self {
             plastic: crate::render::plastic::PlasticSettings::default().impostor_uniform(),
+            fog_scale: 1.0,
+            fog_wind: Vec3::ZERO,
             light: crate::render::light::LightSettings::default().uniform(),
             camera_buf,
             camera_bind,
@@ -1074,6 +1080,7 @@ impl SpaceRenderer {
                 t,
                 self.plastic,
                 self.light,
+                self.fog_scale,
             ));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
@@ -1209,6 +1216,7 @@ impl SpaceRenderer {
                 ray_dirs,
                 forward: (camera.rotation * Vec3::NEG_Z).extend(0.0).to_array(),
                 pixel: [camera.fov_y / screen.1, 0.0, 0.0, 0.0],
+                fog: [self.fog_wind.x, self.fog_wind.y, self.fog_wind.z, 0.0],
             }]),
         );
     }
@@ -1221,6 +1229,7 @@ impl SpaceRenderer {
         t: f64,
         plastic: [f32; 4],
         light: [f32; 4],
+        fog_scale: f32,
     ) -> PlanetUniform {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
@@ -1258,6 +1267,12 @@ impl SpaceRenderer {
             weather_rule: crate::weather::WeatherKind::for_planet(p.planet_type).rule(),
             weather_cover: crate::weather::WeatherKind::for_planet(p.planet_type).cover(),
             atmosphere: [atmosphere.density, 0.0, 0.0, 0.0],
+            fog_tint: {
+                let f = crate::weather::fog::storm_fog(crate::weather::WeatherKind::for_planet(
+                    p.planet_type,
+                ));
+                [f.tint[0], f.tint[1], f.tint[2], f.peak * fog_scale]
+            },
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1302,6 +1317,7 @@ impl SpaceRenderer {
                 t,
                 self.plastic,
                 self.light,
+                self.fog_scale,
             )]),
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1564,17 +1580,33 @@ mod tests {
     // PlanetUniform must mirror space.wgsl's PlanetUniform: 15 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PlanetUniform>(), 15 * 16 + 3 * 16);
-        // + plastic, + atmosphere
+        assert_eq!(std::mem::size_of::<PlanetUniform>(), 16 * 16 + 3 * 16);
+        // + plastic, + atmosphere, + fog_tint
     }
 
     #[test]
     fn planet_uniform_carries_the_density_of_its_type() {
         let system = SolarSystem::generate(1);
         for (i, p) in system.planets.iter().enumerate() {
-            let u = SpaceRenderer::planet_uniform(&system, i, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4]);
+            let u =
+                SpaceRenderer::planet_uniform(&system, i, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 1.0);
             assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
         }
+    }
+
+    // the impostor's storm fog uses the planet type's table and the setting; nothing when off
+    #[test]
+    fn planet_uniform_carries_the_storm_fog_of_its_type() {
+        let system = SolarSystem::generate(1);
+        let on =
+            SpaceRenderer::planet_uniform(&system, 0, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 1.0);
+        let off =
+            SpaceRenderer::planet_uniform(&system, 0, Vec3::ZERO, 0.0, [0.0; 4], [0.0; 4], 0.0);
+        let kind = crate::weather::WeatherKind::for_planet(system.planets[0].planet_type);
+        let want = crate::weather::fog::storm_fog(kind);
+        assert_eq!(on.fog_tint[3], want.peak);
+        assert_eq!(&on.fog_tint[..3], &want.tint);
+        assert_eq!(off.fog_tint[3], 0.0);
     }
 
     #[test]

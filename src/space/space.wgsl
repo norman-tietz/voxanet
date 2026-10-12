@@ -10,6 +10,7 @@ struct Camera {
     ray_dirs: array<vec4<f32>, 3>, // camera basis corners for the starfield background
     forward: vec4<f32>,     // the view direction (xyz), for the star's reversed-Z depth
     pixel: vec4<f32>,       // x: radians per screen pixel (cloud map level of detail, clouds.wgsl)
+    fog: vec4<f32>,         // xyz: the storm fog's scrolled offset
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -117,6 +118,7 @@ struct PlanetUniform {
     weather_rule: vec4<f32>,  // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: vec4<f32>,
     atmosphere: vec4<f32>,    // x: atmosphere density (1 = full, 0 = vacuum)
+    fog_tint: vec4<f32>,      // rgb: the storm fog's tint, w: peak extinction x setting (0 = off)
     model: mat3x3<f32>,     // planet frame -> space rotation: the planet's spin at this time
 }
 
@@ -228,7 +230,11 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     // liquid colour itself, so match on it, fading over shore blends
     let glowing = planet.glow.w * (1.0 - smoothstep(0.0, 0.3, distance(in.flat_color, planet.glow.rgb)));
     lit = mix(lit, planet.glow_emission.rgb, glowing);
-    var color = atmo_air_fog(lit, in.local_pos, cam, L, a, FogState(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0)), 0.0);
+    // storm fog like the engine's (atmosphere.wgsl): the storm over the camera from the weather map, the
+    // wind-scrolled structure shared with the voxel frame; no ground mist out here
+    let cam_storm = select(0.0, weather_at(normalize(cam)).x, planet.fog_tint.w > 0.0);
+    let fog = FogState(cam_storm, planet.fog_tint.w, 0.0, 0.0, planet.fog_tint.rgb, camera.fog.xyz);
+    var color = atmo_air_fog(lit, in.local_pos, cam, L, a, fog, ws.x);
 
     // clouds in front of the surface, like the engine's shade_pixel
     let ray_dir = normalize(in.local_pos - cam);
