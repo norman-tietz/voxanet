@@ -68,6 +68,9 @@ pub struct GlobalUniform {
     pub plastic_ext: [f32; 4], // x: sky reflection weight (plastic.rs)
     pub light: [f32; 4],   // x: ground bounce, y: wrap lighting (light.rs)
     pub weather: [f32; 4], // x: overcast at the camera, y: the storm there (weather.rs overcast)
+    pub fog: [f32; 4], // x: storm at the camera, y: storm fog extinction at storm 1, z: ground mist, w: mist base radius (weather/fog.rs)
+    pub fog_tint: [f32; 4], // rgb: the storm haze's colour
+    pub fog_wind: [f32; 4], // xyz: the structure's scroll offset
 }
 
 #[repr(C)]
@@ -1078,6 +1081,9 @@ impl Renderer {
             plastic_ext: [0.0; 4],
             light: crate::render::light::LightSettings::default().uniform(),
             weather: [0.0; 4],
+            fog: [0.0; 4],
+            fog_tint: [0.0; 4],
+            fog_wind: [0.0; 4],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2667,6 +2673,9 @@ impl Renderer {
             plastic_ext: self.plastic.uniform_ext(),
             light: self.light.uniform(),
             weather: [overcast, storm_here, 0.0, 0.0],
+            fog: [0.0; 4],
+            fog_tint: [0.0; 4],
+            fog_wind: [0.0; 4],
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -4918,6 +4927,22 @@ pub(crate) mod tests {
                 "{t:?}"
             );
         }
+    }
+
+    // fog() takes the storm at the shaded point; the old two-argument form must be gone, and the
+    // underwater case must switch the storm and mist terms off
+    #[test]
+    fn fog_call_sites_pass_the_storm_at_the_surface() {
+        assert!(!SCENE_SHADER.contains("fog(final_color, world_pos)"));
+        assert!(!SCENE_SHADER.contains("fog(color, in.world_pos)"));
+        assert!(SCENE_SHADER.contains("fog(final_color, world_pos, ws.x)"));
+        assert!(SCENE_SHADER.contains("fn engine_fog()"));
+        let engine_fog = &SCENE_SHADER[SCENE_SHADER.find("fn engine_fog()").unwrap()..];
+        assert!(
+            engine_fog[..engine_fog.find("return FogState(global.fog.x").unwrap()]
+                .contains("global.screen.z"),
+            "the underwater check comes before the fog is returned"
+        );
     }
 
     #[test]

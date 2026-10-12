@@ -13,6 +13,9 @@ struct Global {
     plastic_ext: vec4<f32>, // x: sky reflection weight (plastic.rs)
     light: vec4<f32>, // x: ground bounce, y: wrap lighting (light.rs)
     weather: vec4<f32>, // x: overcast at the camera, y: storm there (weather.rs overcast)
+    fog: vec4<f32>,      // x: storm at the camera, y: storm fog extinction at storm 1 (0 = off), z: ground mist, w: mist base radius (weather/fog.rs)
+    fog_tint: vec4<f32>, // rgb: the storm haze's colour
+    fog_wind: vec4<f32>, // xyz: the structure's scroll offset
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -494,6 +497,14 @@ fn triplanar_detail(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 // CLOUD_ALT * planet radius, shaded procedurally (no mesh): every call site solves for where a ray crosses
 // that shell, then shades it — from the ground, at the horizon, reflected in water, or from orbit.
 
+fn engine_fog() -> FogState {
+    // under the sea surface the underwater tint wins: no storm or mist haze there
+    if (length(global.camera_pos.xyz) < global.screen.z) {
+        return FogState(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+    return FogState(global.fog.x, global.fog.y, global.fog.z, global.fog.w, global.fog_tint.rgb, global.fog_wind.xyz);
+}
+
 fn engine_atmosphere() -> Atmosphere {
     return Atmosphere(
         global.camera_pos.w,
@@ -637,12 +648,12 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // Combine
     // Note: Ambient is multiplied by albedo (diffuse reflection)
     let final_color = albedo * (direct_light + ambient_light + rim_light) * pl.diffuse_w + pl.spec;
-    return fog(final_color, world_pos);
+    return fog(final_color, world_pos, ws.x);
 }
 
 // fog and underwater tint of a linear HDR colour at world_pos; stays in linear space (no tone mapping)
 // so callers can still composite clouds on top before post_process() runs once at the very end
-fn fog(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+fn fog(lit: vec3<f32>, world_pos: vec3<f32>, storm_there: f32) -> vec3<f32> {
     var final_color = lit;
 
     // 4. Fog (Atmospheric Scattering)
@@ -654,7 +665,7 @@ fn fog(lit: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     }
     // Horizon fog blends into the same sky the camera would see in that direction (atmosphere.wgsl)
     let L = normalize(global.sun_dir.xyz);
-    final_color = atmo_air_fog(final_color, world_pos, global.camera_pos.xyz, L, engine_atmosphere());
+    final_color = atmo_air_fog(final_color, world_pos, global.camera_pos.xyz, L, engine_atmosphere(), engine_fog(), storm_there);
 
     return final_color;
 }
@@ -1182,7 +1193,7 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     // with the water's own alpha blends to clouds over the water-covered floor (exact before
     // post-processing); without it the liquid was drawn on top of the clouds, sharp fragments of
     // plasma or water floating in the cloud cover
-    var shaded = fog(color, in.world_pos);
+    var shaded = fog(color, in.world_pos, weather_at(normalize(in.world_pos)).x);
     let cloud_t = sphere_hit(global.camera_pos.xyz, -V, global.camera_pos.w * CLOUD_ALT);
     if (cloud_t > 0.0 && cloud_t < water_dist) {
         let cl = cloud_shade(global.camera_pos.xyz - V * cloud_t, -V, cloud_t, L);

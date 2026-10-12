@@ -31,6 +31,14 @@ const CLOUD_NIGHT_BRIGHTNESS: f32 = 0.06;
 const NIGHT_AMBIENT = vec3<f32>(0.10, 0.12, 0.17);
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
+// storm and mist fog (weather/fog.rs mirrors these)
+const FOG_STORM_LO: f32 = 0.25;        // storm value where the haze starts
+const FOG_STRUCTURE: f32 = 0.6;        // the storm density swings by this share around its mean
+const FOG_STRUCT_SCALE: f32 = 0.02;    // structure noise cells per unit
+const FOG_STRUCT_MAX_DIST: f32 = 300.0; // the structure taps lie within this of the camera
+const MIST_HEIGHT: f32 = 10.0;         // mist e-folding height, blocks
+const MIST_EXTINCTION: f32 = 0.02;     // per unit at mist 1, at the surface
+const MIST_COLOR = vec3<f32>(0.75, 0.78, 0.82);
 
 // a planet's atmosphere: radius (world units, = voxel resolution / 2) and its planet type's colours
 struct Atmosphere {
@@ -47,6 +55,16 @@ struct Atmosphere {
     time: f32,            // seconds, for the star's boiling surface
     overcast: f32,        // 0..1 storm overhead (weather.rs overcast): greys and dims the dome
     density: f32,         // 1 = full atmosphere, 0 = vacuum (planet/biome.rs AtmosphereDef.density)
+}
+
+// the weather's fog at the camera (weather/fog.rs FogParams)
+struct FogState {
+    storm: f32,      // the storm over the camera, 0..1
+    peak: f32,       // extinction per unit at storm 1 (the planet type's, x the setting); 0 = no storm fog
+    mist: f32,       // 0..1 ground mist at the camera
+    mist_base: f32,  // radius the mist's height is measured from (the sea surface)
+    tint: vec3<f32>, // the storm haze's colour at full daylight
+    wind: vec3<f32>, // the structure's scroll offset (planet frame, units)
 }
 
 // --- TONE MAPPING (ACES) ---
@@ -242,16 +260,62 @@ fn atmo_fog_distance(cam_pos: vec3<f32>, world_pos: vec3<f32>, planet_r: f32) ->
     return max(dist - entry, 0.0);
 }
 
+fn fog_storm_weight(storm: f32) -> f32 {
+    return smoothstep(FOG_STORM_LO, 1.0, storm);
+}
+
+// the storm haze's optical depth over `dist`: the mean of the storm at the camera and at the shaded
+// point, times 3 noise taps along the ray (world-anchored, scrolling with the wind) so it comes in drifting
+// walls instead of an even grey. Exactly 0 without a storm.
+fn atmo_storm_optical_depth(f: FogState, storm_there: f32, cam: vec3<f32>, pos: vec3<f32>, dist: f32) -> f32 {
+    let w = fog_storm_weight(0.5 * (f.storm + storm_there));
+    if (w * f.peak <= 0.0 || dist <= 0.0) { return 0.0; }
+    let dir = (pos - cam) / max(distance(pos, cam), 1e-6);
+    let reach = min(dist, FOG_STRUCT_MAX_DIST);
+    let o = f.wind;
+    let n = (value_noise3((cam + dir * reach * 0.2 + o) * FOG_STRUCT_SCALE)
+           + value_noise3((cam + dir * reach * 0.5 + o) * FOG_STRUCT_SCALE)
+           + value_noise3((cam + dir * reach * 0.8 + o) * FOG_STRUCT_SCALE)) / 3.0;
+    let structure = 1.0 + FOG_STRUCTURE * (n - 0.5) * 2.0;
+    return f.peak * w * structure * dist;
+}
+
+// the mist's optical depth: density mist * MIST_EXTINCTION * exp(-h / MIST_HEIGHT), h the height above the
+// sea surface, integrated in closed form along the path (fog.rs mist_optical_depth)
+fn atmo_mist_optical_depth(f: FogState, cam: vec3<f32>, pos: vec3<f32>, dist: f32) -> f32 {
+    if (f.mist <= 0.0) { return 0.0; }
+    let h0 = max(length(cam) - f.mist_base, 0.0);
+    let h1 = max(length(pos) - f.mist_base, 0.0);
+    let e0 = exp(-h0 / MIST_HEIGHT);
+    let e1 = exp(-h1 / MIST_HEIGHT);
+    let dh = h1 - h0;
+    let mean = select(e0, MIST_HEIGHT * (e0 - e1) / dh, abs(dh) > 1e-3);
+    return f.mist * MIST_EXTINCTION * mean * dist;
+}
+
 // exp² air fog toward the sky the camera would see in that direction, so there's no seam between
-// distant terrain and open sky; stays in linear space (no tone mapping)
-fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
+// distant terrain and open sky; stays in linear space (no tone mapping). Storm and mist add optical
+// depth to the exponent and tint the colour; with both zero this is the plain exp² fog.
+fn atmo_air_fog(lit: vec3<f32>, world_pos: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosphere,
+                f: FogState, storm_there: f32) -> vec3<f32> {
     // only the stretch of the view ray inside the atmosphere fogs: on the ground that's all of it (as
     // before); from orbit the empty space in between adds no haze — otherwise a planet seen from a few
     // radii out faded into a flat sky-coloured disc
     let dist = atmo_fog_distance(cam_pos, world_pos, a.planet_r);
-    let fog_factor = (1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5))) * a.density;
+    let ts = atmo_storm_optical_depth(f, storm_there, cam_pos, world_pos, dist);
+    let tm = atmo_mist_optical_depth(f, cam_pos, world_pos, dist);
+    let extra = ts + tm;
+    let fog_factor = (1.0 - exp(-(dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5) - extra)) * a.density;
     let ray_dir = normalize(world_pos - cam_pos);
-    let fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r, a.density);
+    var fog_col = atmo_sky_dome(ray_dir, cam_pos, L, a) * atmo_sky_opacity(ray_dir, cam_pos, L, a.planet_r, a.density);
+    if (extra > 0.0) {
+        // the haze is lit by the day: sand tan, ash grey, snow white by day, dark at night
+        let day = atmo_ambient_daylight(world_pos, L);
+        let storm_col = f.tint * day * 1.2;
+        let mist_col = mix(fog_col, MIST_COLOR * day, 0.5);
+        let base = (dist * FOG_DENSITY) * (dist * FOG_DENSITY * 0.5);
+        fog_col = mix(fog_col, mix(mist_col, storm_col, ts / extra), extra / (base + extra));
+    }
     return mix(lit, fog_col, clamp(fog_factor, 0.0, 1.0));
 }
 

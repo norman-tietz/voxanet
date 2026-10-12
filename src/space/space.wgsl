@@ -228,7 +228,7 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     // liquid colour itself, so match on it, fading over shore blends
     let glowing = planet.glow.w * (1.0 - smoothstep(0.0, 0.3, distance(in.flat_color, planet.glow.rgb)));
     lit = mix(lit, planet.glow_emission.rgb, glowing);
-    var color = atmo_air_fog(lit, in.local_pos, cam, L, a);
+    var color = atmo_air_fog(lit, in.local_pos, cam, L, a, FogState(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0)), 0.0);
 
     // clouds in front of the surface, like the engine's shade_pixel
     let ray_dir = normalize(in.local_pos - cam);
