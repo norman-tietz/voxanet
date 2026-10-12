@@ -30,11 +30,11 @@ const CLOUD_NIGHT_BRIGHTNESS: f32 = 0.06;
 // like moonlight, so terrain stays readable at night (atmo_ambient_daylight)
 const NIGHT_AMBIENT = vec3<f32>(0.10, 0.12, 0.17);
 // lightning (weather/lightning.rs mirrors the radius)
-const LIGHTNING_GLOW_RADIUS: f32 = 0.35;  // cloud glow radius at the shell, in planet radii
+const LIGHTNING_GLOW_RADIUS: f32 = 0.13;  // cloud glow radius at the shell, in planet radii
 const LIGHTNING_COLOR = vec3<f32>(0.55, 0.65, 1.0); // cool blue-white
-const LIGHTNING_CLOUD_GAIN: f32 = 6.0;    // how bright a strike makes the clouds around it
-const LIGHTNING_AMBIENT_GAIN: f32 = 1.2;  // sky fill added at full scene flash
-const LIGHTNING_DOME_GAIN: f32 = 0.6;     // the dome's brightening at full scene flash
+const LIGHTNING_CLOUD_GAIN: f32 = 2.0;    // how bright a strike makes the clouds around it
+const LIGHTNING_AMBIENT_GAIN: f32 = 0.5;  // sky fill added at full scene flash
+const LIGHTNING_DOME_GAIN: f32 = 0.25;     // the dome's brightening at full scene flash
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
 // storm and mist fog (weather/fog.rs mirrors these)

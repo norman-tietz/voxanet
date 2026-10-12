@@ -1090,6 +1090,7 @@ impl SpaceRenderer {
                 self.fog_scale,
                 &self.weather_force,
                 &self.lightning,
+                matches!(layout, Layout::Real),
             ));
         }
         // every slot written before the pass begins — see this task's write-ordering design note
@@ -1241,6 +1242,7 @@ impl SpaceRenderer {
         fog_scale: f32,
         force: &crate::weather::WeatherForce,
         lightning: &LightningSettings,
+        with_lightning: bool, // false in the map layout, whose camera offsets are in map units
     ) -> PlanetUniform {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
@@ -1251,11 +1253,15 @@ impl SpaceRenderer {
         // lightning on this planet (weather/lightning.rs): the whole planet's cells, from the camera's
         // place in the planet's frame; the same schedule as the voxel frame, so the handover matches
         let cam_in_planet = model.transpose() * -camera_relative;
-        let strikes = if lightning.on {
+        // (nothing from farther than 60 planet radii: the cloud glow is invisible there)
+        let radius = p.voxel_resolution() as f32 / 2.0;
+        let strikes = if lightning.on && with_lightning && camera_relative.length() < 60.0 * radius
+        {
             crate::weather::lightning::active_strikes(
                 crate::weather::WeatherKind::for_planet(p.planet_type),
                 lightning.rate,
-                p.voxel_resolution() as f32 / 2.0,
+                radius,
+                p.noise_seed,
                 cam_in_planet,
                 f32::MAX,
                 (t % 3600.0) as f32,
@@ -1264,7 +1270,7 @@ impl SpaceRenderer {
         } else {
             vec![]
         };
-        let flash = crate::weather::lightning::flash_at(&strikes, cam_in_planet);
+        // the impostors take only the localized cloud glow: the scalar flash would light the whole disc
         PlanetUniform {
             offset: [
                 camera_relative.x,
@@ -1302,7 +1308,7 @@ impl SpaceRenderer {
                 ));
                 [f.tint[0], f.tint[1], f.tint[2], f.peak * fog_scale]
             },
-            flash: [flash, 0.0, 0.0, 0.0],
+            flash: [0.0; 4],
             strikes: crate::weather::lightning::gpu_strikes(&strikes),
             model: [
                 model.x_axis.extend(0.0).to_array(),
@@ -1351,6 +1357,7 @@ impl SpaceRenderer {
                 self.fog_scale,
                 &self.weather_force,
                 &self.lightning,
+                true,
             )]),
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1653,11 +1660,11 @@ mod tests {
         while t < 2600.0 {
             let cam = Vec3::new(0.0, 0.0, -2000.0);
             let u = SpaceRenderer::planet_uniform(
-                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &on,
+                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &on, true,
             );
             seen |= u.strikes.iter().any(|s| s[3] > 0.0);
             let n = SpaceRenderer::planet_uniform(
-                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &off,
+                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &off, true,
             );
             assert!(n.strikes.iter().all(|s| s[3] == 0.0));
             t += 0.25;
@@ -1683,6 +1690,7 @@ mod tests {
                 1.0,
                 &quiet_force(),
                 &LightningSettings::default(),
+                true,
             );
             assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
         }
@@ -1702,6 +1710,7 @@ mod tests {
             1.0,
             &quiet_force(),
             &LightningSettings::default(),
+            true,
         );
         let off = SpaceRenderer::planet_uniform(
             &system,
@@ -1713,6 +1722,7 @@ mod tests {
             0.0,
             &quiet_force(),
             &LightningSettings::default(),
+            true,
         );
         let kind = crate::weather::WeatherKind::for_planet(system.planets[0].planet_type);
         let want = crate::weather::fog::storm_fog(kind);

@@ -18,10 +18,15 @@ fn vs_bolt(@builtin(vertex_index) vi: u32, @location(0) a: vec4<f32>, @location(
     let p = mix(a.xyz, b.xyz, along);
     // widen with distance so a distant bolt stays about a pixel wide
     let dist = distance(p, global.camera_pos.xyz);
-    let width = max(a.w, dist * global.motion.y * 1.5);
+    let width = max(a.w, dist * global.motion.y * 2.0);
     let dir = normalize(b.xyz - a.xyz);
     let to_cam = normalize(global.camera_pos.xyz - p);
-    let across = normalize(cross(dir, to_cam));
+    var cr = cross(dir, to_cam);
+    if (length(cr) < 1e-6) {
+        // seen straight on: any perpendicular will do
+        cr = cross(dir, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9));
+    }
+    let across = normalize(cr);
     let world = p + across * side * width * 0.5;
     out.world = world;
     out.clip_pos = global.view_proj * vec4<f32>(world, 1.0);

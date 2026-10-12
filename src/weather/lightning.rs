@@ -10,19 +10,19 @@ use glam::Vec3;
 use super::{smoothstep, storm, WeatherForce, WeatherKind};
 
 pub const SLOT_SECS: f32 = 1.5; // 3600 / 1.5 = 2400 slots: the clock wrap falls on a slot edge
-pub const CELL_SIZE: f32 = 400.0;
+pub const CELL_SIZE: f32 = 80.0; // strike cells on the surface, about this wide
 pub const RANGE: f32 = 3000.0; // the voxel frame's strike distance
 pub const MAX_STRIKES: usize = 6;
 pub const LIFE: f32 = 0.65; // seconds a strike lasts (main flash plus re-strikes)
-pub const FLASH_RANGE: f32 = 600.0; // distance at which a strike's ambient flash is a quarter
-const RATE_FULL: f32 = 0.25; // strikes per cell-slot at storm 1 (about one per 6 s per cell)
+pub const FLASH_RANGE: f32 = 600.0; // distance at which a strike's ambient flash is a quarter (small planets: 1.2 R)
+const RATE_FULL: f32 = 0.03; // strikes per cell-slot at storm 1 (an 80-unit cell: one per 50 s)
 const STORM_MIN: f32 = 0.5;
 const RISE: f32 = 0.03;
 const DECAY: f32 = 0.07;
 const WRAP: f32 = 3600.0;
 
 // the glow and flash constants shared with atmosphere.wgsl (name there, value)
-pub const GLOW_RADIUS: f32 = 0.35; // cloud glow radius, in planet radii at the cloud shell
+pub const GLOW_RADIUS: f32 = 0.13; // cloud glow radius, in planet radii at the cloud shell
 pub const CONSTANTS: [(&str, f32); 1] = [("LIGHTNING_GLOW_RADIUS", GLOW_RADIUS)];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +74,22 @@ fn hash(ix: i32, iy: i32, iz: i32, slot: u32, salt: u32) -> u32 {
     pcg(h ^ salt)
 }
 
+// cells per cube-face edge: about CELL_SIZE world units wide on the surface
+fn grid_size(planet_radius: f32) -> i32 {
+    ((2.0 * planet_radius / CELL_SIZE).round() as i32).clamp(4, 32)
+}
+
+// the unit direction of point (u, v) in -1..1 on cube face `face` (any consistent cube-to-sphere mapping)
+fn face_dir(face: i32, u: f32, v: f32) -> Vec3 {
+    let sign = if face & 1 == 0 { 1.0 } else { -1.0 };
+    let p = match face >> 1 {
+        0 => Vec3::new(sign, u, v),
+        1 => Vec3::new(u, sign, v),
+        _ => Vec3::new(u, v, sign),
+    };
+    p.normalize()
+}
+
 fn unit(h: u32) -> f32 {
     (h >> 8) as f32 / 16_777_216.0
 }
@@ -106,13 +122,16 @@ fn age_since(t: f32, start: f32) -> f32 {
     }
 }
 
-// The strikes alive at clock `t` (wrapped at 3600) seen from `cam` (planet frame): all cells within `range`
-// of the camera (`f32::MAX`: the whole planet), strongest first, at most MAX_STRIKES. `rate` is the
-// /weather lightning setting.
+// The strikes alive at clock `t` (wrapped at 3600) seen from `cam` (planet frame): every cell of a cube-face
+// grid over the planet's surface (n x n per face, cells about CELL_SIZE wide), a strike per cell and slot
+// jittered inside the cell, within `range` of the camera (`f32::MAX`: the whole planet), strongest first, at
+// most MAX_STRIKES. `rate` is the /weather lightning setting, `planet_seed` varies the sites per planet.
+#[allow(clippy::too_many_arguments)]
 pub fn active_strikes(
     kind: WeatherKind,
     rate: f32,
     planet_radius: f32,
+    planet_seed: u32,
     cam: Vec3,
     range: f32,
     t: f32,
@@ -125,34 +144,27 @@ pub fn active_strikes(
     let t = t.rem_euclid(WRAP);
     let slot = (t / SLOT_SECS).floor() as u32;
     let slot_start = slot as f32 * SLOT_SECS;
-    // the cells that can hold surface points: the planet's cube, cut by the camera's range
-    let reach = planet_radius + CELL_SIZE;
-    let lo = (cam - Vec3::splat(range)).max(Vec3::splat(-reach));
-    let hi = (cam + Vec3::splat(range)).min(Vec3::splat(reach));
-    if lo.cmpgt(hi).any() {
-        return vec![];
-    }
-    let cell = |v: f32| (v / CELL_SIZE).floor() as i32;
+    let n = grid_size(planet_radius);
+    let salt = pcg(planet_seed ^ 0x51ed_270b);
     let mut out = Vec::new();
-    for ix in cell(lo.x)..=cell(hi.x) {
-        for iy in cell(lo.y)..=cell(hi.y) {
-            for iz in cell(lo.z)..=cell(hi.z) {
-                // the cell's jittered point, independent of the slot; only cells whose point lies in the
-                // shell around the surface hold strikes
-                let j = Vec3::new(
-                    unit(hash(ix, iy, iz, 0, 1)),
-                    unit(hash(ix, iy, iz, 0, 2)),
-                    unit(hash(ix, iy, iz, 0, 3)),
-                );
-                let p = (Vec3::new(ix as f32, iy as f32, iz as f32) + j) * CELL_SIZE;
-                if (p.length() - planet_radius).abs() > CELL_SIZE * 0.5 || p.length() < 1e-3 {
+    for face in 0..6 {
+        for i in 0..n {
+            for j in 0..n {
+                // the cheap test first: the chance can't exceed per_slot
+                let h = hash(face, i, j, slot, salt);
+                let u = unit(h);
+                if u >= per_slot {
                     continue;
                 }
-                let dir = p.normalize();
+                let jx = unit(hash(face, i, j, slot, salt ^ 1));
+                let jy = unit(hash(face, i, j, slot, salt ^ 2));
+                let dir = face_dir(
+                    face,
+                    -1.0 + 2.0 * (i as f32 + jx) / n as f32,
+                    -1.0 + 2.0 * (j as f32 + jy) / n as f32,
+                );
                 let s = storm(dir, slot_start, force);
-                let chance = per_slot * smoothstep(STORM_MIN, 1.0, s);
-                let h = hash(ix, iy, iz, slot, 4);
-                if unit(h) >= chance {
+                if u >= per_slot * smoothstep(STORM_MIN, 1.0, s) {
                     continue;
                 }
                 let start = slot_start + unit(pcg(h ^ 5)) * (SLOT_SECS - LIFE);
@@ -166,7 +178,7 @@ pub fn active_strikes(
                     continue;
                 }
                 let pos = dir * planet_radius;
-                if pos.distance(cam) > range && range < f32::MAX {
+                if range < f32::MAX && pos.distance(cam) > range {
                     continue;
                 }
                 out.push(Strike {
@@ -183,13 +195,26 @@ pub fn active_strikes(
     out
 }
 
-// the scene flash at `cam`: each strike's intensity, falling off with distance
-pub fn flash_at(strikes: &[Strike], cam: Vec3) -> f32 {
+// the scene flash at `cam` on a planet of `planet_radius`: each strike's intensity, falling off with distance
+// (scale FLASH_RANGE, at most 1.2 R) and counted only when its cloud point is above the camera's horizon
+pub fn flash_at(strikes: &[Strike], cam: Vec3, planet_radius: f32) -> f32 {
+    let range = FLASH_RANGE.min(1.2 * planet_radius).max(1.0);
+    let cloud = crate::planet::data::CLOUD_ALT * planet_radius;
     strikes
         .iter()
         .map(|s| {
-            let d = s.pos.distance(cam) / FLASH_RANGE;
-            s.intensity / (1.0 + d * d)
+            let d = s.pos.distance(cam) / range;
+            let c = s.pos.normalize_or_zero() * cloud;
+            let seg = c - cam;
+            let l2 = seg.length_squared();
+            let t = if l2 > 1e-6 {
+                (-cam.dot(seg) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let clear = (cam + seg * t).length();
+            let visible = smoothstep(planet_radius - 3.0, planet_radius + 1.0, clear);
+            visible * s.intensity / (1.0 + d * d)
         })
         .sum::<f32>()
         .min(1.0)
@@ -210,6 +235,7 @@ pub fn frame_strikes(
     settings: &LightningSettings,
     weather_on: bool,
     planet_radius: f32,
+    planet_seed: u32,
     cam: Vec3,
     t: f32,
     force: &WeatherForce,
@@ -217,7 +243,16 @@ pub fn frame_strikes(
     if !settings.on || !weather_on {
         return vec![];
     }
-    active_strikes(kind, settings.rate, planet_radius, cam, RANGE, t, force)
+    active_strikes(
+        kind,
+        settings.rate,
+        planet_radius,
+        planet_seed,
+        cam,
+        RANGE,
+        t,
+        force,
+    )
 }
 
 use bytemuck::{Pod, Zeroable};
@@ -389,6 +424,7 @@ mod tests {
     use crate::weather::{WeatherForce, WeatherSettings};
 
     const R: f32 = 250.0;
+    const SEED: u32 = 42;
 
     #[test]
     fn bolt_instances_run_from_the_cloud_shell_to_the_ground() {
@@ -427,7 +463,7 @@ mod tests {
         WeatherKind::for_planet(t)
     }
 
-    // a force that makes the whole planet one storm of value 1
+    // a force that makes the region within about 60 degrees of +Y one storm of value 1 (natural storms go on elsewhere)
     fn full_storm() -> WeatherForce {
         let mut s = WeatherSettings::default();
         s.apply(
@@ -457,7 +493,16 @@ mod tests {
         let mut t = 0.0;
         while t < 3600.0 {
             // sample mid-life of the slot's strikes: ask for all cells at several ages
-            for s in active_strikes(kind, 1.0, R, Vec3::new(0.0, R, 0.0), f32::MAX, t, force) {
+            for s in active_strikes(
+                kind,
+                1.0,
+                R,
+                SEED,
+                Vec3::new(0.0, R, 0.0),
+                f32::MAX,
+                t,
+                force,
+            ) {
                 all.push((t, s));
             }
             t += 0.25;
@@ -496,8 +541,8 @@ mod tests {
     fn the_schedule_is_deterministic() {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
-        let a = active_strikes(k, 1.0, R, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
-        let b = active_strikes(k, 1.0, R, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
+        let a = active_strikes(k, 1.0, R, SEED, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
+        let b = active_strikes(k, 1.0, R, SEED, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
         assert_eq!(a, b);
     }
 
@@ -510,8 +555,10 @@ mod tests {
         for (t, s) in hour(k, &f) {
             seen.insert((s.seed, (t - s.age).round() as i64));
         }
-        // ~ cells in the shell × 2400 slots × 0.25; allow a wide band, it only guards the order of magnitude
-        assert!(seen.len() > 1000 && seen.len() < 200_000, "{}", seen.len());
+        // 216 cells (R 250) × 2400 slots × 0.03 ≈ 15,500 at a full storm everywhere; the forced region is about a
+        // quarter of the planet and natural storms add a little elsewhere, so a few thousand. The band only
+        // guards the order of magnitude.
+        assert!(seen.len() > 1000 && seen.len() < 20_000, "{}", seen.len());
     }
 
     #[test]
@@ -521,7 +568,9 @@ mod tests {
         // only at the neighbourhood of the camera there, and after the force has faded in
         let mut t = 10.0;
         while t < 600.0 {
-            assert!(active_strikes(k, 1.0, R, Vec3::Y * R, 300.0, t, &clear_sky()).is_empty());
+            assert!(
+                active_strikes(k, 1.0, R, SEED, Vec3::Y * R, 100.0, t, &clear_sky()).is_empty()
+            );
             t += 0.5;
         }
     }
@@ -555,7 +604,7 @@ mod tests {
             let mut n = 0;
             let mut t = 0.0;
             while t < 1200.0 {
-                n += active_strikes(k, rate, R, Vec3::Y * R, f32::MAX, t, &f).len();
+                n += active_strikes(k, rate, R, SEED, Vec3::Y * R, f32::MAX, t, &f).len();
                 t += 0.25;
             }
             n
@@ -581,7 +630,7 @@ mod tests {
         let k = kind(PlanetType::EarthLike);
         let mut t = 0.0;
         while t < 300.0 {
-            let v = active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, t, &f);
+            let v = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t, &f);
             assert!(v.len() <= MAX_STRIKES);
             let score = |s: &Strike| s.intensity;
             for w in v.windows(2) {
@@ -598,12 +647,8 @@ mod tests {
         let cam = Vec3::new(0.0, R, 0.0);
         let mut t = 0.0;
         while t < 300.0 {
-            for s in active_strikes(k, 3.0, R, cam, 800.0, t, &f) {
-                assert!(
-                    s.pos.distance(cam) <= 800.0 + CELL_SIZE,
-                    "{}",
-                    s.pos.distance(cam)
-                );
+            for s in active_strikes(k, 3.0, R, SEED, cam, 800.0, t, &f) {
+                assert!(s.pos.distance(cam) <= 800.0, "{}", s.pos.distance(cam));
             }
             t += 0.25;
         }
@@ -613,18 +658,12 @@ mod tests {
     fn the_schedule_is_continuous_across_the_clock_wrap() {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
-        // a strike that starts shortly before the wrap is still alive just after it, at the right age
-        let before = active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, 3599.8, &f);
-        let after = active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, 0.1, &f);
-        for b in &before {
-            if let Some(a) = after.iter().find(|a| a.seed == b.seed) {
-                assert!(
-                    (a.age - (b.age + 0.3)).abs() < 1e-3,
-                    "{} vs {}",
-                    a.age,
-                    b.age
-                );
-            }
+        // t = 3599.9 and 3599.9 - 3600 are the same moment: the same strikes (up to f32 rounding)
+        let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3599.9, &f);
+        let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3599.9 - WRAP, &f);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert!(x.seed == y.seed && x.pos == y.pos && (x.age - y.age).abs() < 1e-2);
         }
         // strikes never outlive their slot, so across the wrap itself there are no pairs by construction;
         // the same age arithmetic is checked within slots (10.0 and 10.1 share one), and the wrap maps t
@@ -632,8 +671,8 @@ mod tests {
         let mut pairs = 0;
         for i in 0..200 {
             let t0 = 10.0 + i as f32 * 1.5;
-            let a = active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, t0, &f);
-            let b = active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, t0 + 0.1, &f);
+            let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t0, &f);
+            let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t0 + 0.1, &f);
             for x in &a {
                 if let Some(y) = b.iter().find(|y| y.seed == x.seed) {
                     pairs += 1;
@@ -647,10 +686,12 @@ mod tests {
             }
         }
         assert!(pairs > 0);
-        assert_eq!(
-            active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, 3600.1, &f),
-            active_strikes(k, 3.0, R, Vec3::Y * R, f32::MAX, 0.1, &f)
-        );
+        let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3600.1, &f);
+        let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 0.1, &f);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert!(x.seed == y.seed && x.pos == y.pos && (x.age - y.age).abs() < 1e-2);
+        }
     }
 
     #[test]
@@ -669,21 +710,137 @@ mod tests {
         assert!(dip < 0.5 * peak);
     }
 
+    fn strike_at(pos: Vec3) -> Strike {
+        Strike {
+            pos,
+            age: 0.05,
+            intensity: 1.0,
+            seed: 1,
+        }
+    }
+
     #[test]
     fn flash_falls_off_with_distance() {
-        let at = |d: f32| {
-            let s = Strike {
-                pos: Vec3::new(d, 0.0, 0.0),
-                age: 0.05,
-                intensity: 1.0,
-                seed: 1,
-            };
-            flash_at(&[s], Vec3::ZERO)
+        // same side: a camera on the surface, strikes at growing angles up to the horizon
+        let cam = Vec3::Y * (R + 1.0);
+        let at = |deg: f32| {
+            let a = deg.to_radians();
+            flash_at(&[strike_at(Vec3::new(a.sin(), a.cos(), 0.0) * R)], cam, R)
         };
-        assert!(at(10.0) > at(600.0));
-        assert!(at(600.0) > at(5000.0));
-        assert!(at(0.0) <= 1.0 && at(0.0) > 0.9);
-        assert_eq!(flash_at(&[], Vec3::ZERO), 0.0);
+        assert!(at(0.0) > 0.9 && at(0.0) <= 1.0);
+        assert!(
+            at(0.0) > at(10.0) && at(10.0) > at(30.0),
+            "{} {} {}",
+            at(0.0),
+            at(10.0),
+            at(30.0)
+        );
+        // the old falloff: intensity / (1 + (d / range)^2) for a visible strike
+        let d = Vec3::new(0.0, R + 1.0, 0.0)
+            .distance(Vec3::new(10f32.to_radians().sin(), 10f32.to_radians().cos(), 0.0) * R);
+        let range = FLASH_RANGE.min(1.2 * R);
+        assert!((at(10.0) - 1.0 / (1.0 + (d / range).powi(2))).abs() < 1e-4);
+        assert_eq!(flash_at(&[], cam, R), 0.0);
+    }
+
+    #[test]
+    fn flash_does_not_go_through_the_planet() {
+        let cam = Vec3::Y * (R + 1.0);
+        assert_eq!(flash_at(&[strike_at(-Vec3::Y * R)], cam, R), 0.0);
+        assert_eq!(flash_at(&[strike_at(-Vec3::X * R)], cam, R), 0.0);
+    }
+
+    #[test]
+    fn flash_range_scales_with_small_planets() {
+        let r = 40.0;
+        let cam = Vec3::Y * (r + 1.0);
+        let near = flash_at(&[strike_at(Vec3::Y * r)], cam, r);
+        let far = flash_at(
+            &[strike_at(Vec3::new(0.5, 1.0, 0.0).normalize() * r)],
+            cam,
+            r,
+        );
+        assert!(near > far && far > 0.0);
+    }
+
+    fn key(p: Vec3) -> (u32, u32, u32) {
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+    }
+
+    #[test]
+    fn strikes_spread_over_the_surface_on_every_planet_size() {
+        let f = full_storm();
+        let k = kind(PlanetType::EarthLike);
+        for r in [40.0, 100.0, 168.0, 250.0, 500.0, 1000.0] {
+            let mut seen = std::collections::HashSet::new();
+            let mut t = 0.0;
+            while t < 120.0 {
+                for s in active_strikes(k, 1.0, r, SEED, Vec3::Y * r, f32::MAX, t, &f) {
+                    seen.insert(key(s.pos));
+                }
+                t += 0.25;
+            }
+            assert!(seen.len() >= 20, "R {r}: {} distinct sites", seen.len());
+        }
+    }
+
+    #[test]
+    fn planets_with_other_seeds_strike_elsewhere() {
+        let f = full_storm();
+        let k = kind(PlanetType::EarthLike);
+        let sites = |seed: u32| {
+            let mut v = std::collections::HashSet::new();
+            let mut t = 0.0;
+            while t < 120.0 {
+                for s in active_strikes(k, 1.0, R, seed, Vec3::Y * R, f32::MAX, t, &f) {
+                    v.insert(key(s.pos));
+                }
+                t += 0.25;
+            }
+            v
+        };
+        let (a, b) = (sites(1), sites(2));
+        assert!(!a.is_empty() && !b.is_empty());
+        assert!(a.is_disjoint(&b));
+    }
+
+    #[test]
+    fn a_small_planet_strikes_near_a_camera_on_its_surface() {
+        let f = full_storm();
+        let k = kind(PlanetType::EarthLike);
+        let cam = Vec3::Y * 168.0;
+        let mut near = false;
+        let mut t = 0.0;
+        while t < 60.0 {
+            near |= !active_strikes(k, 1.0, 168.0, SEED, cam, 300.0, t, &f).is_empty();
+            t += 0.25;
+        }
+        assert!(near);
+    }
+
+    #[test]
+    fn the_site_changes_from_slot_to_slot() {
+        let f = full_storm();
+        let k = kind(PlanetType::EarthLike);
+        // rate 3, a small grid: collect the sites per slot and check no site repeats in the next slot
+        let sites_in_slot = |slot: u32| {
+            let mut v = std::collections::HashSet::new();
+            let mut t = slot as f32 * SLOT_SECS;
+            while t < (slot + 1) as f32 * SLOT_SECS {
+                for s in active_strikes(k, 3.0, 40.0, SEED, Vec3::Y * 40.0, f32::MAX, t, &f) {
+                    v.insert(key(s.pos));
+                }
+                t += 0.05;
+            }
+            v
+        };
+        let mut compared = 0;
+        for slot in 10..60 {
+            let (a, b) = (sites_in_slot(slot), sites_in_slot(slot + 1));
+            compared += a.len().min(b.len());
+            assert!(a.is_disjoint(&b), "slot {slot} repeats a site");
+        }
+        assert!(compared > 0);
     }
 
     #[test]
@@ -704,10 +861,15 @@ mod tests {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
         for cam in [Vec3::ZERO, Vec3::Y * R] {
-            for s in active_strikes(k, 3.0, R, cam, f32::MAX, 10.0, &f) {
+            for s in active_strikes(k, 3.0, R, SEED, cam, f32::MAX, 10.0, &f) {
                 assert!(s.pos.is_finite() && s.intensity.is_finite());
             }
-            assert!(flash_at(&active_strikes(k, 3.0, R, cam, f32::MAX, 10.0, &f), cam).is_finite());
+            assert!(flash_at(
+                &active_strikes(k, 3.0, R, SEED, cam, f32::MAX, 10.0, &f),
+                cam,
+                R
+            )
+            .is_finite());
         }
     }
 
@@ -720,10 +882,10 @@ mod tests {
         let mut found = false;
         let mut t = 0.0;
         while t < 120.0 {
-            found |= !frame_strikes(k, &on, true, R, Vec3::Y * R, t, &f).is_empty();
-            assert!(frame_strikes(k, &off, true, R, Vec3::Y * R, t, &f).is_empty());
+            found |= !frame_strikes(k, &on, true, R, SEED, Vec3::Y * R, t, &f).is_empty();
+            assert!(frame_strikes(k, &off, true, R, SEED, Vec3::Y * R, t, &f).is_empty());
             assert!(
-                frame_strikes(k, &on, false, R, Vec3::Y * R, t, &f).is_empty(),
+                frame_strikes(k, &on, false, R, SEED, Vec3::Y * R, t, &f).is_empty(),
                 "weather off"
             );
             t += 0.25;

@@ -2567,11 +2567,6 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
-        self.system.weather_force = self.weather_force;
-        self.system.lightning = crate::weather::lightning::LightningSettings {
-            on: self.weather.on && self.weather.lightning.on,
-            ..self.weather.lightning
-        };
         self.system.light = self.light.uniform();
         self.update_console_mesh(console.height_fraction);
 
@@ -2715,11 +2710,16 @@ impl Renderer {
             &self.weather.lightning,
             self.weather.on,
             planet.resolution as f32 * 0.5,
+            planet.seed,
             cam_pos,
             time,
             &self.weather_force,
         );
-        let mut flash = crate::weather::lightning::flash_at(&self.strikes, cam_pos);
+        let mut flash = crate::weather::lightning::flash_at(
+            &self.strikes,
+            cam_pos,
+            planet.resolution as f32 * 0.5,
+        );
         if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
             flash *= 0.25; // under water
         }
@@ -2785,7 +2785,10 @@ impl Renderer {
             .update(&self.queue, &precip, self.precip.grid(), time);
 
         // the bolts of this frame's strikes (lightning.rs); none seen from under water
-        let bolts = if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
+        // (and none seen from above the cloud shell: the bolts would shine through the cover)
+        let bolts = if Self::camera_water_radius(planet, cam_pos) > cam_pos.length()
+            || cam_pos.length() > planet.resolution as f32 * 0.5 * crate::planet::data::CLOUD_ALT
+        {
             Vec::new()
         } else {
             crate::weather::lightning::bolt_instances(
@@ -3553,6 +3556,12 @@ impl Renderer {
             .update(&self.device, &self.queue, t, self.weather_force);
         self.cloud_map.set_force(self.weather_force);
         self.cloud_map.update(&self.device, &self.queue, t);
+        // the impostors' lightning schedule follows this frame's force, not last frame's
+        self.system.weather_force = self.weather_force;
+        self.system.lightning = crate::weather::lightning::LightningSettings {
+            on: self.weather.on && self.weather.lightning.on,
+            ..self.weather.lightning
+        };
     }
 
     // the weather's force or on/off changed: the snapshots are outdated
@@ -3641,11 +3650,6 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
-        self.system.weather_force = self.weather_force;
-        self.system.lightning = crate::weather::lightning::LightningSettings {
-            on: self.weather.on && self.weather.lightning.on,
-            ..self.weather.lightning
-        };
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after Space mode bakes the map whole
@@ -3757,11 +3761,6 @@ impl Renderer {
             0.0
         };
         self.system.fog_wind = self.fog_wind;
-        self.system.weather_force = self.weather_force;
-        self.system.lightning = crate::weather::lightning::LightningSettings {
-            on: self.weather.on && self.weather.lightning.on,
-            ..self.weather.lightning
-        };
         self.system.light = self.light.uniform();
         self.update_sky_maps(t);
         let out = match self.surface.get_current_texture() {
