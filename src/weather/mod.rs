@@ -32,7 +32,16 @@ pub(crate) const WEATHER_BAKE_SHADER: &str = concat!(
 pub const SNAPSHOT_SECS: f64 = 5.0;
 const SLOTS: u32 = 3;
 pub const WEATHER_USAGE: &str =
-    "Usage: /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]]";
+    "Usage: /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <0-3>|mist <0-3>]]";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FogArg {
+    Show,
+    On,
+    Off,
+    Density(f32),
+    Mist(f32),
+}
 
 const WEATHER_PERIOD: f32 = 3600.0;
 const WEATHER_SCALE: f32 = 1.6;
@@ -313,6 +322,7 @@ struct ForceState {
 pub struct WeatherSettings {
     pub on: bool,
     pub particles: bool,
+    pub fog: fog::FogSettings,
     force: Option<ForceState>,
 }
 
@@ -321,6 +331,7 @@ impl Default for WeatherSettings {
         Self {
             on: true,
             particles: true,
+            fog: fog::FogSettings::default(),
             force: None,
         }
     }
@@ -334,6 +345,7 @@ pub enum WeatherCommand {
     Auto,
     Force(Force),
     Particles(Option<bool>),
+    Fog(FogArg),
 }
 
 impl WeatherCommand {
@@ -350,6 +362,20 @@ impl WeatherCommand {
             ["particles"] => Ok(WeatherCommand::Particles(None)),
             ["particles", "on"] => Ok(WeatherCommand::Particles(Some(true))),
             ["particles", "off"] => Ok(WeatherCommand::Particles(Some(false))),
+            ["fog"] => Ok(WeatherCommand::Fog(FogArg::Show)),
+            ["fog", "on"] => Ok(WeatherCommand::Fog(FogArg::On)),
+            ["fog", "off"] => Ok(WeatherCommand::Fog(FogArg::Off)),
+            ["fog", which @ ("density" | "mist"), v] => match v.parse::<f32>() {
+                Ok(v) if (0.0..=3.0).contains(&v) => {
+                    Ok(WeatherCommand::Fog(if *which == "density" {
+                        FogArg::Density(v)
+                    } else {
+                        FogArg::Mist(v)
+                    }))
+                }
+                _ => Err(fog::FOG_USAGE),
+            },
+            ["fog", ..] => Err(fog::FOG_USAGE),
             _ => Err(WEATHER_USAGE),
         }
     }
@@ -406,6 +432,30 @@ impl WeatherSettings {
             WeatherCommand::Particles(Some(v)) => {
                 self.particles = v;
                 false
+            }
+            WeatherCommand::Fog(arg) => {
+                match arg {
+                    FogArg::Show => {}
+                    FogArg::On => self.fog.on = true,
+                    FogArg::Off => self.fog.on = false,
+                    FogArg::Density(v) => {
+                        self.fog.density = v;
+                        self.fog.on = true;
+                    }
+                    FogArg::Mist(v) => {
+                        self.fog.mist = v;
+                        self.fog.on = true;
+                    }
+                }
+                return (
+                    format!(
+                        "Weather fog: {} (density {:.1}, mist {:.1})",
+                        if self.fog.on { "on" } else { "off" },
+                        self.fog.density,
+                        self.fog.mist
+                    ),
+                    false,
+                );
             }
             WeatherCommand::On => !std::mem::replace(&mut self.on, true),
             WeatherCommand::Off => std::mem::replace(&mut self.on, false),
@@ -1105,6 +1155,49 @@ mod tests {
         );
         assert_eq!(WeatherCommand::parse(&["hail"]), Err(WEATHER_USAGE));
         assert_eq!(WeatherCommand::parse(&["rain", "now"]), Err(WEATHER_USAGE));
+    }
+
+    #[test]
+    fn weather_fog_command_parses_and_applies_without_a_rebake() {
+        use super::fog::FogSettings;
+        assert_eq!(
+            WeatherCommand::parse(&["fog"]),
+            Ok(WeatherCommand::Fog(FogArg::Show))
+        );
+        assert_eq!(
+            WeatherCommand::parse(&["fog", "off"]),
+            Ok(WeatherCommand::Fog(FogArg::Off))
+        );
+        assert_eq!(
+            WeatherCommand::parse(&["fog", "density", "2.5"]),
+            Ok(WeatherCommand::Fog(FogArg::Density(2.5)))
+        );
+        assert!(
+            WeatherCommand::parse(&["fog", "density", "9"]).is_err(),
+            "above 3"
+        );
+        assert!(
+            WeatherCommand::parse(&["fog", "mist"]).is_err(),
+            "needs a value"
+        );
+
+        let mut s = WeatherSettings::default();
+        assert_eq!(s.fog, FogSettings::default());
+        let (_, rebake) = s.apply(
+            WeatherCommand::Fog(FogArg::Off),
+            WeatherKind::Dust,
+            Vec3::Y,
+            0.0,
+        );
+        assert!(!s.fog.on && !rebake, "fog changes no baked value");
+        let (msg, _) = s.apply(
+            WeatherCommand::Fog(FogArg::Mist(0.5)),
+            WeatherKind::Dust,
+            Vec3::Y,
+            0.0,
+        );
+        assert_eq!(s.fog.mist, 0.5);
+        assert!(msg.contains("fog"), "{msg}");
     }
 
     #[test]

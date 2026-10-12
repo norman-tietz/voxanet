@@ -1557,7 +1557,10 @@ impl Game {
             if *mode == GameMode::Space
                 && !matches!(
                     cmd,
-                    WeatherCommand::On | WeatherCommand::Off | WeatherCommand::Particles(_)
+                    WeatherCommand::On
+                        | WeatherCommand::Off
+                        | WeatherCommand::Particles(_)
+                        | WeatherCommand::Fog(_)
                 )
             {
                 console.log(
