@@ -2811,12 +2811,10 @@ impl Renderer {
             }
             crate::space::render::SpaceContent::Everything => (0.0, glam::Quat::IDENTITY),
         };
-        let mut biome_data = BiomeUniform::from_def(
-            &planet.planet_type.def(),
-            &backdrop.system.star,
-            angular_radius,
-            star_frame,
-        );
+        let mut def = planet.planet_type.def();
+        def.atmosphere = def.atmosphere.tinted(planet.traits.sky_hue);
+        let mut biome_data =
+            BiomeUniform::from_def(&def, &backdrop.system.star, angular_radius, star_frame);
         biome_data.weather_rule = kind.rule();
         biome_data.weather_cover = kind.cover();
         // lens flare: the sun projected far along its direction; none once the sun is below the planet's

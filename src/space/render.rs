@@ -1247,7 +1247,7 @@ impl SpaceRenderer {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
         let light_dir = (-body_pos).normalize_or_zero().as_vec3();
-        let atmosphere = p.planet_type.def().atmosphere;
+        let atmosphere = p.planet_type.def().atmosphere.tinted(p.traits.sky_hue);
         let model = glam::Mat3::from_quat(p.orientation(t));
         let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
         // lightning on this planet (weather/lightning.rs): the whole planet's cells, from the camera's
@@ -1694,6 +1694,27 @@ mod tests {
             );
             assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
         }
+    }
+
+    #[test]
+    fn impostor_and_engine_share_the_tinted_atmosphere() {
+        let mut system = SolarSystem::generate(1);
+        system.planets[0].traits.sky_hue = 0.2;
+        let u = SpaceRenderer::planet_uniform(
+            &system,
+            0,
+            Vec3::Z * 500.0,
+            0.0,
+            [0.0; 4],
+            [0.0; 4],
+            1.0,
+            &quiet_force(),
+            &LightningSettings::default(),
+            true,
+        );
+        let tinted = system.planets[0].planet_type.def().atmosphere.tinted(0.2);
+        assert_eq!(&u.sky_zenith[..3], &tinted.sky_zenith[..]);
+        assert_eq!(&u.cloud_light[..3], &tinted.cloud_light[..]);
     }
 
     // the impostor's storm fog uses the planet type's table and the setting; nothing when off

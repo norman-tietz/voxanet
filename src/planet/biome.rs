@@ -319,6 +319,36 @@ pub struct AtmosphereDef {
     pub density: f32,
 }
 
+impl AtmosphereDef {
+    // the sky and cloud colours with their hue rotated by `hue` radians about the grey axis (a rotation:
+    // the channel sum, so the brightness, is kept); liquid and space colour untouched (PlanetTraits)
+    pub fn tinted(self, hue: f32) -> Self {
+        if hue == 0.0 {
+            return self;
+        }
+        let (s, c) = hue.sin_cos();
+        let k = (1.0 - c) / 3.0;
+        let r = 3f32.sqrt().recip() * s;
+        let rot = |v: [f32; 3]| {
+            let m = [
+                [c + k, k - r, k + r],
+                [k + r, c + k, k - r],
+                [k - r, k + r, c + k],
+            ];
+            let out = m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2]);
+            out.map(|x| x.max(0.0))
+        };
+        Self {
+            sky_zenith: rot(self.sky_zenith),
+            sky_horizon_warm: rot(self.sky_horizon_warm),
+            cloud_light: rot(self.cloud_light),
+            cloud_dark: rot(self.cloud_dark),
+            space_color: self.space_color,
+            density: self.density,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub peak: BlockType,
@@ -341,6 +371,26 @@ pub struct PlanetTypeDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tint_zero_is_the_identity_and_keeps_brightness() {
+        let a = PlanetType::EarthLike.def().atmosphere;
+        let same = a.tinted(0.0);
+        assert_eq!(same.sky_zenith, a.sky_zenith);
+        assert_eq!(same.cloud_dark, a.cloud_dark);
+        let t = a.tinted(0.25);
+        let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
+        for (x, y) in [
+            (a.sky_zenith, t.sky_zenith),
+            (a.sky_horizon_warm, t.sky_horizon_warm),
+            (a.cloud_light, t.cloud_light),
+        ] {
+            assert!((sum(x) - sum(y)).abs() < 0.02, "{x:?} vs {y:?}");
+        }
+        assert_ne!(t.sky_zenith, a.sky_zenith);
+        assert_eq!(t.space_color, a.space_color);
+        assert_eq!(t.density, a.density);
+    }
 
     #[test]
     fn cratered_is_an_airless_registered_type() {
