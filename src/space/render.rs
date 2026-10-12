@@ -1247,7 +1247,7 @@ impl SpaceRenderer {
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
         let light_dir = (-body_pos).normalize_or_zero().as_vec3();
-        let atmosphere = p.planet_type.def().atmosphere.tinted(p.traits.sky_hue);
+        let atmosphere = p.traits.tinted_def(p.planet_type).atmosphere;
         let model = glam::Mat3::from_quat(p.orientation(t));
         let v4 = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
         // lightning on this planet (weather/lightning.rs): the whole planet's cells, from the camera's

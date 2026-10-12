@@ -148,8 +148,9 @@ pub struct Planet {
     pub orbit_node: f64, // direction of the tilt axis within the plane, radians
     pub radius: f32,
     pub planet_type: PlanetType,
-    pub noise_seed: u32, // seeds this planet's TerrainShape/NoiseGenerator (src/impostor.rs);
-    // independent of planet_radius_for's hash so radius and terrain shape don't correlate
+    // seeds this planet's TerrainShape/NoiseGenerator (src/impostor.rs); independent of
+    // planet_radius_for's hash so radius and terrain shape don't correlate
+    pub noise_seed: u32,
     pub traits: crate::planet::traits::PlanetTraits, // per-planet variation (NEUTRAL = the type exactly)
 }
 
@@ -776,15 +777,6 @@ mod tests {
         assert!(s.add_planet(PlanetType::Ice, 100.0).is_err());
     }
 
-    #[test]
-    fn the_start_generator_is_unchanged() {
-        let s = SolarSystem::generate(1);
-        assert_eq!(s.planets.len(), PLANET_COUNT);
-        for (i, p) in s.planets.iter().enumerate() {
-            assert_eq!(p.planet_type, PlanetType::ALL[i]);
-            assert_eq!(p.traits, crate::planet::traits::PlanetTraits::NEUTRAL);
-        }
-    }
     use crate::player::controller::FlightKeys;
 
     #[test]
@@ -793,6 +785,7 @@ mod tests {
         assert_eq!(s.planets.len(), 8);
         for (i, p) in s.planets.iter().enumerate() {
             assert_eq!(p.planet_type, PlanetType::ALL[i]);
+            assert_eq!(p.traits, crate::planet::traits::PlanetTraits::NEUTRAL);
         }
         assert_eq!(s.planets[7].planet_type, PlanetType::Cratered);
     }
@@ -1295,8 +1288,6 @@ mod tests {
         }
     }
 
-    // the spin includes the orbit rate, so a day lasts exactly the planet type's day length (the
-    // same as on the home planet) despite the planet also moving around the star
     #[test]
     fn the_solar_day_follows_the_scaled_day_length() {
         let mut p = SolarSystem::generate(1).planets[2];
@@ -1317,6 +1308,8 @@ mod tests {
         assert_eq!(p.bake().traits.gravity, 0.7);
     }
 
+    // the spin includes the orbit rate, so a day lasts exactly the planet type's day length (the
+    // same as on the home planet) despite the planet also moving around the star
     #[test]
     fn solar_day_equals_the_planet_types_day_length() {
         let g = SolarSystem::generate(1);

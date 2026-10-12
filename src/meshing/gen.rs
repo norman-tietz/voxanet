@@ -1298,7 +1298,8 @@ impl MeshGen {
         gy: i32,
         style: crate::meshing::lowpoly::TerrainStyle,
     ) -> (glam::Vec3, glam::Vec3, [f32; 3]) {
-        let def = data.planet_type.def();
+        // the tinted sky, as fs_water reflects it (identical to the type's at hue 0)
+        let def = data.traits.tinted_def(data.planet_type);
         let grid_res = Self::LOD_GRID;
 
         // calculate global pos for any grid index (even outside this chunk)

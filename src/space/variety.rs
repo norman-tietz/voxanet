@@ -137,6 +137,7 @@ mod tests {
     fn types_follow_the_temperature() {
         let (mut hot, mut hot_n, mut cold, mut cold_n, mut mild, mut mild_n) = (0, 0, 0, 0, 0, 0);
         let (mut shattered, mut total) = (0, 0);
+        let mut cold_icy = 0;
         let (mut duplicate, mut no_earth) = (false, false);
         for seed in 1000..3000u64 {
             let s = SolarSystem::generate_varied(seed);
@@ -160,6 +161,9 @@ mod tests {
                     if p.planet_type == PlanetType::Ice {
                         cold += 1;
                     }
+                    if matches!(p.planet_type, PlanetType::Ice | PlanetType::Cratered) {
+                        cold_icy += 1;
+                    }
                 } else if tau.abs() < 0.25 {
                     mild_n += 1;
                     if matches!(p.planet_type, PlanetType::EarthLike | PlanetType::Ocean) {
@@ -175,6 +179,11 @@ mod tests {
         assert!(share(hot, hot_n) > 0.85, "hot {}", share(hot, hot_n));
         // 0.65 (was 0.8): the 8th type, Cratered, takes up to 0.37 of the weight on cold orbits
         assert!(share(cold, cold_n) > 0.65, "cold {}", share(cold, cold_n));
+        assert!(
+            share(cold_icy, cold_n) > 0.85,
+            "cold ice or cratered {}",
+            share(cold_icy, cold_n)
+        );
         assert!(share(mild, mild_n) > 0.6, "mild {}", share(mild, mild_n));
         let s = share(shattered, total);
         assert!(s > 0.0 && s < 0.1, "shattered {s}");

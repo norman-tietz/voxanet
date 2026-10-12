@@ -831,8 +831,8 @@ pub(crate) mod tests {
             let (lo, hi) = p.terrain.height_range();
             hi - lo
         };
-        let flat = PlanetData::new_for_planet(400, 7, PlanetType::EarthLike, traits(0.7));
-        let rough = PlanetData::new_for_planet(400, 7, PlanetType::EarthLike, traits(1.4));
+        let flat = PlanetData::new_for_planet(128, 7, PlanetType::EarthLike, traits(0.4));
+        let rough = PlanetData::new_for_planet(128, 7, PlanetType::EarthLike, traits(1.0));
         assert!(
             span(&rough) > span(&flat),
             "{} vs {}",

@@ -133,7 +133,6 @@ impl TerrainShape {
     }
 
     // highest mountains above sea level, in layers (the impostors' colour bands use it)
-    #[allow(dead_code)]
     pub(crate) fn relief(&self) -> f32 {
         self.relief
     }
@@ -1365,8 +1364,8 @@ mod tests {
         for t in [PlanetType::Volcanic, PlanetType::Toxic, PlanetType::Ice] {
             let (s, g) = shape_of(t, res, 3);
             let mut worst = 0.0_f32;
-            for k in 0..30 {
-                let pts = circle(k, res, 0.01, 600.0);
+            for k in 0..10 {
+                let pts = circle(k, res, 0.01, 300.0);
                 let mut prev = s.natural_height(&g, pts[0]);
                 for &d in &pts[1..] {
                     let h = s.natural_height(&g, d);

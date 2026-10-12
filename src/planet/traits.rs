@@ -23,6 +23,17 @@ impl PlanetTraits {
         gravity: 1.0,
     };
 
+    // the planet type's definition with this planet's sky tint applied; the one place the engine
+    // (Renderer::render) and the impostors (planet_uniform, lod/impostor water) get a tinted atmosphere from
+    pub fn tinted_def(
+        &self,
+        planet_type: crate::planet::biome::PlanetType,
+    ) -> crate::planet::biome::PlanetTypeDef {
+        let mut def = planet_type.def();
+        def.atmosphere = def.atmosphere.tinted(self.sky_hue);
+        def
+    }
+
     // the part the terrain bake and the impostors need
     pub fn terrain(&self) -> TerrainTweaks {
         TerrainTweaks {
@@ -39,5 +50,23 @@ mod tests {
     #[test]
     fn neutral_terrain_tweaks_are_neutral() {
         assert_eq!(PlanetTraits::NEUTRAL.terrain(), TerrainTweaks::NEUTRAL);
+    }
+
+    #[test]
+    fn tinted_def_is_the_type_at_hue_zero_and_shifts_the_sky_otherwise() {
+        use crate::planet::biome::PlanetType;
+        let base = PlanetType::EarthLike.def();
+        let same = PlanetTraits::NEUTRAL.tinted_def(PlanetType::EarthLike);
+        assert_eq!(same.atmosphere.sky_zenith, base.atmosphere.sky_zenith);
+        assert_eq!(same.atmosphere.cloud_light, base.atmosphere.cloud_light);
+        let t = PlanetTraits {
+            sky_hue: 0.2,
+            ..PlanetTraits::NEUTRAL
+        }
+        .tinted_def(PlanetType::EarthLike);
+        assert_ne!(t.atmosphere.sky_zenith, base.atmosphere.sky_zenith);
+        assert_eq!(t.atmosphere.density, base.atmosphere.density);
+        assert_eq!(t.atmosphere.space_color, base.atmosphere.space_color);
+        assert_eq!(t.palette.ground.color(), base.palette.ground.color());
     }
 }

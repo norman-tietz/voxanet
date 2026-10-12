@@ -2586,9 +2586,7 @@ impl Renderer {
         }
         self.perf_tick("planet");
         // the installed planet's storminess shifts the storm thresholds; a change outdates the maps
-        if self.weather.set_storminess(planet.traits.storminess) {
-            self.weather_changed();
-        }
+        self.apply_storminess(planet.traits.storminess);
         // before the backdrop, which draws clouds too
         self.update_sky_maps(time);
 
@@ -2815,8 +2813,7 @@ impl Renderer {
             }
             crate::space::render::SpaceContent::Everything => (0.0, glam::Quat::IDENTITY),
         };
-        let mut def = planet.planet_type.def();
-        def.atmosphere = def.atmosphere.tinted(planet.traits.sky_hue);
+        let def = planet.traits.tinted_def(planet.planet_type);
         let mut biome_data =
             BiomeUniform::from_def(&def, &backdrop.system.star, angular_radius, star_frame);
         biome_data.weather_rule = kind.rule();
@@ -3630,6 +3627,13 @@ impl Renderer {
         self.perf = None;
     }
 
+    // the installed planet's storminess shifts the storm thresholds; a change outdates the maps
+    pub fn apply_storminess(&mut self, storminess: f32) {
+        if self.weather.set_storminess(storminess) {
+            self.weather_changed();
+        }
+    }
+
     pub fn weather_changed(&mut self) {
         self.weather_map.reset();
         self.cloud_map.reset();
@@ -3931,9 +3935,7 @@ impl Renderer {
                 format!("radius {:.0}", p.radius),
                 format!("day {:.0} s", p.day_length()),
                 format!("gravity {:.1} g", p.traits.gravity),
-                if crate::weather::WeatherKind::for_planet(p.planet_type)
-                    == crate::weather::WeatherKind::None
-                {
+                if def.atmosphere.density == 0.0 {
                     "no weather".to_string()
                 } else {
                     format!("weather {}", weather_word(p.traits.storminess))

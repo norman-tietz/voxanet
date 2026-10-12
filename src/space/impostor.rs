@@ -26,7 +26,8 @@ pub fn generate_planet_mesh(planet: &Planet, subdivision: u32) -> (Vec<Vertex>, 
     // the same resolution Planet::bake uses, so impostor and voxel world agree to the unit
     let res = planet.voxel_resolution();
     let sea_level = (res / 2) as f32;
-    let def = planet.planet_type.def();
+    // the tinted sky, as fs_water reflects it (identical to the type's at hue 0)
+    let def = planet.traits.tinted_def(planet.planet_type);
     let generator = NoiseGenerator::new(planet.noise_seed);
     // lakes like the baked planet (Planet::bake: liquid planet types)
     let shape = TerrainShape::tweaked(
@@ -292,10 +293,23 @@ mod tests {
         let (unit_verts, _) = crate::space::icosphere::generate(2);
         let (verts, _) = generate_planet_mesh(&planet, 2);
         for (dir, v) in unit_verts.iter().zip(&verts) {
-            let h = shape.sample(&g, *dir).height;
-            assert!(h <= 1.2 * shape.relief() + 1.0);
-            assert!(Vec3::from_array(v.pos).length() > 0.0);
+            let s = shape.sample(&g, *dir);
+            assert!(s.height <= 1.2 * shape.relief() + 1.0);
+            // the radius the builder derives from the tweaked shape (lakes flat at their level)
+            let lake = s
+                .lake
+                .map(|k| shape.lakes()[k].level as f32 - sea)
+                .filter(|&l| s.height < l);
+            let h = lake.unwrap_or(s.height.max(0.0));
+            let expected = CoordSystem::get_layer_radius_f(sea + h, res);
+            let actual = Vec3::from_array(v.pos).length();
+            assert!((actual - expected).abs() < 1e-2, "{actual} vs {expected}");
         }
+        // and it is not the neutral planet's mesh
+        let mut neutral = planet;
+        neutral.traits = crate::planet::traits::PlanetTraits::NEUTRAL;
+        let (plain, _) = generate_planet_mesh(&neutral, 2);
+        assert!(verts.iter().zip(&plain).any(|(a, b)| a.pos != b.pos));
     }
 
     fn test_planet(noise_seed: u32, planet_type: PlanetType) -> Planet {

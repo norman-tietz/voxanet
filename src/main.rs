@@ -214,6 +214,8 @@ fn install_world(
     controller.selected_block =
         crate::planet::material::placeable(&planet.planet_type.def().palette)[0];
     renderer.force_reload_all(planet, stream_from);
+    // the new planet's storms now, not at the first planet frame (a rebake in the handover frame popped)
+    renderer.apply_storminess(planet.traits.storminess);
     renderer.set_near_impostor(baked.index, &baked.near_verts, &baked.near_indices);
     renderer.log_memory(planet);
 }

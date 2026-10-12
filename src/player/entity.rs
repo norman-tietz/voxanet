@@ -58,6 +58,12 @@ const THICK_JUMP: f32 = 0.7;
 
 // a thick liquid (lava, sludge) slows a falling body to its sink speed; rising (a jump off the
 // bottom) is left alone. Pure, tested.
+// the hop's strength factor on a planet of this gravity: scaled by sqrt(g) so the apex (v² / 2g) stays the
+// same one-block-ledge hop on every planet; exactly THICK_JUMP at gravity 1.0
+fn thick_jump_force(gravity: f32) -> f32 {
+    THICK_JUMP * gravity.sqrt()
+}
+
 fn thick_liquid_vertical(vert: f32, sink_speed: f32) -> f32 {
     vert.max(-sink_speed)
 }
@@ -537,7 +543,11 @@ impl Player {
         // --- JUMP ---
         if jump && self.grounded && !flying {
             // a thick liquid holds the legs back: enough to climb a one-block ledge out, no more
-            let force = if thick.is_some() { THICK_JUMP } else { 1.0 };
+            let force = if thick.is_some() {
+                thick_jump_force(planet.traits.gravity)
+            } else {
+                1.0
+            };
             self.velocity += up * self.jump_force * force;
             self.grounded = false;
         }
@@ -684,6 +694,7 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     // a jump goes about 1/gravity as high
     #[test]
@@ -713,7 +724,17 @@ mod tests {
         let ratio = apex(0.5) / apex(1.0);
         assert!((ratio - 2.0).abs() < 0.2, "ratio {ratio}");
     }
-    use super::*;
+
+    // the wading hop clears a one-block ledge at every gravity (apex = v² / 2g, v = jump_force × factor)
+    #[test]
+    fn thick_liquid_hop_clears_a_block_at_every_gravity() {
+        for g in [0.54_f32, 1.0, 1.43] {
+            let v = 8.0 * thick_jump_force(g);
+            let apex = v * v / (2.0 * Physics::GRAVITY * g);
+            assert!(apex > 1.0, "gravity {g}: apex {apex}");
+        }
+        assert_eq!(thick_jump_force(1.0), THICK_JUMP);
+    }
     use crate::player::controller::FlightKeys;
 
     // Test wrapper that calls the production function
