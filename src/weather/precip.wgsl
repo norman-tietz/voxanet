@@ -118,7 +118,9 @@ fn fs_precip(in: PrecipOut) -> @location(0) vec4<f32> {
     let behind = textureLoad(d_dist, vec2<i32>(in.clip_pos.xy), 0).r;
     let dist = distance(in.world, global.camera_pos.xyz);
     let soft = select(1.0, clamp((behind - dist) / 0.5, 0.0, 1.0), behind > 0.0);
-    let a = precip.color.a * shape * in.fade * soft;
+    // dense storm fog hides the particles far away, like the terrain (atmosphere.wgsl atmo_storm_optical_depth)
+    let fogged = exp(-global.fog.y * fog_storm_weight(global.fog.x) * dist);
+    let a = precip.color.a * shape * in.fade * soft * fogged;
     if (a <= 0.001) { discard; }
     // lit by the sky and (a little) the sun, no shadows; rain takes the sky colour itself
     let L = normalize(global.sun_dir.xyz);

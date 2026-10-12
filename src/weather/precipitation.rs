@@ -605,6 +605,12 @@ mod tests {
     }
 
     #[test]
+    fn precip_shader_fades_with_the_storm_fog() {
+        let src = include_str!("precip.wgsl");
+        assert!(src.contains("fog_storm_weight(global.fog.x)"));
+    }
+
+    #[test]
     fn particles_command_parses() {
         assert_eq!(
             WeatherCommand::parse(&["particles"]),
