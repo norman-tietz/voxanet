@@ -280,7 +280,9 @@ pub fn plant_blocks(
         };
         let layer = base + offset;
         for &(face, u, v) in columns {
-            if layer <= data.effective_height(face, u, v) {
+            // the same window `PlanetData::decor_block` accepts, so the cache and `exists` agree
+            let ground = data.effective_height(face, u, v);
+            if layer <= ground || layer > ground + MAX_PLANT_HEIGHT {
                 continue;
             }
             if ragged && hash(plant.hash, face, u, v, layer) % 5 == 0 {
@@ -299,16 +301,39 @@ pub fn plant_blocks(
 pub struct ChunkDecor {
     pub blocks: HashMap<BlockId, BlockType>,
     pub tops: HashMap<(u32, u32), u32>,
+    // per column of the chunk (u % CHUNK_SIZE * CHUNK_SIZE + v % CHUNK_SIZE) the height of its highest
+    // plant block above the column's ground, 0 = no plant: most `exists` queries end on this one read
+    col_top: Vec<u8>,
+}
+
+impl ChunkDecor {
+    fn empty() -> Self {
+        Self {
+            blocks: HashMap::new(),
+            tops: HashMap::new(),
+            col_top: vec![0; (CHUNK_SIZE * CHUNK_SIZE) as usize],
+        }
+    }
+
+    fn slot(u: u32, v: u32) -> usize {
+        ((u % CHUNK_SIZE) * CHUNK_SIZE + v % CHUNK_SIZE) as usize
+    }
+
+    // the block at `id` for a column whose ground is at `ground` (id must be in this chunk)
+    pub fn block_above(&self, id: BlockId, ground: u32) -> Option<BlockType> {
+        let top = self.col_top[Self::slot(id.u, id.v)] as u32;
+        if top == 0 || id.layer > ground + top {
+            return None;
+        }
+        self.blocks.get(&id).copied()
+    }
 }
 
 // Pure: every anchor whose plant can reach the chunk is generated whole and its blocks inside the chunk kept.
 // Such an anchor lies in the chunk or within MAX_PLANT_REACH rings of it; the outside ones are found by
 // expanding the chunk's outermost columns through `column_neighbors`, which crosses cube-face seams.
 pub fn decor_chunk(data: &PlanetData, cfg: &FloraConfig, key: ChunkKey) -> ChunkDecor {
-    let mut out = ChunkDecor {
-        blocks: HashMap::new(),
-        tops: HashMap::new(),
-    };
+    let mut out = ChunkDecor::empty();
     if species_for(cfg.planet_type).is_empty() {
         return out;
     }
@@ -354,6 +379,10 @@ pub fn decor_chunk(data: &PlanetData, cfg: &FloraConfig, key: ChunkKey) -> Chunk
             }
         }
     }
+    for (&(u, v), &top) in &out.tops {
+        let ground = data.effective_height(key.face, u, v);
+        out.col_top[ChunkDecor::slot(u, v)] = (top - ground).min(u8::MAX as u32) as u8;
+    }
     out
 }
 
@@ -387,6 +416,16 @@ impl Flora {
             map.clear();
         }
         map.entry(key).or_insert(made).clone()
+    }
+
+    // the plant block at `id` over a column with the given ground, answered under the read lock (no Arc
+    // clone); a miss generates the chunk first
+    pub fn block_above(&self, data: &PlanetData, id: BlockId, ground: u32) -> Option<BlockType> {
+        let key = PlanetData::chunk_key(id);
+        if let Some(hit) = self.cache.read().unwrap().get(&key) {
+            return hit.block_above(id, ground);
+        }
+        self.chunk(data, key).block_above(id, ground)
     }
 
     pub fn evict(&self, key: ChunkKey) {

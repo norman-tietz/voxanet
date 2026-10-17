@@ -721,6 +721,7 @@ impl MeshGen {
         }
 
         // generate Mesh
+        let memo = crate::planet::data::DecorMemo::default();
         for id in candidates {
             if id.face == key.face
                 && id.u >= u_start
@@ -728,8 +729,8 @@ impl MeshGen {
                 && id.v >= v_start
                 && id.v < v_end
             {
-                if data.exists(id) {
-                    Self::add_voxel(id, data, &mut verts, &mut inds, &mut idx, vertex_ao);
+                if data.exists_memo(&memo, id) {
+                    Self::add_voxel(id, data, &memo, &mut verts, &mut inds, &mut idx, vertex_ao);
                 }
             }
         }
@@ -822,12 +823,13 @@ impl MeshGen {
                 }
             }
         }
+        let memo = crate::planet::data::DecorMemo::default();
         for id in candidates {
             let mine = id.face == key.face
                 && (u_start..u_end).contains(&id.u)
                 && (v_start..v_end).contains(&id.v);
-            if mine && data.exists(id) {
-                Self::add_voxel_hex(id, data, &mut verts, &mut inds, &mut idx, vertex_ao);
+            if mine && data.exists_memo(&memo, id) {
+                Self::add_voxel_hex(id, data, &memo, &mut verts, &mut inds, &mut idx, vertex_ao);
             }
         }
         (verts, inds)
@@ -839,6 +841,7 @@ impl MeshGen {
     fn add_voxel_hex(
         id: BlockId,
         data: &PlanetData,
+        memo: &crate::planet::data::DecorMemo,
         verts: &mut Vec<Vertex>,
         inds: &mut Vec<u32>,
         idx: &mut u32,
@@ -847,12 +850,15 @@ impl MeshGen {
         let res = data.resolution;
         let solid = |(face, u, v): (u8, u32, u32), layer: i64| {
             layer < 0
-                || data.exists(BlockId {
-                    face,
-                    layer: layer as u32,
-                    u,
-                    v,
-                })
+                || data.exists_memo(
+                    memo,
+                    BlockId {
+                        face,
+                        layer: layer as u32,
+                        u,
+                        v,
+                    },
+                )
         };
         let own = (id.face, id.u, id.v);
         let l = id.layer as i64;
@@ -1693,6 +1699,7 @@ impl MeshGen {
     fn add_voxel(
         id: BlockId,
         data: &PlanetData,
+        memo: &crate::planet::data::DecorMemo,
         verts: &mut Vec<Vertex>,
         inds: &mut Vec<u32>,
         idx: &mut u32,
@@ -1704,7 +1711,7 @@ impl MeshGen {
             verts,
             inds,
             idx,
-            &|b| data.exists(b),
+            &|b| data.exists_memo(memo, b),
             false,
             vertex_ao,
         );
@@ -2897,6 +2904,31 @@ mod hex_mesh_tests {
             let mut planet = PlanetData::new(res);
             planet.cells = CellShape::Hex;
             assert_closed(&planet);
+        }
+    }
+
+    // meshing time of a whole res-256 Earth-like planet in hex style, single thread, bare and with plants
+    // (`cargo test --release flora_meshing_bench -- --ignored --nocapture`)
+    #[test]
+    #[ignore]
+    fn flora_meshing_bench() {
+        let mut bare =
+            PlanetData::new_for_type(256, 3, crate::planet::biome::PlanetType::EarthLike);
+        bare.cells = CellShape::Hex;
+        let mut forest = bare.clone().with_flora(true, 1.0);
+        forest.cells = CellShape::Hex;
+        let t = std::time::Instant::now();
+        for key in all_keys(&forest) {
+            let _ = forest.decor_chunk(key);
+        }
+        eprintln!("decor generation, all chunks: {:?}", t.elapsed());
+        for (name, p) in [("bare", &bare), ("plants (decor cached)", &forest)] {
+            let t = std::time::Instant::now();
+            let mut n = 0;
+            for key in all_keys(p) {
+                n += MeshGen::build_chunk_hex_with(key, p, false).0.len();
+            }
+            eprintln!("{name}: {:?} ({n} vertices)", t.elapsed());
         }
     }
 

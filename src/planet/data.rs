@@ -127,6 +127,10 @@ pub struct ChunkMods {
     pub placed: HashMap<BlockId, BlockType>,
 }
 
+// The last plant chunk a mesher asked for (see `PlanetData::exists_memo`).
+#[derive(Default)]
+pub struct DecorMemo(std::cell::RefCell<Option<(ChunkKey, Arc<crate::planet::flora::ChunkDecor>)>>);
+
 // a planet's player edits: everything a revisit (and later a save file) needs to restore them. The map
 // is shared copy-on-write, so cloning a PlanetData for a mesh worker doesn't copy the edits
 #[derive(Clone, Default)]
@@ -312,10 +316,7 @@ impl PlanetData {
         if id.layer <= g || id.layer > g + crate::planet::flora::MAX_PLANT_HEIGHT {
             return None;
         }
-        f.chunk(self, Self::get_chunk_key(id))
-            .blocks
-            .get(&id)
-            .copied()
+        f.block_above(self, id, g)
     }
 
     pub fn decor_chunk(&self, key: ChunkKey) -> Option<Arc<crate::planet::flora::ChunkDecor>> {
@@ -496,6 +497,35 @@ impl PlanetData {
             return true;
         }
         self.flora.is_some() && self.decor_block_above(id, g).is_some()
+    }
+
+    // `exists` for a mesher's many neighbouring queries: the last chunk's decor is kept in `memo`, so
+    // runs of queries in one chunk take no lock and clone no Arc
+    pub fn exists_memo(&self, memo: &DecorMemo, id: BlockId) -> bool {
+        let key = Self::get_chunk_key(id);
+        if let Some(mods) = self.edits.chunks.get(&key) {
+            if mods.placed.contains_key(&id) {
+                return true;
+            }
+            if mods.mined.contains(&id) {
+                return false;
+            }
+        }
+        let g = self.effective_height(id.face, id.u, id.v);
+        if id.layer <= g {
+            return true;
+        }
+        let Some(f) = self.flora.as_ref() else {
+            return false;
+        };
+        if id.layer > g + crate::planet::flora::MAX_PLANT_HEIGHT {
+            return false;
+        }
+        let mut last = memo.0.borrow_mut();
+        if last.as_ref().is_none_or(|(k, _)| *k != key) {
+            *last = Some((key, f.chunk(self, key)));
+        }
+        last.as_ref().unwrap().1.block_above(id, g).is_some()
     }
 
     // terrain plus edits, without the natural plants: what `surface` and the water rule measure
