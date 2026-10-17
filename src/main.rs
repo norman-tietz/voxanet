@@ -557,6 +557,7 @@ fn close_map(map: &mut Option<crate::space::map::MapView>, controller: &mut Cont
 struct GameClock {
     start: Instant,
     frozen: bool,
+    offset: f64, // /system time: added to the running (or frozen) clock
 }
 
 impl GameClock {
@@ -564,15 +565,25 @@ impl GameClock {
         Self {
             start: Instant::now(),
             frozen,
+            offset: 0.0,
         }
     }
 
-    fn now(&self) -> f64 {
+    fn elapsed(&self) -> f64 {
         if self.frozen {
             0.0
         } else {
             self.start.elapsed().as_secs_f64()
         }
+    }
+
+    fn now(&self) -> f64 {
+        self.elapsed() + self.offset
+    }
+
+    // the clock reads `seconds` now and runs on from there (a frozen one stands there)
+    fn set(&mut self, seconds: f64) {
+        self.offset = seconds - self.elapsed();
     }
 }
 
@@ -671,7 +682,7 @@ impl Game {
         console.log(
             &format!(
                 "Starting on #{} {}.",
-                start_planet + 1,
+                crate::space::solar_system::body_label(&system, start_planet),
                 planet.planet_type.def().name
             ),
             [1.0, 1.0, 1.0],
@@ -834,8 +845,12 @@ impl Game {
                 renderer.update_view(player.position, planet);
 
                 // high enough above the planet: hand back to captured space flight
-                let radius = system.planets[*loaded_world].radius;
-                if crate::player::landing::should_lift_off(player.position.length() / radius) {
+                if crate::player::landing::must_lift_off(
+                    system,
+                    *loaded_world,
+                    player.position.as_dvec3(),
+                    clock.now(),
+                ) {
                     lift_off_from = Some(*loaded_world);
                 }
             }
@@ -949,7 +964,10 @@ impl Game {
                         space_flight.roll_rate = 0.0;
                         space_flight.turn_rate = 0.0;
                         renderer.travel_hud = None;
-                        renderer.show_status(&format!("Arrived at #{} {name}.", n + 1));
+                        renderer.show_status(&format!(
+                            "Arrived at #{} {name}.",
+                            crate::space::solar_system::body_label(system, n)
+                        ));
                         *travel = None;
                     } else {
                         space_flight.position = trip.position(t);
@@ -958,7 +976,7 @@ impl Game {
                             trip.view_rotation(system, t, space_flight.rotation);
                         renderer.travel_hud = Some(format!(
                             "-> #{} {name}  {:.0} s",
-                            n + 1,
+                            crate::space::solar_system::body_label(system, n),
                             trip.remaining(t).ceil()
                         ));
                     }
@@ -1022,7 +1040,10 @@ impl Game {
                 if next != *flight_frame {
                     space_flight.change_frame(*flight_frame, next, system, t);
                     match next {
-                        FlightFrame::Captured(i) => println!("Entering the orbit of #{}", i + 1),
+                        FlightFrame::Captured(i) => println!(
+                            "Entering the orbit of #{}",
+                            crate::space::solar_system::body_label(system, i)
+                        ),
                         FlightFrame::Free => println!("Leaving orbit"),
                     }
                     *flight_frame = next;
@@ -1052,13 +1073,17 @@ impl Game {
                     if here {
                         renderer.update_view(space_flight.position.as_vec3(), planet);
                         if !*voxel_ready_announced && renderer.view_covered() {
-                            println!("Voxel world for #{} ready", i + 1);
+                            println!(
+                                "Voxel world for #{} ready",
+                                crate::space::solar_system::body_label(system, i)
+                            );
                             *voxel_ready_announced = true;
                         }
-                        let distance_radii =
-                            space_flight.position.length() / system.planets[i].radius as f64;
-                        if crate::player::landing::should_land(
-                            distance_radii,
+                        if crate::player::landing::may_land_on(
+                            system,
+                            i,
+                            space_flight.position,
+                            t,
                             renderer.view_covered(),
                         ) {
                             land_on = Some(i);
@@ -1095,7 +1120,10 @@ impl Game {
             controller.first_person = true;
             *mode = GameMode::Planet;
             *landed_at = Some(now);
-            println!("Landing handover onto #{}", i + 1);
+            println!(
+                "Landing handover onto #{}",
+                crate::space::solar_system::body_label(system, i)
+            );
         }
         if let Some(i) = lift_off_from {
             // voxel engine -> captured space flight: same eye, same view direction and roll, same velocity
@@ -1111,7 +1139,10 @@ impl Game {
             player.landing = false;
             *mode = GameMode::Space;
             enter_space_controls(controller, map);
-            println!("Liftoff into the orbit of #{}", i + 1);
+            println!(
+                "Liftoff into the orbit of #{}",
+                crate::space::solar_system::body_label(system, i)
+            );
         }
 
         // a background bake finished: install it unless the player went home, landed or got
@@ -1156,7 +1187,11 @@ impl Game {
                 *loaded_system = key.0;
                 *impostor_generation = generation;
                 *voxel_ready_announced = false;
-                println!("Baked #{} (res {})", index + 1, planet.resolution);
+                println!(
+                    "Baked #{} (res {})",
+                    crate::space::solar_system::body_label(system, index),
+                    planet.resolution
+                );
             }
         }
 
@@ -1303,7 +1338,9 @@ impl Game {
             let command = match request {
                 SystemRequest::Home => Some(JumpCommand::Home),
                 SystemRequest::Goto { .. } => Some(JumpCommand::Goto),
-                SystemRequest::Add { .. } => None,
+                SystemRequest::Add { .. }
+                | SystemRequest::AddMoon { .. }
+                | SystemRequest::Time(_) => None,
             };
             let refused = !home_after_jump
                 && command
@@ -1379,7 +1416,11 @@ impl Game {
                     *mode = GameMode::Planet;
                     say(
                         console,
-                        &format!("Back on #{} {}.", i + 1, planet.planet_type.def().name),
+                        &format!(
+                            "Back on #{} {}.",
+                            crate::space::solar_system::body_label(system, i),
+                            planet.planet_type.def().name
+                        ),
                     );
                 }
                 SystemRequest::Add {
@@ -1391,42 +1432,71 @@ impl Game {
                         &format!(
                             "Added #{n} {} (radius {radius}). /system goto {n} 3 to visit.",
                             planet_type.def().name,
-                            n = i + 1
+                            n = crate::space::solar_system::body_label(system, i)
                         ),
                     ),
                     Err(message) => console.log(message, [1.0, 0.5, 0.0]),
                 },
-                SystemRequest::Goto { planet: n, radii } => match system.planets.get(n - 1) {
+                SystemRequest::AddMoon {
+                    parent,
+                    planet_type,
+                    radius,
+                } => match crate::space::solar_system::parse_body(system, &parent) {
                     None => console.log(
-                        &format!(
-                            "No planet #{n}: this solar system has 1..={}",
-                            system.planets.len()
-                        ),
+                        &format!("No body #{parent} in this solar system."),
                         [1.0, 0.5, 0.0],
                     ),
-                    Some(target) => {
-                        let t = clock.now();
-                        // over the day side, looking at the planet's centre (roll levels out by itself)
-                        let dir = target.sun_dir_in_planet_frame(system.star.position(), t);
-                        *space_flight = crate::space::solar_system::SpaceFlight::new(
-                            (dir * radii * target.radius).as_dvec3(),
-                        );
-                        space_flight.rotation =
-                            glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
-                        *flight_frame = FlightFrame::Captured(n - 1);
-                        *mode = GameMode::Space;
-                        *travel = None;
-                        renderer.travel_hud = None;
-                        enter_space_controls(controller, map);
-                        say(
+                    Some(p) => match system.add_moon(p, planet_type, radius) {
+                        Ok(i) => say(
                             console,
                             &format!(
-                                "Orbiting #{n} {} at {radii} radii.",
-                                target.planet_type.def().name
+                                "Added #{n} {} (radius {radius}). /system goto {n} 3 to visit.",
+                                planet_type.def().name,
+                                n = crate::space::solar_system::body_label(system, i)
                             ),
-                        );
-                    }
+                        ),
+                        Err(message) => console.log(message, [1.0, 0.5, 0.0]),
+                    },
                 },
+                SystemRequest::Time(seconds) => {
+                    clock.set(seconds);
+                    // a trip planned for the old time would arrive at where its target is not: end it
+                    *travel = None;
+                    renderer.travel_hud = None;
+                    say(console, &format!("Game clock set to {seconds} s."));
+                }
+                SystemRequest::Goto { body, radii } => {
+                    match crate::space::solar_system::parse_body(system, &body)
+                        .map(|i| (i, &system.planets[i]))
+                    {
+                        None => console.log(
+                            &format!("No body #{body} in this solar system."),
+                            [1.0, 0.5, 0.0],
+                        ),
+                        Some((n, target)) => {
+                            let t = clock.now();
+                            // over the day side, looking at the planet's centre (roll levels out by itself)
+                            let dir = target.sun_dir_in_planet_frame(system.star.position(), t);
+                            *space_flight = crate::space::solar_system::SpaceFlight::new(
+                                (dir * radii * target.radius).as_dvec3(),
+                            );
+                            space_flight.rotation =
+                                glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, -dir);
+                            *flight_frame = FlightFrame::Captured(n);
+                            *mode = GameMode::Space;
+                            *travel = None;
+                            renderer.travel_hud = None;
+                            enter_space_controls(controller, map);
+                            say(
+                                console,
+                                &format!(
+                                    "Orbiting #{body} {} at {radii} radii.",
+                                    target.planet_type.def().name
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
         // a jump to another solar system (/jump, or a pick in the galaxy view): after the system requests, so
@@ -1528,8 +1598,14 @@ impl Game {
                     // one overlay at a time: the galaxy view closes, as /galaxy closes the map
                     close_map(galaxy_view, controller);
                     let m = map.get_or_insert_with(|| open_map(controller));
-                    if let Some(i) = selected.filter(|&i| i < system.planets.len()) {
-                        m.selected = Some(i);
+                    if let Some(l) = selected {
+                        match crate::space::solar_system::parse_body(system, &l) {
+                            Some(i) => m.selected = Some(i),
+                            None => console.log(
+                                &format!("No body #{l} in this solar system."),
+                                [1.0, 0.5, 0.0],
+                            ),
+                        }
                     }
                 }
             }
@@ -1554,21 +1630,24 @@ impl Game {
             console.jump_request = Some(n);
         }
         // a trip picked on the map or with /travel
-        let request = console
-            .travel_request
-            .take()
-            .or_else(|| map.as_mut().and_then(|m| m.travel_request.take()));
+        let request = match console.travel_request.take() {
+            Some(l) => {
+                let found = crate::space::solar_system::parse_body(system, &l);
+                if found.is_none() {
+                    console.log(
+                        &format!("No body #{l} in this solar system."),
+                        [1.0, 0.5, 0.0],
+                    );
+                }
+                found
+            }
+            None => map
+                .as_mut()
+                .and_then(|m| m.travel_request.take())
+                .filter(|&n| n < system.planets.len()),
+        };
         if let Some(n) = request {
-            if n >= system.planets.len() {
-                console.log(
-                    &format!(
-                        "No planet #{}: this solar system has 1..={}",
-                        n + 1,
-                        system.planets.len()
-                    ),
-                    [1.0, 0.5, 0.0],
-                );
-            } else if refused_during_jump(jump.as_ref(), JumpCommand::Travel, false) {
+            if refused_during_jump(jump.as_ref(), JumpCommand::Travel, false) {
                 say_jump_in_progress(renderer, console);
             } else if *mode == GameMode::Planet && *loaded_world == n {
                 renderer.show_status("You are here.");
@@ -1582,7 +1661,10 @@ impl Game {
                 *travel = Some(Travel::Climb { target: n });
                 *trip_mouse = TripMouse::new(now);
                 let name = system.planets[n].planet_type.def().name;
-                renderer.show_status(&format!("Travelling to #{} {name}...", n + 1));
+                renderer.show_status(&format!(
+                    "Travelling to #{} {name}...",
+                    crate::space::solar_system::body_label(system, n)
+                ));
             }
         }
         if let Some((secs, label)) = console.perf_request.take() {
@@ -1848,7 +1930,7 @@ impl Game {
             let count = if galaxy_open {
                 self.universe.galaxy.systems.len()
             } else {
-                self.system.planets.len()
+                self.system.planet_count()
             };
             let m = match self.map.as_mut() {
                 Some(m) => m,
@@ -1862,7 +1944,19 @@ impl Game {
                         PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => m.confirm(),
                         PhysicalKey::Code(code) => {
                             if let Some(n) = digit_key(code).filter(|&n| n >= 1 && n <= count) {
-                                m.selected = Some(n - 1);
+                                // the n-th planet of the map (moons are picked by click), the n-th system
+                                // of the galaxy view
+                                m.selected = if galaxy_open {
+                                    Some(n - 1)
+                                } else {
+                                    self.system
+                                        .planets
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, p)| !p.is_moon())
+                                        .nth(n - 1)
+                                        .map(|(i, _)| i)
+                                };
                             }
                         }
                         _ => {}
@@ -2086,14 +2180,11 @@ impl Game {
                     });
                     let (here, ship) = match self.mode {
                         GameMode::Planet => (Some(self.loaded_world), None),
-                        GameMode::Space => (
-                            None,
-                            Some(match self.flight_frame {
-                                FlightFrame::Free => self.space_flight.position,
-                                FlightFrame::Captured(i) => self.system.planets[i]
-                                    .from_planet_frame(self.space_flight.position, t),
-                            }),
-                        ),
+                        // captured by a body: you are at that body, not a free "you" beside it
+                        GameMode::Space => match self.flight_frame {
+                            FlightFrame::Free => (None, Some(self.space_flight.position)),
+                            FlightFrame::Captured(i) => (Some(i), None),
+                        },
                     };
                     // a running trip's path, drawn on the map
                     let line: Vec<glam::DVec3> = match &self.travel {
@@ -2130,9 +2221,12 @@ impl Game {
                     (GameMode::Space, FlightFrame::Captured(i)) => Some(i),
                     (GameMode::Space, FlightFrame::Free) => None,
                 };
-                renderer.location_hud = self.universe.location_label(
-                    here.map(|i| (i, self.system.planets[i].planet_type.def().name)),
-                );
+                renderer.location_hud = self.universe.location_label(here.map(|i| {
+                    (
+                        crate::space::solar_system::body_label(&self.system, i),
+                        self.system.planets[i].planet_type.def().name,
+                    )
+                }));
                 match &self.mode {
                     GameMode::Planet => {
                         let i = self.loaded_world;
@@ -2296,6 +2390,16 @@ mod tests {
     }
 
     // Review Focus 5: the autopilot owns the flight frame while it runs, so the planets it passes can't
+    #[test]
+    fn the_clock_can_be_set_and_keeps_running_from_there() {
+        let mut c = GameClock::new(false);
+        c.set(500.0);
+        assert!(c.now() >= 500.0 && c.now() < 502.0);
+        let mut f = GameClock::new(true);
+        f.set(77.0);
+        assert_eq!(f.now(), 77.0, "a frozen bench clock stands at the set time");
+    }
+
     // capture it mid-trip (next_flight_frame runs only in the manual arm, which asserts it's chosen)
     #[test]
     fn travel_owns_the_flight_frame() {

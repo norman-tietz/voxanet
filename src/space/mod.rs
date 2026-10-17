@@ -1,7 +1,9 @@
+pub mod eclipse;
 pub mod galaxy;
 pub mod icosphere;
 pub mod impostor;
 pub mod map;
+pub mod moons;
 pub mod render;
 pub mod solar_system;
 pub mod star_shading;

@@ -18,6 +18,8 @@ struct Global {
     fog_wind: vec4<f32>, // xyz: the structure's scroll offset, w: storm_base (radius of the highest peak)
     flash: vec4<f32>,    // x: the lightning's scene flash at the camera (weather/lightning.rs)
     strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame surface position, w intensity
+    family: array<vec4<f32>, 12>, // moons / parent in the sky: xyz centre + w radius, then rgb colour + w 1 (eclipse.rs pack_family)
+    family_info: vec4<f32>,       // x: body count, y: sun visibility at the camera, z: sky/fill dim factor
 }
 
 @group(0) @binding(0) var<uniform> global: Global;
@@ -525,6 +527,8 @@ fn engine_atmosphere() -> Atmosphere {
         biome.atmosphere.x,
         global.flash.x,
         global.strikes,
+        global.family_info.z,
+        global.family_info.y,
     );
 }
 
@@ -547,7 +551,11 @@ fn sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> f32 {
 }
 
 fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
-    return atmo_sky_gradient(ray_dir, cam_pos, L, engine_atmosphere());
+    // an eclipse dims the dome (Atmosphere.sky_dim, inside atmo_sky_dome) and a moon in front of the star hides its disc; with no
+    // family both factors are exactly 1.0 / 0.0
+    let a = engine_atmosphere();
+    let cover = atmo_family_cover(ray_dir, cam_pos, global.family, global.family_info.x);
+    return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L, a) * (1.0 - cover);
 }
 
 fn sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
@@ -593,7 +601,9 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     // A. Direct Sun Light, dimmed under the cloud shell and focused into caustics below a water surface:
     // `water_depth` is how deep the point lies below its own water (a lake's or the sea's, through the
     // G-buffer), 0 when dry — so lake floors get caustics and tunnels sealed off from water don't
-    let clouded = cloud_shadow(world_pos, L);
+    // (and by an eclipse: a moon covering the star's disc takes the sun's light, and what is derived from it)
+    let clouded = cloud_shadow(world_pos, L)
+        * atmo_sun_visibility(world_pos, L, biome.sun.w, global.family, global.family_info.x);
     // wrap lighting (/light wrap) lets the diffuse sun reach a little past the terminator
     var direct_light = biome.sun.rgb * atmo_wrap_diffuse(dot(N, L), global.light.y) * shadow * clouded;
     // caustics are a refraction effect of clear reflective liquid; skip them for glowing lava,
@@ -608,7 +618,7 @@ fn shade(color: vec3<f32>, N: vec3<f32>, world_pos: vec3<f32>, frag_xy: vec2<f32
     let up_dot = dot(N, normalize(world_pos)); // Relative Up for sphere
     let hemi_factor = up_dot * 0.5 + 0.5;
     // dims to moonlight on the night side, like the sky itself
-    let sky_light = atmo_ambient_daylight(world_pos, L);
+    let sky_light = atmo_ambient_daylight(world_pos, L) * global.family_info.z; // dimmer in an eclipse
     // ray-traced AO (rt_hw.wgsl) dims the indirect light; 1 where vertex AO is baked in instead
     let ground = atmo_ground_bounce(albedo, world_pos, L, biome.sun.rgb * clouded, global.light.x);
     // storms are overcast: less fill light under them
@@ -921,7 +931,13 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
     if (dist <= 0.0) {
         // sky: no geometry behind the cloud shell
         alpha = sky_opacity(ray_dir, cam_pos, L);
-        color = sky_gradient(ray_dir, cam_pos, L) * alpha;
+        var sky = sky_gradient(ray_dir, cam_pos, L);
+        // moons as lit discs where the sky is opaque enough to hide the backdrop's own (night: the impostor)
+        if (global.family_info.x > 0.0) {
+            let bodies = atmo_sky_bodies(ray_dir, cam_pos, L, global.family, global.family_info.x, biome.sun.rgb);
+            sky += bodies.rgb * bodies.a * smoothstep(0.0, 0.5, alpha); // additive: the dark side shows the sky
+        }
+        color = sky * alpha;
     } else {
         let N = normalize(textureLoad(d_normal, px, 0).xyz * 2.0 - 1.0);
         let world_pos = world_from_pixel(vec2<f32>(px) + 0.5, dist);
@@ -1134,11 +1150,12 @@ fn fs_water(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha = 1.0 - exp(-depth * 0.35);
 
     // the sea floor's shadow (no shadow texel belongs to the surface itself), dimmed under cloud cover too
-    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_ao_at(in.clip_pos.xy, in.world_pos).x) * cloud_shadow(in.world_pos, L);
+    let shadow = mix(1.0 - SHADOW_OPACITY, 1.0, shadow_ao_at(in.clip_pos.xy, in.world_pos).x) * cloud_shadow(in.world_pos, L)
+        * atmo_sun_visibility(in.world_pos, L, biome.sun.w, global.family, global.family_info.x);
     let NdotL = max(dot(up, L), 0.0);
     let glowing = biome.liquid_shallow.w > 0.5;
     let body = mix(biome.liquid_shallow.rgb, biome.liquid_deep.rgb, 1.0 - exp(-depth * 0.15));
-    let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L) + LIGHTNING_COLOR * global.flash.x * LIGHTNING_AMBIENT_GAIN;
+    let sky_fill = biome.sky_zenith.rgb * 2.0 * atmo_ambient_daylight(in.world_pos, L) * global.family_info.z + LIGHTNING_COLOR * global.flash.x * LIGHTNING_AMBIENT_GAIN;
     var color = body * (biome.sun.rgb * NdotL * shadow + sky_fill);
     if (glowing) {
         color = body * 2.5; // emissive: pushed above 1.0 so ACES gives it a hot, blown-out look

@@ -65,7 +65,7 @@ fn atmo_cloud_shade(hit: vec3<f32>, ray_dir: vec3<f32>, pixel_size: f32, L: vec3
     let storm = weather_at(up).x * a.density;
 
     let ndotl = clamp(dot(up, L) * 0.5 + 0.5, 0.15, 1.0);
-    let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * STORM_DARK_LEVEL, storm * STORM_DARKEN) * a.sun_color * 0.55;
+    let lit = mix(mix(a.cloud_dark, a.cloud_light, ndotl), a.cloud_dark * STORM_DARK_LEVEL, storm * STORM_DARKEN) * a.sun_color * 0.55 * a.sun_vis;
     let silver = pow(max(dot(ray_dir, L), 0.0), 6.0) * CLOUD_SILVER * a.cloud_light * (1.0 - STORM_SILVER_LOSS * storm);
     // on the night side clouds are barely lit (same twilight band as the sky opacity): with the night
     // sky transparent over the stars, the ndotl floor above alone left them glowing grey on black

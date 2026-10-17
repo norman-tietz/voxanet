@@ -65,6 +65,8 @@ struct Atmosphere {
     density: f32,         // 1 = full atmosphere, 0 = vacuum (planet/biome.rs AtmosphereDef.density)
     flash: f32,           // 0..1 scene flash at the camera (weather/lightning.rs flash_at)
     strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame position on the surface, w intensity
+    sky_dim: f32,         // eclipse: the sky dome's dimming (1 = none, eclipse.rs)
+    sun_vis: f32,         // eclipse: share of the star's light reaching the camera (1 = none); dims the clouds' sun term
 }
 
 // the weather's fog at the camera (weather/fog.rs FogParams)
@@ -215,7 +217,7 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
     // an overcast sky: greyer and darker under a storm (up to 40 %)
     let grey = vec3<f32>(dot(dome, vec3<f32>(0.3, 0.59, 0.11)));
     let dull = mix(dome, grey, OVERCAST_GREY * a.overcast) * (1.0 - OVERCAST_DIM * a.overcast);
-    return mix(a.space_color, dull + LIGHTNING_COLOR * a.flash * LIGHTNING_DOME_GAIN, limb);
+    return mix(a.space_color, dull + LIGHTNING_COLOR * a.flash * LIGHTNING_DOME_GAIN, limb) * a.sky_dim;
 }
 
 // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it out
@@ -248,6 +250,102 @@ fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
     // drew a corona-only second sun opposite the real one (star_shading.rs sky_corona_distance)
     let closest_ahead = length(L - ray_dir * max(along, 0.0));
     return star_corona((closest_ahead - r) / r, a.star);
+}
+
+// ---- eclipses and moons in the sky (space/eclipse.rs mirrors the maths) ----
+// The family is a short list of bodies (a planet's moons; a moon's parent and siblings) as two vec4 each:
+// xyz centre + w radius in the camera body's frame, rgb colour + w 1. With count 0 every function exits at
+// once, returning exactly 1.0 / 0.0, so a family-less frame is bit-identical to one without them.
+const MAX_OCCLUDERS: i32 = 4;
+const ECLIPSE_SKY_DIM_MIN: f32 = 0.25;  // sky and fill light at a total eclipse (mirrors space/eclipse.rs)
+
+// the share of a disc of angular radius rs covered by a disc of radius ro, centres d apart (eclipse.rs
+// disc_overlap_fraction)
+fn atmo_disc_overlap(rs: f32, ro: f32, d: f32) -> f32 {
+    if (rs <= 0.0 || ro <= 0.0 || d >= rs + ro) { return 0.0; }
+    if (d <= abs(rs - ro)) { return select((ro / rs) * (ro / rs), 1.0, ro >= rs); }
+    let a = rs * rs * acos(clamp((d * d + rs * rs - ro * ro) / (2.0 * d * rs), -1.0, 1.0));
+    let b = ro * ro * acos(clamp((d * d + ro * ro - rs * rs) / (2.0 * d * ro), -1.0, 1.0));
+    let k = sqrt(max((-d + rs + ro) * (d + rs - ro) * (d - rs + ro) * (d + rs + ro), 0.0));
+    return clamp((a + b - 0.5 * k) / (3.14159265 * rs * rs), 0.0, 1.0);
+}
+
+// 1 minus the share of the star's disc the family bodies cover as seen from `p` (L: unit vector to the star,
+// star_angle: its angular radius there; eclipse.rs sun_visibility)
+fn atmo_sun_visibility(p: vec3<f32>, L: vec3<f32>, star_angle: f32, family: array<vec4<f32>, 12>, count: f32) -> f32 {
+    if (count <= 0.0) { return 1.0; }
+    var covered = 0.0;
+    for (var i = 0; i < MAX_OCCLUDERS; i++) {
+        if (f32(i) >= count) { break; }
+        let c = family[i * 2];
+        let v = c.xyz - p;
+        let dist = length(v);
+        if (dist <= c.w || dist < 1e-4) { continue; }
+        let cosd = dot(v / dist, L);
+        if (cosd <= 0.0) { continue; }
+        covered += atmo_disc_overlap(star_angle, asin(min(c.w / dist, 1.0)), acos(clamp(cosd, -1.0, 1.0)));
+    }
+    return clamp(1.0 - covered, 0.0, 1.0);
+}
+
+// how much of the family covers the sky along `ray_dir` from `cam` (0..1, the largest of the discs'),
+// for hiding the sun's disc behind a moon
+fn atmo_family_cover(ray_dir: vec3<f32>, cam: vec3<f32>, family: array<vec4<f32>, 12>, count: f32) -> f32 {
+    if (count <= 0.0) { return 0.0; }
+    var best = 0.0;
+    for (var i = 0; i < 6; i++) {
+        if (f32(i) >= count) { break; }
+        let c = family[i * 2];
+        let v = c.xyz - cam;
+        let dist = length(v);
+        if (dist <= c.w || dist < 1e-4) { continue; }
+        let ro = asin(min(c.w / dist, 1.0));
+        let d = acos(clamp(dot(v / dist, ray_dir), -1.0, 1.0));
+        let edge = max(ro * 0.04, 1e-5);
+        best = max(best, 1.0 - smoothstep(ro - edge, ro + edge, d));
+    }
+    return best;
+}
+
+// the family bodies as discs in the sky along `ray_dir` from `cam`: phase-lit by the star (L: direction to
+// the star), a faint floor on the dark side; rgb and the coverage as alpha. Used where the sky is opaque
+// (by day), added to the sky (the unlit side shows the sky through it); the backdrop's real impostor takes over
+// where it turns transparent. Overlapping discs: the nearest in front.
+fn atmo_sky_bodies(ray_dir: vec3<f32>, cam: vec3<f32>, L: vec3<f32>, family: array<vec4<f32>, 12>, count: f32, sun: vec3<f32>) -> vec4<f32> {
+    if (count <= 0.0) { return vec4<f32>(0.0); }
+    var prem = vec3<f32>(0.0); // premultiplied colour of the discs so far
+    var alpha = 0.0;
+    var nearest = 1e30;
+    for (var i = 0; i < 6; i++) {
+        if (f32(i) >= count) { break; }
+        let c = family[i * 2];
+        let col = family[i * 2 + 1];
+        let v = c.xyz - cam;
+        let dist = length(v);
+        if (dist <= c.w || dist < 1e-4) { continue; }
+        let ro = asin(min(c.w / dist, 1.0));
+        let d = acos(clamp(dot(v / dist, ray_dir), -1.0, 1.0));
+        let edge = max(ro * 0.04, 1e-5);
+        let cover = 1.0 - smoothstep(ro - edge, ro + edge, d);
+        if (cover <= 0.0) { continue; }
+        // the sphere's normal under this ray: the near hit point, relative to the body's centre
+        let along = dot(v, ray_dir);
+        let off = length(v - ray_dir * along);
+        let hit = along - sqrt(max(c.w * c.w - off * off, 0.0));
+        let n = normalize(ray_dir * hit - v);
+        let lit = max(dot(n, L), 0.0);
+        let colour = col.rgb * sun * (lit * 0.9 + 0.02);
+        // the nearest disc wins where discs overlap (the family list is sorted by apparent size, not distance)
+        if (dist < nearest) {
+            prem = colour * cover + prem * (1.0 - cover);
+            alpha = cover + alpha * (1.0 - cover);
+            nearest = dist;
+        } else {
+            prem = prem + colour * cover * (1.0 - alpha);
+            alpha = alpha + cover * (1.0 - alpha);
+        }
+    }
+    return vec4<f32>(prem / max(alpha, 1e-6), alpha);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what

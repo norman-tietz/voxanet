@@ -22,12 +22,22 @@ pub struct MapLayout {
 
 impl MapLayout {
     pub fn new(system: &SolarSystem) -> Self {
-        let mut orbits: Vec<f64> = system.planets.iter().map(|p| p.orbit_radius).collect();
+        let mut orbits: Vec<f64> = system
+            .planets
+            .iter()
+            .filter(|p| !p.is_moon())
+            .map(|p| p.orbit_radius)
+            .collect();
         orbits.sort_by(f64::total_cmp);
         let mut m = Self { k: 1.0, orbits };
         // evenly spaced orbits: every gap (and the first one, from the star) is the same
         let gap = (D_MAX - STAR_MAP_RADIUS) / m.orbits.len().max(1) as f32;
-        let largest = system.planets.iter().map(|p| p.radius).fold(1.0, f32::max);
+        let largest = system
+            .planets
+            .iter()
+            .filter(|p| !p.is_moon())
+            .map(|p| p.radius)
+            .fold(1.0, f32::max);
         m.k = MAX_FILL * gap / largest;
         m
     }
@@ -52,6 +62,55 @@ impl MapLayout {
             d(i) + step * f
         };
         mapped as f32
+    }
+
+    #[cfg(test)]
+    pub fn orbit_count(&self) -> usize {
+        self.orbits.len()
+    }
+
+    // the map distance between two neighbouring orbits
+    pub fn orbit_gap(&self) -> f32 {
+        (D_MAX - STAR_MAP_RADIUS) / self.orbits.len().max(1) as f32
+    }
+
+    // the radius of a moon's ring around its parent on the map: the parent's moons spread evenly in
+    // order between just outside its marker and 0.45 of an orbit gap (less the moon marker), so the rings
+    // keep their order, the moon markers stay apart, and neighbouring parents' rings don't cross; a big
+    // parent whose marker leaves no such room gets the room its moons need instead
+    pub fn moon_ring_radius(&self, system: &SolarSystem, i: usize) -> f32 {
+        let m = &system.planets[i];
+        let Some(parent) = m.parent else { return 0.0 };
+        let marker = self.radius(system.planets[parent].radius);
+        let (n, mm) = system
+            .moons_of(parent)
+            .fold((0usize, 0.0f32), |(n, mm), j| {
+                (n + 1, mm.max(self.radius(system.planets[j].radius)))
+            });
+        let inner = 1.15 * marker + mm;
+        // never beyond 0.45 of an orbit gap (the biggest parent with many moons accepts overlapping moon
+        // markers rather than rings crossing the neighbouring orbit)
+        let cap = 0.45 * self.orbit_gap() - mm;
+        let outer = (cap.max(inner + 2.2 * mm * (n + 1) as f32))
+            .min(cap)
+            .max(inner);
+        inner + (outer - inner) * (m.moon_index + 1) as f32 / (n + 1) as f32
+    }
+
+    // body i's map position at time t: a planet by its distance from the star, a moon on its ring around
+    // its parent (in the moon's real direction from the parent)
+    pub fn position_of(&self, system: &SolarSystem, i: usize, t: f64) -> Vec3 {
+        let star = system.star.position();
+        let p = &system.planets[i];
+        match p.parent {
+            None => self.position(p.position_at(t) - star),
+            Some(parent) => {
+                let pp = &system.planets[parent];
+                let dir = (p.position_at(t) - pp.position_at(t)).normalize_or_zero();
+                self.position(pp.position_at(t) - star)
+                    + dir.as_vec3() * self.moon_ring_radius(system, i)
+            }
+        }
     }
 
     pub fn position(&self, rel: DVec3) -> Vec3 {
@@ -238,6 +297,25 @@ pub fn shows_label(
     i == current || hover == Some(i) || selected == Some(i) || visited
 }
 
+// whether body i's label is drawn: planets always; a moon only when hovered, selected, the body you are at,
+// its parent hovered or selected, or its ring is wide enough on screen (`ring_px`, projected radius) for
+// the labels not to clump
+pub const MOON_LABEL_RING_PX: f32 = 40.0;
+pub fn shows_body_label(
+    i: usize,
+    parent: Option<usize>,
+    hover: Option<usize>,
+    selected: Option<usize>,
+    here: Option<usize>,
+    ring_px: f32,
+) -> bool {
+    let Some(parent) = parent else { return true };
+    [hover, selected].contains(&Some(i))
+        || here == Some(i)
+        || [hover, selected].contains(&Some(parent))
+        || ring_px > MOON_LABEL_RING_PX
+}
+
 // the open map's state (main.rs): camera, mouse, hover and selection
 pub struct MapView {
     pub camera: MapCamera,
@@ -320,13 +398,12 @@ pub fn pick_planet(
     );
     let (origin, dir) = camera.ray(ndc, aspect, MAP_FOV_Y);
     let px_angle = MAP_FOV_Y / screen.1;
-    let star = system.star.position();
     let spheres: Vec<(usize, Vec3, f32)> = system
         .planets
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let c = map.position(p.position_at(t) - star);
+            let c = map.position_of(system, i, t);
             let min = PICK_MIN_PX * px_angle * (c - origin).length();
             (i, c, map.radius(p.radius).max(min))
         })
@@ -344,7 +421,12 @@ mod tests {
     fn outermost_orbit_maps_to_d_max_and_order_is_kept() {
         let s = SolarSystem::generate(1);
         let m = MapLayout::new(&s);
-        let mut radii: Vec<f64> = s.planets.iter().map(|p| p.orbit_radius).collect();
+        let mut radii: Vec<f64> = s
+            .planets
+            .iter()
+            .filter(|p| !p.is_moon())
+            .map(|p| p.orbit_radius)
+            .collect();
         radii.sort_by(f64::total_cmp);
         assert!((m.orbit_distance(*radii.last().unwrap()) - D_MAX).abs() < 1e-3);
         for w in radii.windows(2) {
@@ -357,6 +439,7 @@ mod tests {
         let mut maps: Vec<(f32, f32)> = s
             .planets
             .iter()
+            .filter(|p| !p.is_moon()) // moons sit next to their parent by design
             .map(|p| (m.orbit_distance(p.orbit_radius), m.radius(p.radius)))
             .collect();
         maps.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -384,7 +467,7 @@ mod tests {
     #[test]
     fn map_fits_fifteen_planets_without_overlap() {
         let mut s = SolarSystem::generate(1);
-        while s.planets.len() < 15 {
+        while s.planet_count() < crate::space::solar_system::MAX_PLANET_COUNT {
             s.add_planet(crate::planet::biome::PlanetType::Ice, 400.0)
                 .unwrap();
         }
@@ -512,6 +595,92 @@ mod tests {
 
     // review minor 3: zooming all the way in keeps the eye well outside the star
     #[test]
+    fn moons_map_next_to_their_parent_and_orbits_use_the_planets_only() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let map = MapLayout::new(&s);
+        assert_eq!(map.orbit_count(), s.planet_count());
+        let m = s.planets.len() - 1;
+        let (pm, pp) = (map.position_of(&s, m, 5.0), map.position_of(&s, 2, 5.0));
+        let d = (pm - pp).length();
+        assert!(
+            d > map.radius(s.planets[2].radius),
+            "outside the parent's marker"
+        );
+        assert!(d < map.orbit_gap() * 0.5, "inside half an orbit gap: {d}");
+    }
+
+    #[test]
+    fn six_moon_rings_keep_order_and_stay_apart() {
+        use crate::space::solar_system::{tests::with_moon, Planet};
+        let mut s = with_moon();
+        let template = s.planets.pop().unwrap();
+        for parent in [6usize, 7] {
+            for k in 0..6 {
+                s.planets.push(Planet {
+                    parent: Some(parent),
+                    moon_index: k,
+                    radius: 40.0 + 2.0 * k as f32,
+                    parent_orbit: Some(s.planets[parent].own_orbit()),
+                    ..template
+                });
+            }
+        }
+        let map = MapLayout::new(&s);
+        for parent in [6usize, 7] {
+            let moons: Vec<usize> = s.moons_of(parent).collect();
+            assert_eq!(moons.len(), 6);
+            let marker = map.radius(s.planets[parent].radius);
+            let rings: Vec<f32> = moons.iter().map(|&j| map.moon_ring_radius(&s, j)).collect();
+            assert!(rings[0] > marker, "outside the parent's marker");
+            for w in 0..5 {
+                let (a, b) = (moons[w], moons[w + 1]);
+                let gap = rings[w + 1] - rings[w];
+                assert!(gap > 0.0, "strictly increasing: {rings:?}");
+                let sizes = map.radius(s.planets[a].radius) + map.radius(s.planets[b].radius);
+                assert!(gap > sizes, "markers apart: {gap} vs {sizes}");
+            }
+        }
+        // neighbouring parents (one orbit gap apart) don't reach into each other's rings
+        let reach = |parent: usize| {
+            s.moons_of(parent)
+                .map(|j| map.moon_ring_radius(&s, j) + map.radius(s.planets[j].radius))
+                .fold(0.0, f32::max)
+        };
+        assert!(
+            reach(6) + reach(7) < map.orbit_gap(),
+            "{} {}",
+            reach(6),
+            reach(7)
+        );
+    }
+
+    #[test]
+    fn rings_of_the_biggest_parent_stay_inside_half_an_orbit_gap() {
+        use crate::space::solar_system::{tests::with_moon, Planet};
+        let mut s = with_moon();
+        let template = s.planets.pop().unwrap();
+        s.planets[2].radius = 250.0;
+        for k in 0..6 {
+            s.planets.push(Planet {
+                parent: Some(2),
+                moon_index: k,
+                radius: 40.0,
+                parent_orbit: Some(s.planets[2].own_orbit()),
+                ..template
+            });
+        }
+        let map = MapLayout::new(&s);
+        for j in s.moons_of(2) {
+            let reach = map.moon_ring_radius(&s, j) + map.radius(s.planets[j].radius);
+            assert!(
+                reach <= 0.45 * map.orbit_gap() + 1e-4,
+                "{reach} vs {}",
+                map.orbit_gap()
+            );
+        }
+    }
+
+    #[test]
     fn zoom_stops_outside_the_star() {
         let mut c = MapCamera::default_view();
         c.zoom(1000.0);
@@ -552,6 +721,46 @@ mod tests {
         let n2 = clip.truncate() / clip.w;
         let p2 = Vec2::new((n2.x * 0.5 + 0.5) * screen.0, (0.5 - n2.y * 0.5) * screen.1);
         assert!((p2 - px).length() < 12.0);
+    }
+
+    #[test]
+    fn moon_labels_show_only_when_they_will_not_clump() {
+        // planets always
+        assert!(shows_body_label(2, None, None, None, None, 0.0));
+        // moon 7 of parent 2: hidden when small and idle
+        assert!(!shows_body_label(7, Some(2), None, None, None, 10.0));
+        assert!(!shows_body_label(
+            7,
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            10.0
+        ));
+        assert!(
+            shows_body_label(7, Some(2), Some(7), None, None, 10.0),
+            "hovered"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, Some(7), None, 10.0),
+            "selected"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, None, Some(7), 10.0),
+            "here"
+        );
+        assert!(
+            shows_body_label(7, Some(2), Some(2), None, None, 10.0),
+            "parent hovered"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, Some(2), None, 10.0),
+            "parent selected"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, None, None, 41.0),
+            "wide ring"
+        );
     }
 
     #[test]

@@ -60,23 +60,18 @@ impl Universe {
     // where a jump arrives: at the system's edge on the side facing `from_dir` (the direction toward the
     // previous system, galaxy axes = system axes), looking at the star
     pub fn arrival_pose(system: &SolarSystem, from_dir: DVec3) -> (DVec3, Quat) {
-        let outer = system
-            .planets
-            .iter()
-            .map(|p| p.orbit_radius)
-            .fold(1.0, f64::max);
+        let outer = system.outermost_planet_orbit().max(1.0);
         let dir = from_dir.normalize_or(DVec3::Z);
         let pos = system.star.position() + dir * outer * ARRIVAL_ORBITS;
         let rot = Quat::from_rotation_arc(Vec3::NEG_Z, (-dir).as_vec3());
         (pos, rot)
     }
 
-    // the HUD's location line (both modes): the current solar system's name, and the planet (`index`,
-    // 0-based) when you're on it or captured by it, labelled like the compass ("#7 Shattered")
-    pub fn location_label(&self, planet: Option<(usize, &str)>) -> String {
+    // the HUD's location line (both modes): the current solar system's name, and the planet (its label) when you're on it or captured by it, labelled like the compass ("#7 Shattered")
+    pub fn location_label(&self, planet: Option<(String, &str)>) -> String {
         let system = &self.galaxy.systems[self.current].name;
         match planet {
-            Some((i, kind)) => format!("{system} · #{} {kind}", i + 1),
+            Some((label, kind)) => format!("{system} · #{label} {kind}"),
             None => system.clone(),
         }
     }
@@ -93,8 +88,12 @@ mod tests {
         let name = u.galaxy.systems[0].name.clone();
         assert_eq!(u.location_label(None), name);
         assert_eq!(
-            u.location_label(Some((6, "Shattered"))),
+            u.location_label(Some(("7".into(), "Shattered"))),
             format!("{name} · #7 Shattered")
+        );
+        assert_eq!(
+            u.location_label(Some(("3b".into(), "Cratered"))),
+            format!("{name} · #3b Cratered")
         );
     }
 

@@ -5,17 +5,21 @@
 
 use glam::{DQuat, DVec3, Quat, Vec3};
 
-use crate::space::solar_system::{Planet, SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED};
+use crate::space::solar_system::{
+    Planet, SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED, SYSTEM_SCALE,
+};
 
 pub const ORBIT_RADII: f64 = 3.5;
 const LUT: usize = 256;
 const HEAT_MARGIN: f64 = 1.2;
+// a moon's trip keeps this many parent radii from the parent (around its cloud shell)
+const PARENT_MARGIN: f64 = 1.4;
 const LOOK_SHARE: f64 = 0.25; // the last quarter turns the view toward the planet
 const START_SHARE: f64 = 0.15; // the first 15 % turns it from where it looked into the flight direction
 const CHECK_SAMPLES: usize = 256; // samples of the final heat-zone check
 
 pub fn duration(distance: f64) -> f64 {
-    (6.0 + 1.5 * (distance / 1000.0).max(1e-9).log10()).clamp(6.0, 12.0)
+    (6.0 + 1.5 * (distance / (1000.0 * SYSTEM_SCALE)).max(1e-9).log10()).clamp(6.0, 12.0)
 }
 
 // the automatic climb from the surface: faster with altitude (~2-3 s to the liftoff handover)
@@ -163,7 +167,7 @@ impl Trip {
             .unwrap_or(DVec3::Z);
         let mut reach = limit.max(start.distance(star)).max(arrival.distance(star)) * 1.5;
         for _ in 0..16 {
-            if trip.clears(star, (zone * 1.05).min(start.distance(star) * 0.999)) {
+            if trip.clears(|_| star, (zone * 1.05).min(start.distance(star) * 0.999)) {
                 break;
             }
             trip.ctrl[1] = star + side * reach + (start - star) * 0.5;
@@ -171,14 +175,58 @@ impl Trip {
             trip.lut = arc_lut(&trip.ctrl);
             reach *= 1.5;
         }
+        // a moon's parent is an obstacle too: the same swing-out around the parent's sphere
+        if let Some(parent) = p.parent.map(|i| system.planets[i]) {
+            let tm = t0 + dur * 0.5;
+            let pc = parent.position_at(tm);
+            let limit = parent.radius as f64 * PARENT_MARGIN;
+            let mid = (start + arrival) * 0.5 - pc;
+            let chord = (arrival - start).normalize_or(DVec3::X);
+            let side = (mid - chord * mid.dot(chord))
+                .try_normalize()
+                .or_else(|| chord.cross(DVec3::Y).try_normalize())
+                .unwrap_or(DVec3::Z);
+            let star_limit = (zone * 1.05).min(start.distance(star) * 0.999);
+            let parent_ok = |t: &Trip| t.clears(|x| parent.position_at(x), limit);
+            let star_ok = |t: &Trip| t.clears(|_| star, star_limit);
+            // push both inner control points further out to one side, wider each time (either side,
+            // whichever keeps the star's zone clear too); if the parent can't be cleared, keep the last
+            // configuration that clears the star (the base one at worst)
+            let base = trip.ctrl;
+            let mut best = base;
+            let mut done = parent_ok(&trip) && star_ok(&trip);
+            let mut reach = limit * 0.5;
+            'swing: for _ in 0..16 {
+                if done {
+                    break;
+                }
+                for sign in [1.0, -1.0] {
+                    trip.ctrl[1] = base[1] + side * sign * reach;
+                    trip.ctrl[2] = base[2] + side * sign * reach;
+                    trip.lut = arc_lut(&trip.ctrl);
+                    if star_ok(&trip) {
+                        best = trip.ctrl;
+                        if parent_ok(&trip) {
+                            done = true;
+                            break 'swing;
+                        }
+                    }
+                }
+                reach *= 1.5;
+            }
+            if !done {
+                trip.ctrl = best;
+                trip.lut = arc_lut(&best);
+            }
+        }
         trip
     }
 
-    // the flown path stays farther than `limit` from the star
-    fn clears(&self, star: DVec3, limit: f64) -> bool {
+    // the flown path stays farther than `limit` from the obstacle (its position as a function of time)
+    fn clears(&self, obstacle: impl Fn(f64) -> DVec3, limit: f64) -> bool {
         (0..=CHECK_SAMPLES).all(|i| {
             let t = self.t0 + self.duration * i as f64 / CHECK_SAMPLES as f64;
-            self.position(t).distance(star) > limit
+            self.position(t).distance(obstacle(t)) > limit
         })
     }
 
@@ -254,6 +302,50 @@ mod tests {
         SolarSystem::generate(1)
     }
 
+    // a trip to a moon never passes through its parent, from either side
+    #[test]
+    fn trips_to_a_moon_avoid_the_parent_sphere() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let m = s.planets.len() - 1;
+        let parent = s.planets[2];
+        for side in [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z] {
+            let start = parent.position_at(10.0) + side * 30.0 * parent.radius as f64;
+            let trip = Trip::plan(&s, m, start, -side, -side, 10.0);
+            for k in 0..=200 {
+                let t = trip.t0 + trip.duration * k as f64 / 200.0;
+                let d = (trip.position(t) - parent.position_at(t)).length();
+                assert!(
+                    d >= parent.radius as f64 * 1.1,
+                    "{side:?} {k}: {d} vs {}",
+                    parent.radius
+                );
+            }
+        }
+    }
+
+    // a start inside the parent's margin cannot clear it by any swing: the trip must still keep the star's
+    // zone clear
+    #[test]
+    fn a_failed_parent_swing_keeps_the_star_clearance() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let m = s.planets.len() - 1;
+        let parent = s.planets[2];
+        let star = s.star.position();
+        let zone = HEAT_ZONE_RADII * s.star.radius;
+        for side in [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z] {
+            let start = parent.position_at(10.0) + side * 1.05 * parent.radius as f64;
+            let trip = Trip::plan(&s, m, start, side, side, 10.0);
+            assert!(!trip.clears(
+                |x| parent.position_at(x),
+                parent.radius as f64 * PARENT_MARGIN
+            ));
+            for k in 0..=200 {
+                let t = trip.t0 + trip.duration * k as f64 / 200.0;
+                assert!((trip.position(t) - star).length() > zone, "{side:?} {k}");
+            }
+        }
+    }
+
     #[test]
     fn duration_grows_with_distance_within_bounds() {
         assert_eq!(duration(10.0), 6.0);
@@ -265,7 +357,7 @@ mod tests {
     #[test]
     fn trip_ends_at_the_orbit_point_at_arrival() {
         let s = sys();
-        let start = s.planets[0].position_at(0.0) + DVec3::new(0.0, 500.0, 0.0);
+        let start = s.planets[0].position_at(0.0) + DVec3::new(0.0, 500.0 * SYSTEM_SCALE, 0.0);
         let trip = Trip::plan(&s, 3, start, DVec3::Y, DVec3::X, 0.0);
         let t1 = trip.t0 + trip.duration;
         let p = &s.planets[3];
@@ -433,7 +525,9 @@ mod tests {
         let guess = s.planets[target].position_at(9.0);
         // start behind the target along -Z and to its side, heading +X+Z: the heading has to swing
         // across +Z (with a small vertical component) to come round to the planet
-        let start = guess - DVec3::Z * 30000.0 - DVec3::X * 6000.0 + DVec3::Y * 50.0;
+        let start =
+            guess - DVec3::Z * (30000.0 * SYSTEM_SCALE) - DVec3::X * (6000.0 * SYSTEM_SCALE)
+                + DVec3::Y * (50.0 * SYSTEM_SCALE);
         let heading = DVec3::new(1.0, 0.02, 1.0).normalize();
         let trip = Trip::plan(&s, target, start, heading, heading, 0.0);
         let look = Quat::from_rotation_arc(Vec3::NEG_Z, heading.as_vec3());
@@ -458,7 +552,8 @@ mod tests {
     fn arrival_moves_with_the_planet() {
         let s = sys();
         for target in [0, 3, 6] {
-            let start = s.planets[(target + 2) % 7].position_at(0.0) + DVec3::Y * 300.0;
+            let start =
+                s.planets[(target + 2) % 7].position_at(0.0) + DVec3::Y * (300.0 * SYSTEM_SCALE);
             let trip = Trip::plan(&s, target, start, DVec3::Y, DVec3::Y, 0.0);
             let t1 = trip.t0 + trip.duration;
             let p = &s.planets[target];

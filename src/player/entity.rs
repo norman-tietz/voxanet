@@ -716,7 +716,7 @@ mod tests {
             let start = player.position.length();
             player.velocity = dir * 6.0;
             let mut top = start;
-            for _ in 0..240 {
+            for _ in 0..480 {
                 tick(
                     &mut player,
                     &planet,
@@ -730,12 +730,14 @@ mod tests {
         };
         let ratio = apex(0.5) / apex(1.0);
         assert!((ratio - 2.0).abs() < 0.2, "ratio {ratio}");
+        let moon = apex(0.15) / apex(1.0);
+        assert!(moon > 5.0 && moon < 8.0, "moon ratio {moon}");
     }
 
     // the wading hop clears a one-block ledge at every gravity (apex = v² / 2g, v = jump_force × factor)
     #[test]
     fn thick_liquid_hop_clears_a_block_at_every_gravity() {
-        for g in [0.54_f32, 1.0, 1.43] {
+        for g in [0.15_f32, 0.375, 0.54, 1.0, 1.43] {
             let v = 8.0 * thick_jump_force(g);
             let apex = v * v / (2.0 * Physics::GRAVITY * g);
             assert!(apex > 1.0, "gravity {g}: apex {apex}");

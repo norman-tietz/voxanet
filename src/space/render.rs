@@ -120,7 +120,9 @@ struct PlanetUniform {
     fog_tint: [f32; 4], // rgb: the storm fog's tint, w: its peak extinction x the setting (0 = off)
     flash: [f32; 4],    // x: the lightning's scene flash at the impostor's camera
     strikes: [[f32; 4]; crate::weather::lightning::MAX_STRIKES], // active strikes: xyz planet-frame surface position, w intensity
-    model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
+    family: [[f32; 4]; crate::space::eclipse::MAX_FAMILY * 2], // moons / parent (eclipse.rs pack_family), in the planet's frame
+    family_info: [f32; 4], // x: body count, z: sky/fill dim (1 = none), w: the star's angular radius here
+    model: [[f32; 4]; 3],  // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 
 // what a glowing liquid emits on an impostor: the engine's fs_water look (the body, darkening from
@@ -145,7 +147,7 @@ struct PlanetMesh {
     num_indices: u32,
 }
 
-use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps generated + added planets at this many
+use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps all bodies (planets and moons) at this many
 
 // starting points from the solar system-terrain-impostors design discussion's faceting estimate
 // (~10-13x radius before individual facets become visually obvious at this project's FOV);
@@ -282,9 +284,7 @@ impl Layout<'_> {
         let pos = system.planets[i].position_at(t);
         match self {
             Layout::Real => pos - camera.position,
-            Layout::Map { map, eye } => {
-                map.render_offset(map.position(pos - system.star.position()), *eye)
-            }
+            Layout::Map { map, eye } => map.render_offset(map.position_of(system, i, t), *eye),
         }
     }
 
@@ -1285,6 +1285,8 @@ impl SpaceRenderer {
         } else {
             vec![]
         };
+        // the planet's moons (a moon's parent and siblings), seen from its centre: they eclipse its sun
+        let fam = super::eclipse::family_of(system, i, t);
         // the impostors take only the localized cloud glow: the scalar flash would light the whole disc
         PlanetUniform {
             offset: [
@@ -1325,6 +1327,13 @@ impl SpaceRenderer {
             },
             flash: [0.0; 4],
             strikes: crate::weather::lightning::gpu_strikes(&strikes),
+            family: super::eclipse::pack_family(&fam),
+            family_info: [
+                fam.len() as f32,
+                1.0,
+                1.0,
+                p.star_angular_radius(&system.star),
+            ],
             model: [
                 model.x_axis.extend(0.0).to_array(),
                 model.y_axis.extend(0.0).to_array(),
@@ -1628,18 +1637,39 @@ mod tests {
     }
     use crate::space::solar_system::SolarSystem;
 
-    // PlanetUniform must mirror space.wgsl's PlanetUniform: 23 vec4s + a mat3x3 (3 × 16 bytes)
+    // PlanetUniform must mirror space.wgsl's PlanetUniform: 36 vec4s + a mat3x3 (3 × 16 bytes)
     #[test]
     fn planet_uniform_matches_the_wgsl_layout() {
         assert_eq!(
             std::mem::size_of::<PlanetUniform>(),
-            (16 + 1 + 6) * 16 + 3 * 16
+            (16 + 1 + 6 + 13) * 16 + 3 * 16
         );
-        // + plastic, + atmosphere, + fog_tint, + flash, + strikes
+        // + plastic, + atmosphere, + fog_tint, + flash, + strikes, + family (12) + family_info
+        use std::mem::offset_of;
+        assert_eq!(
+            offset_of!(PlanetUniform, family),
+            offset_of!(PlanetUniform, strikes) + 6 * 16
+        );
+        assert_eq!(
+            offset_of!(PlanetUniform, model),
+            offset_of!(PlanetUniform, family_info) + 16
+        );
         let size = |name| crate::render::renderer::tests::wgsl_struct_size(SPACE_SHADER, name);
         assert_eq!(std::mem::size_of::<PlanetUniform>(), size("PlanetUniform"));
         assert_eq!(std::mem::size_of::<SpaceCameraUniform>(), size("Camera"));
         assert_eq!(std::mem::size_of::<StarUniform>(), size("StarUniform"));
+    }
+
+    #[test]
+    fn a_planet_uniform_carries_its_family() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let look = test_look(1.0, quiet_force(), LightningSettings::default());
+        let u = SpaceRenderer::planet_uniform(&s, 2, Vec3::ZERO, 0.0, &look, true);
+        assert_eq!(u.family_info[0], 1.0);
+        assert_eq!(u.family[0][3], 40.0, "the moon's radius");
+        let none = SpaceRenderer::planet_uniform(&s, 0, Vec3::ZERO, 0.0, &look, true);
+        assert_eq!(none.family_info[0], 0.0);
+        assert_eq!(none.family_info[2], 1.0, "no dimming without a family");
     }
 
     // the impostors' look with no plastic or fill-light tuning, and this fog, weather and lightning
@@ -1862,12 +1892,12 @@ mod tests {
     #[test]
     fn a_full_solar_system_seen_from_its_outermost_planet_has_ordered_depths() {
         let mut system = SolarSystem::generate(1);
-        while system.planets.len() < MAX_PLANETS {
+        while system.planet_count() < crate::space::solar_system::MAX_PLANET_COUNT {
             system
                 .add_planet(crate::planet::biome::PlanetType::Ice, 100.0)
                 .unwrap();
         }
-        let outer = system.planets[MAX_PLANETS - 1];
+        let outer = *system.planets.iter().rev().find(|p| !p.is_moon()).unwrap();
         let t = 0.0;
         let camera = outer.position_at(t) + glam::DVec3::new(0.0, 3.0 * outer.radius as f64, 0.0);
         let mut bodies: Vec<(glam::DVec3, f32)> =

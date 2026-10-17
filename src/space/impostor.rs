@@ -320,6 +320,9 @@ mod tests {
             planet_type,
             noise_seed,
             traits: crate::planet::traits::PlanetTraits::NEUTRAL,
+            parent: None,
+            moon_index: 0,
+            parent_orbit: None,
         }
     }
 
