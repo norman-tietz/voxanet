@@ -279,8 +279,10 @@ impl PlanetData {
     // the cell shape; the plants' hex rings depend on it, so the decor cache starts over
     pub fn set_cells(&mut self, cells: CellShape) {
         self.cells = cells;
+        // a fresh cache: mesh workers spawned earlier hold clones with the old cells and would insert
+        // their chunks into a shared cache after a clear
         if let Some(f) = self.flora.as_ref() {
-            f.clear();
+            self.flora = Some(Arc::new(crate::planet::flora::Flora::new(f.cfg)));
         }
     }
 
@@ -954,6 +956,21 @@ pub(crate) mod tests {
             .expect("a plant exists");
         let (id, ty) = plant_blocks(&p, &plant, &cfg)[0];
         (p, id, ty)
+    }
+
+    #[test]
+    fn a_style_switch_gives_the_plants_a_fresh_cache() {
+        let (mut p, id, _) = forest_planet();
+        let old = p.flora.clone().unwrap();
+        p.decor_chunk(PlanetData::chunk_key(id)).unwrap();
+        assert!(old.len() > 0);
+        p.set_cells(CellShape::Square);
+        let new = p.flora.as_ref().unwrap();
+        assert!(
+            !Arc::ptr_eq(&old, new),
+            "workers' old clones share the cache"
+        );
+        assert_eq!(new.len(), 0);
     }
 
     #[test]
