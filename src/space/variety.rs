@@ -2,7 +2,7 @@
 // system but the start one — how many planets, how hot each orbit is, which type it gets, its traits
 use crate::planet::biome::PlanetType;
 use crate::planet::traits::PlanetTraits;
-use crate::space::solar_system::{seeded_unit, StarType, MAX_PLANET_RADIUS, MIN_PLANET_RADIUS};
+use crate::space::solar_system::{gravity_for_radius, seeded_unit, StarType};
 
 // salts for seeded_unit (orbit_for uses 1–4)
 const SALT_COUNT_A: u64 = 20;
@@ -83,8 +83,6 @@ pub fn pick_type(seed: u64, index: usize, tau: f64) -> PlanetType {
 // a planet's own variation; gravity grows with its radius (160 → ×0.6, 1000 → ×1.3) times a density jitter
 pub fn traits_for(seed: u64, index: usize, planet_type: PlanetType, radius: f32) -> PlanetTraits {
     let u = |salt| seeded_unit(seed, index, salt) as f32;
-    let size =
-        ((radius - MIN_PLANET_RADIUS) / (MAX_PLANET_RADIUS - MIN_PLANET_RADIUS)).clamp(0.0, 1.0);
     PlanetTraits {
         day_scale: 0.6 + 1.0 * u(SALT_DAY),
         relief: 0.7 + 0.7 * u(SALT_RELIEF),
@@ -95,7 +93,7 @@ pub fn traits_for(seed: u64, index: usize, planet_type: PlanetType, radius: f32)
         },
         sky_hue: -0.25 + 0.5 * u(SALT_HUE),
         storminess: 0.5 + 1.0 * u(SALT_STORM),
-        gravity: (0.6 + 0.7 * size) * (0.9 + 0.2 * u(SALT_DENSITY)),
+        gravity: gravity_for_radius(radius) * (0.9 + 0.2 * u(SALT_DENSITY)),
     }
 }
 
@@ -152,7 +150,7 @@ mod tests {
         for seed in 1000..3000u64 {
             let s = SolarSystem::generate_varied(seed);
             let mut seen = Vec::new();
-            for p in &s.planets {
+            for p in s.planets.iter().filter(|p| !p.is_moon()) {
                 let tau = temperature_index(p.orbit_radius, s.star.star_type);
                 total += 1;
                 if p.planet_type == PlanetType::Shattered {
