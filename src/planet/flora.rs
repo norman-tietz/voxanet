@@ -97,16 +97,7 @@ pub struct Plant {
     pub hash: u32,
 }
 
-// the PCG integer hash (the same as weather/lightning.rs's, which keeps it private)
-fn pcg(mut h: u32) -> u32 {
-    h = h.wrapping_mul(747796405).wrapping_add(2891336453);
-    h = ((h >> ((h >> 28) + 4)) ^ h).wrapping_mul(277803737);
-    (h >> 22) ^ h
-}
-
-fn unit(h: u32) -> f32 {
-    (h >> 8) as f32 / 16_777_216.0
-}
+use crate::weather::lightning::{pcg, unit};
 
 fn hash(seed: u32, face: u8, a: u32, b: u32, salt: u32) -> u32 {
     let mut h = pcg(seed ^ 0x5eed_f10a);
@@ -119,28 +110,72 @@ fn hash(seed: u32, face: u8, a: u32, b: u32, salt: u32) -> u32 {
 // the forest mask: 0 in a clearing, 1 in a grove (seeded low-frequency noise through a smoothstep).
 // fbm(3 octaves) of this noise spans about -0.5..0.5; the thresholds put ~10-25 % of the sphere on each side
 pub fn forest_mask(cfg: &FloraConfig, dir: Vec3) -> f32 {
-    let g = NoiseGenerator::new(cfg.seed ^ 0xF04E57);
-    let n = g.fbm(dir * 3.0 + Vec3::new(5.1, -2.7, 8.3), 3);
-    smoothstep(MASK_LO, MASK_HI, n)
+    thread_local! {
+        // the noise tables are built once per thread and seed (this runs per anchor and per LOD vertex)
+        static GEN: std::cell::RefCell<Option<(u32, NoiseGenerator)>> = const { std::cell::RefCell::new(None) };
+    }
+    GEN.with(|g| {
+        let mut g = g.borrow_mut();
+        if g.as_ref().is_none_or(|(seed, _)| *seed != cfg.seed) {
+            *g = Some((cfg.seed, NoiseGenerator::new(cfg.seed ^ 0xF04E57)));
+        }
+        let n = g
+            .as_ref()
+            .unwrap()
+            .1
+            .fbm(dir * 3.0 + Vec3::new(5.1, -2.7, 8.3), 3);
+        smoothstep(MASK_LO, MASK_HI, n)
+    })
 }
 const MASK_LO: f32 = -0.1;
 const MASK_HI: f32 = 0.1;
 
-// the share (0..=1) of the LOD colour that leans toward the first species' crown: the forest mask times
-// that species' density; 0 without flora, over water or where the type has no species
-pub fn forest_tint(data: &PlanetData, face: u8, u: u32, v: u32) -> f32 {
-    let Some(f) = data.flora.as_ref() else {
-        return 0.0;
-    };
-    let Some(sp) = species_for(f.cfg.planet_type).first() else {
-        return 0.0;
-    };
+// the species that fit column (face, u, v) by ground block, height band and beach rule (everything
+// `anchor_at` asks before the hashes and the mask), with the column's ground height
+fn fitting_species(data: &PlanetData, cfg: &FloraConfig, face: u8, u: u32, v: u32) -> Vec<usize> {
+    let all = species_for(cfg.planet_type);
     let h = data.effective_height(face, u, v);
-    if h <= data.terrain.sea_level() || data.terrain.water_level(face, u, v) >= h {
-        return 0.0;
+    let sea = data.terrain.sea_level();
+    if all.is_empty() || h <= sea || data.terrain.water_level(face, u, v) >= h {
+        return Vec::new();
     }
+    let peak = data.terrain.height_range().1;
+    let share = (h - sea) as f32 / (peak.saturating_sub(sea)).max(1) as f32;
+    let Some(ground) = data.natural_type(BlockId {
+        face,
+        layer: h,
+        u,
+        v,
+    }) else {
+        return Vec::new();
+    };
+    (0..all.len())
+        .filter(|&i| {
+            let sp = &all[i];
+            sp.ground.contains(&ground)
+                && share >= sp.band.0
+                && share <= sp.band.1
+                && (sp.beach_ok || h >= sea + 2)
+        })
+        .collect()
+}
+
+// the LOD tint of a column: the share (0..=1) of the colour that leans toward a species' crown (the first
+// species that fits the column's ground and height band): the forest mask times its density. None without
+// flora, over water, or where no species could grow
+pub fn forest_crown(data: &PlanetData, face: u8, u: u32, v: u32) -> Option<(f32, BlockType)> {
+    let f = data.flora.as_ref()?;
+    let fits = fitting_species(data, &f.cfg, face, u, v);
+    let sp = &species_for(f.cfg.planet_type)[*fits.first()?];
+    let h = data.effective_height(face, u, v);
     let dir = CoordSystem::get_block_center(face, u, v, h, data.resolution).normalize();
-    (sp.density * f.cfg.density * forest_mask(&f.cfg, dir)).clamp(0.0, 1.0)
+    let t = (sp.density * f.cfg.density * forest_mask(&f.cfg, dir)).clamp(0.0, 1.0);
+    Some((t, sp.crown))
+}
+
+#[cfg(test)]
+pub fn forest_tint(data: &PlanetData, face: u8, u: u32, v: u32) -> f32 {
+    forest_crown(data, face, u, v).map_or(0.0, |(t, _)| t)
 }
 
 // the anchor planted in column (face, u, v), if any
@@ -157,27 +192,7 @@ pub fn anchor_at(data: &PlanetData, cfg: &FloraConfig, face: u8, u: u32, v: u32)
     }
     let res = data.resolution;
     let h = data.effective_height(face, u, v);
-    let sea = data.terrain.sea_level();
-    if h <= sea || data.terrain.water_level(face, u, v) >= h {
-        return None;
-    }
-    let peak = data.terrain.height_range().1;
-    let share = (h - sea) as f32 / (peak.saturating_sub(sea)).max(1) as f32;
-    let ground = data.natural_type(BlockId {
-        face,
-        layer: h,
-        u,
-        v,
-    })?;
-    let fits: Vec<usize> = (0..all.len())
-        .filter(|&i| {
-            let sp = &all[i];
-            sp.ground.contains(&ground)
-                && share >= sp.band.0
-                && share <= sp.band.1
-                && (sp.beach_ok || h >= sea + 2)
-        })
-        .collect();
+    let fits = fitting_species(data, cfg, face, u, v);
     if fits.is_empty() {
         return None;
     }
@@ -285,7 +300,7 @@ pub fn plant_blocks(
             if layer <= ground || layer > ground + MAX_PLANT_HEIGHT {
                 continue;
             }
-            if ragged && hash(plant.hash, face, u, v, layer) % 5 == 0 {
+            if ragged && hash(plant.hash, face, u, v, layer).is_multiple_of(5) {
                 continue;
             }
             let id = BlockId { face, layer, u, v };
@@ -716,5 +731,50 @@ mod tests {
         }
         eprintln!("16 chunks: {:?}", t.elapsed());
         assert!(t.elapsed().as_millis() < 320, "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn every_template_stays_within_the_plant_reach_and_height() {
+        for t in [PlanetType::EarthLike] {
+            for sp in species_for(t) {
+                for h in sp.height.0..=sp.height.1 {
+                    for (ring, offset, _, _) in template_cells(sp, h) {
+                        assert!(ring <= MAX_PLANT_REACH, "{} ring {ring}", sp.name);
+                        assert!(offset <= MAX_PLANT_HEIGHT, "{} offset {offset}", sp.name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn column_neighbours_are_symmetric_on_every_planet_size() {
+        for (res, cells) in [
+            (33u32, CellShape::Hex),
+            (64, CellShape::Hex),
+            (100, CellShape::Hex),
+            (64, CellShape::Square),
+            (100, CellShape::Square),
+        ] {
+            let mut p = PlanetData::new(res);
+            p.cells = cells;
+            let mut links = HashSet::new();
+            for face in 0..6u8 {
+                for u in 0..res {
+                    for v in 0..res {
+                        let n = p.column_neighbors(face, u, v);
+                        assert!((4..=7).contains(&n.len()), "res {res} {n:?}");
+                        for c in n {
+                            links.insert(((face, u, v), c));
+                        }
+                    }
+                }
+            }
+            let asymmetric = links
+                .iter()
+                .filter(|&&(a, b)| !links.contains(&(b, a)))
+                .count();
+            assert_eq!(asymmetric, 0, "res {res} {cells:?}");
+        }
     }
 }

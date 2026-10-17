@@ -1465,15 +1465,13 @@ impl MeshGen {
         };
         // groves show from afar: the land mixes toward the species' crown colour
         let tint = if is_land {
-            crate::planet::flora::forest_tint(data, key.face, su, sv)
+            crate::planet::flora::forest_crown(data, key.face, su, sv)
         } else {
-            0.0
+            None
         };
-        let color = match (tint > 0.0, data.flora.as_ref()) {
-            (true, Some(f)) => {
-                let crown = crate::planet::flora::species_for(f.cfg.planet_type)[0]
-                    .crown
-                    .color();
+        let color = match tint {
+            Some((tint, crown)) if tint > 0.0 => {
+                let crown = crown.color();
                 let t = 0.5 * tint;
                 [0, 1, 2].map(|i| color[i] + (crown[i] - color[i]) * t)
             }

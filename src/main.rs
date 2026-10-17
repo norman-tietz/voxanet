@@ -58,9 +58,8 @@ fn parse_seed(args: &[String]) -> u64 {
         .unwrap_or(1)
 }
 
-// the world-space distance from the planet center to just above the ground along `dir`, using the
-// liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
-// the radius `margin` above the column's highest solid block, plants included
+// the world-space distance from the planet center `margin` above the column's highest solid block along
+// `dir` (plants included), so this never spawns the player inside filled-in ocean or a tree
 fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
     let res = planet.resolution;
     if let Some(id) = planet.cell_at(dir * (res as f32 / 2.0)) {

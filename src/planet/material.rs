@@ -53,7 +53,7 @@ impl BlockType {
             BlockType::Ice => [0.75, 0.88, 0.95],
             BlockType::MoonDust => [0.34, 0.335, 0.325],
             BlockType::Wood => [0.36, 0.22, 0.10],
-            BlockType::Leaves => [0.12, 0.45, 0.10],
+            BlockType::Leaves => [0.07, 0.34, 0.12],
             BlockType::Pine => [0.05, 0.28, 0.12],
             BlockType::Palm => [0.30, 0.52, 0.10],
             BlockType::Cactus => [0.14, 0.42, 0.20],
