@@ -312,7 +312,7 @@ impl SolarSystem {
     pub fn start_planet_index(&self, preferred: PlanetType) -> usize {
         self.planets
             .iter()
-            .position(|p| p.planet_type == preferred)
+            .position(|p| !p.is_moon() && p.planet_type == preferred)
             .unwrap_or(0)
     }
 
@@ -919,7 +919,7 @@ fn compose_fly_direction(forward: Vec3, climb: bool, descend: bool, up: Vec3) ->
 // orbits outside the zone.
 pub const HEAT_ZONE_RADII: f64 = 2.0;
 pub const HEAT_LIMIT_RADII: f64 = 1.15;
-// outward push at full heat: eased flight pulls toward boost speed at up to ~8000 units/s^2
+// outward push at full heat: eased flight pulls toward boost speed at up to ~32,000 units/s^2
 // (SPACE_BOOST_SPEED / FLIGHT_EASE_SECONDS), so this always wins near the limit
 const HEAT_PUSH_ACCEL: f64 = 48_000.0;
 
@@ -1075,17 +1075,15 @@ pub(crate) mod tests {
         // away from the parent's side, 9 moon radii out is inside the moon's sphere but the parent is
         // nearer in its radii (a moon of 40 at 3 parent radii: the point is ~3 parent radii from it)
         let far = moon + (moon - pp.position_at(t)).normalize() * 9.0 * mp.radius as f64;
-        assert!(matches!(
+        assert_eq!(
             next_flight_frame(&s, FlightFrame::Free, far, t),
-            FlightFrame::Captured(_)
-        ));
+            FlightFrame::Captured(2)
+        );
         let far_local = pp.to_planet_frame(far, t);
-        if moon_takes_over(&s, 2, far, t).is_none() {
-            assert_eq!(
-                next_flight_frame(&s, FlightFrame::Captured(2), far_local, t),
-                FlightFrame::Captured(2)
-            );
-        }
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Captured(2), far_local, t),
+            FlightFrame::Captured(2)
+        );
         let in_moon = DVec3::new(10.9 * mp.radius as f64, 0.0, 0.0);
         assert_eq!(
             next_flight_frame(&s, FlightFrame::Captured(m), in_moon, t),
@@ -1328,7 +1326,7 @@ pub(crate) mod tests {
                 "{i}"
             );
         }
-        assert!(MIN_PLANET_RADIUS == 160.0 && MAX_PLANET_RADIUS == 1000.0);
+        const _: () = assert!(MIN_PLANET_RADIUS == 160.0 && MAX_PLANET_RADIUS == 1000.0);
     }
 
     #[test]

@@ -89,7 +89,7 @@ pub fn moons_for(seed: u64, parent_index: usize, parent: &Planet, star: &Star) -
     let cap = cap_for(parent.planet_type);
     let lo = usize::from(parent.planet_type == PlanetType::Ice);
     let want = lo + (unit(seed, parent_index, 0, 1) * (cap - lo + 1) as f64) as usize;
-    let n = want.min(cap).min(orbits.len());
+    let n = want.min(orbits.len());
     let max_r = (MOON_MAX_RADIUS_SHARE * parent.radius).max(MOON_MIN_RADIUS);
     (0..n)
         .map(|k| {

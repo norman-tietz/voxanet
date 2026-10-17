@@ -145,7 +145,7 @@ struct PlanetMesh {
     num_indices: u32,
 }
 
-use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps generated + added planets at this many
+use crate::space::solar_system::MAX_PLANETS; // solar_system.rs caps all bodies (planets and moons) at this many
 
 // starting points from the solar system-terrain-impostors design discussion's faceting estimate
 // (~10-13x radius before individual facets become visually obvious at this project's FOV);
