@@ -12,6 +12,8 @@ use crate::space::solar_system::{
 pub const ORBIT_RADII: f64 = 3.5;
 const LUT: usize = 256;
 const HEAT_MARGIN: f64 = 1.2;
+// a moon's trip keeps this many parent radii from the parent (around its cloud shell)
+const PARENT_MARGIN: f64 = 1.4;
 const LOOK_SHARE: f64 = 0.25; // the last quarter turns the view toward the planet
 const START_SHARE: f64 = 0.15; // the first 15 % turns it from where it looked into the flight direction
 const CHECK_SAMPLES: usize = 256; // samples of the final heat-zone check
@@ -177,7 +179,7 @@ impl Trip {
         if let Some(parent) = p.parent.map(|i| system.planets[i]) {
             let tm = t0 + dur * 0.5;
             let pc = parent.position_at(tm);
-            let limit = parent.radius as f64 * HEAT_MARGIN;
+            let limit = parent.radius as f64 * PARENT_MARGIN;
             let mid = (start + arrival) * 0.5 - pc;
             let chord = (arrival - start).normalize_or(DVec3::X);
             let side = (mid - chord * mid.dot(chord))
@@ -185,26 +187,36 @@ impl Trip {
                 .or_else(|| chord.cross(DVec3::Y).try_normalize())
                 .unwrap_or(DVec3::Z);
             let star_limit = (zone * 1.05).min(start.distance(star) * 0.999);
-            let ok = |t: &Trip| {
-                t.clears(|x| parent.position_at(x), limit) && t.clears(|_| star, star_limit)
-            };
+            let parent_ok = |t: &Trip| t.clears(|x| parent.position_at(x), limit);
+            let star_ok = |t: &Trip| t.clears(|_| star, star_limit);
             // push both inner control points further out to one side, wider each time (either side,
-            // whichever keeps the star's zone clear too)
+            // whichever keeps the star's zone clear too); if the parent can't be cleared, keep the last
+            // configuration that clears the star (the base one at worst)
             let base = trip.ctrl;
+            let mut best = base;
+            let mut done = parent_ok(&trip) && star_ok(&trip);
             let mut reach = limit * 0.5;
             'swing: for _ in 0..16 {
-                if ok(&trip) {
+                if done {
                     break;
                 }
                 for sign in [1.0, -1.0] {
                     trip.ctrl[1] = base[1] + side * sign * reach;
                     trip.ctrl[2] = base[2] + side * sign * reach;
                     trip.lut = arc_lut(&trip.ctrl);
-                    if ok(&trip) {
-                        break 'swing;
+                    if star_ok(&trip) {
+                        best = trip.ctrl;
+                        if parent_ok(&trip) {
+                            done = true;
+                            break 'swing;
+                        }
                     }
                 }
                 reach *= 1.5;
+            }
+            if !done {
+                trip.ctrl = best;
+                trip.lut = arc_lut(&best);
             }
         }
         trip
@@ -307,6 +319,29 @@ mod tests {
                     "{side:?} {k}: {d} vs {}",
                     parent.radius
                 );
+            }
+        }
+    }
+
+    // a start inside the parent's margin cannot clear it by any swing: the trip must still keep the star's
+    // zone clear
+    #[test]
+    fn a_failed_parent_swing_keeps_the_star_clearance() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let m = s.planets.len() - 1;
+        let parent = s.planets[2];
+        let star = s.star.position();
+        let zone = HEAT_ZONE_RADII * s.star.radius;
+        for side in [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z] {
+            let start = parent.position_at(10.0) + side * 1.05 * parent.radius as f64;
+            let trip = Trip::plan(&s, m, start, side, side, 10.0);
+            assert!(!trip.clears(
+                |x| parent.position_at(x),
+                parent.radius as f64 * PARENT_MARGIN
+            ));
+            for k in 0..=200 {
+                let t = trip.t0 + trip.duration * k as f64 / 200.0;
+                assert!((trip.position(t) - star).length() > zone, "{side:?} {k}");
             }
         }
     }
