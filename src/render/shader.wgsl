@@ -527,6 +527,8 @@ fn engine_atmosphere() -> Atmosphere {
         biome.atmosphere.x,
         global.flash.x,
         global.strikes,
+        global.family_info.z,
+        global.family_info.y,
     );
 }
 
@@ -549,11 +551,11 @@ fn sky_opacity(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> f32 {
 }
 
 fn sky_gradient(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
-    // an eclipse dims the dome (family_info.z) and a moon in front of the star hides its disc; with no
+    // an eclipse dims the dome (Atmosphere.sky_dim, inside atmo_sky_dome) and a moon in front of the star hides its disc; with no
     // family both factors are exactly 1.0 / 0.0
     let a = engine_atmosphere();
     let cover = atmo_family_cover(ray_dir, cam_pos, global.family, global.family_info.x);
-    return atmo_sky_dome(ray_dir, cam_pos, L, a) * global.family_info.z + atmo_sun_disc(ray_dir, L, a) * (1.0 - cover);
+    return atmo_sky_dome(ray_dir, cam_pos, L, a) + atmo_sun_disc(ray_dir, L, a) * (1.0 - cover);
 }
 
 fn sky_over_black(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
@@ -929,7 +931,7 @@ fn shade_pixel(px: vec2<i32>, cam_pos: vec3<f32>, L: vec3<f32>, t: f32) -> vec4<
         // moons as lit discs where the sky is opaque enough to hide the backdrop's own (night: the impostor)
         if (global.family_info.x > 0.0) {
             let bodies = atmo_sky_bodies(ray_dir, cam_pos, L, global.family, global.family_info.x, biome.sun.rgb);
-            sky = mix(sky, bodies.rgb, bodies.a * smoothstep(0.0, 0.5, alpha));
+            sky += bodies.rgb * bodies.a * smoothstep(0.0, 0.5, alpha); // additive: the dark side shows the sky
         }
         color = sky * alpha;
     } else {

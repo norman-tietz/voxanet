@@ -146,6 +146,8 @@ fn planet_atmosphere() -> Atmosphere {
         planet.atmosphere.x,
         planet.flash.x,
         planet.strikes,
+        1.0, // eclipse dimming of the sky and clouds: not on the impostors
+        1.0,
     );
 }
 

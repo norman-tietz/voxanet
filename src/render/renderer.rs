@@ -2767,6 +2767,7 @@ impl Renderer {
                     let (vis, dim) = crate::space::eclipse::camera_visibility(
                         backdrop.system,
                         i,
+                        &fam,
                         cam_pos,
                         backdrop.t,
                     );
@@ -5079,20 +5080,37 @@ pub(crate) mod tests {
         assert_eq!(off("family_info"), offset_of!(GlobalUniform, family_info));
     }
 
+    // the body of a WGSL function, from its signature to the closing brace at column 0
+    fn wgsl_fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        let rest = &src[start..];
+        &rest[..rest.find("\n}\n").expect("function end")]
+    }
+
     #[test]
     fn the_scene_shader_knows_eclipses_and_sky_discs() {
         let atmo = include_str!("atmosphere.wgsl");
-        assert!(atmo.contains("fn atmo_sun_visibility("));
-        assert!(atmo.contains("fn atmo_sky_bodies("));
         assert!(atmo.contains("fn atmo_disc_overlap("));
-        // a family-less frame exits at once
-        assert!(atmo.contains("if (count <= 0.0)"), "no family, no work");
+        // a family-less frame exits at once, in each family function
+        for name in [
+            "atmo_sun_visibility",
+            "atmo_sky_bodies",
+            "atmo_family_cover",
+        ] {
+            let body = wgsl_fn_body(atmo, name);
+            assert!(
+                body.contains("if (count <= 0.0)"),
+                "{name}: no family, no work"
+            );
+        }
         assert!(
             SCENE_SHADER.contains("atmo_sun_visibility("),
             "direct sunlight is scaled by the eclipse"
         );
         assert!(
-            SCENE_SHADER.contains("global.family_info.z"),
+            wgsl_fn_body(SCENE_SHADER, "engine_atmosphere").contains("global.family_info.z"),
             "the sky and fill dim in an eclipse"
         );
         assert!(

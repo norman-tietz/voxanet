@@ -38,7 +38,6 @@ const LIGHTNING_DOME_GAIN: f32 = 0.25;     // the dome's brightening at full sce
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
 // storm and mist fog (weather/fog.rs mirrors these)
-const ECLIPSE_SKY_DIM_MIN: f32 = 0.25;  // sky and fill light at a total eclipse (mirrors space/eclipse.rs)
 const FOG_STORM_LO: f32 = 0.25;        // storm value where the haze starts
 const FOG_STRUCTURE: f32 = 0.6;        // the storm density swings by this share around its mean
 const FOG_STRUCT_SCALE: f32 = 0.02;    // structure noise cells per unit
@@ -66,6 +65,8 @@ struct Atmosphere {
     density: f32,         // 1 = full atmosphere, 0 = vacuum (planet/biome.rs AtmosphereDef.density)
     flash: f32,           // 0..1 scene flash at the camera (weather/lightning.rs flash_at)
     strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame position on the surface, w intensity
+    sky_dim: f32,         // eclipse: the sky dome's dimming (1 = none, eclipse.rs)
+    sun_vis: f32,         // eclipse: share of the star's light reaching the camera (1 = none); dims the clouds' sun term
 }
 
 // the weather's fog at the camera (weather/fog.rs FogParams)
@@ -216,7 +217,7 @@ fn atmo_sky_dome(ray_dir: vec3<f32>, cam_pos: vec3<f32>, L: vec3<f32>, a: Atmosp
     // an overcast sky: greyer and darker under a storm (up to 40 %)
     let grey = vec3<f32>(dot(dome, vec3<f32>(0.3, 0.59, 0.11)));
     let dull = mix(dome, grey, OVERCAST_GREY * a.overcast) * (1.0 - OVERCAST_DIM * a.overcast);
-    return mix(a.space_color, dull + LIGHTNING_COLOR * a.flash * LIGHTNING_DOME_GAIN, limb);
+    return mix(a.space_color, dull + LIGHTNING_COLOR * a.flash * LIGHTNING_DOME_GAIN, limb) * a.sky_dim;
 }
 
 // the sun itself: a tight HDR-bright core plus a softer glare halo, additive so ACES blows it out
@@ -256,6 +257,7 @@ fn atmo_sun_disc(ray_dir: vec3<f32>, L: vec3<f32>, a: Atmosphere) -> vec3<f32> {
 // xyz centre + w radius in the camera body's frame, rgb colour + w 1. With count 0 every function exits at
 // once, returning exactly 1.0 / 0.0, so a family-less frame is bit-identical to one without them.
 const MAX_OCCLUDERS: i32 = 4;
+const ECLIPSE_SKY_DIM_MIN: f32 = 0.25;  // sky and fill light at a total eclipse (mirrors space/eclipse.rs)
 
 // the share of a disc of angular radius rs covered by a disc of radius ro, centres d apart (eclipse.rs
 // disc_overlap_fraction)
@@ -307,10 +309,13 @@ fn atmo_family_cover(ray_dir: vec3<f32>, cam: vec3<f32>, family: array<vec4<f32>
 
 // the family bodies as discs in the sky along `ray_dir` from `cam`: phase-lit by the star (L: direction to
 // the star), a faint floor on the dark side; rgb and the coverage as alpha. Used where the sky is opaque
-// (by day); the backdrop's real impostor takes over where it turns transparent.
+// (by day), added to the sky (the unlit side shows the sky through it); the backdrop's real impostor takes over
+// where it turns transparent. Overlapping discs: the nearest in front.
 fn atmo_sky_bodies(ray_dir: vec3<f32>, cam: vec3<f32>, L: vec3<f32>, family: array<vec4<f32>, 12>, count: f32, sun: vec3<f32>) -> vec4<f32> {
     if (count <= 0.0) { return vec4<f32>(0.0); }
-    var out = vec4<f32>(0.0);
+    var prem = vec3<f32>(0.0); // premultiplied colour of the discs so far
+    var alpha = 0.0;
+    var nearest = 1e30;
     for (var i = 0; i < 6; i++) {
         if (f32(i) >= count) { break; }
         let c = family[i * 2];
@@ -330,9 +335,17 @@ fn atmo_sky_bodies(ray_dir: vec3<f32>, cam: vec3<f32>, L: vec3<f32>, family: arr
         let n = normalize(ray_dir * hit - v);
         let lit = max(dot(n, L), 0.0);
         let colour = col.rgb * sun * (lit * 0.9 + 0.02);
-        out = vec4<f32>(mix(out.rgb, colour, cover), max(out.a, cover));
+        // the nearest disc wins where discs overlap (the family list is sorted by apparent size, not distance)
+        if (dist < nearest) {
+            prem = colour * cover + prem * (1.0 - cover);
+            alpha = cover + alpha * (1.0 - cover);
+            nearest = dist;
+        } else {
+            prem = prem + colour * cover * (1.0 - alpha);
+            alpha = alpha + cover * (1.0 - alpha);
+        }
     }
-    return out;
+    return vec4<f32>(prem / max(alpha, 1e-6), alpha);
 }
 
 // the sky as it looks over a black background — for fog and water reflections, which can't see what

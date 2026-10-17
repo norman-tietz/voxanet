@@ -3,7 +3,7 @@
 // fraction of a body, and the family list for the GPU. atmosphere.wgsl mirrors the maths; CONSTANTS and the
 // formulas here are the reference for its tests.
 
-use glam::{DVec3, Vec3};
+use glam::Vec3;
 
 use crate::space::solar_system::SolarSystem;
 
@@ -66,15 +66,6 @@ pub fn sun_visibility(point: Vec3, sun_dir: Vec3, star_angle: f32, bodies: &[Fam
     (1.0 - covered).clamp(0.0, 1.0)
 }
 
-// the lit share of a body seen from an observer: (1 + cos a) / 2 with a the angle at the body between the
-// observer and the star (observer_to_body: from the observer to the body, body_to_star: from the body to the star)
-#[cfg(test)] // the GPU shades the phase itself (atmo_sky_bodies); this is its reference
-pub fn lit_fraction(observer_to_body: Vec3, body_to_star: Vec3) -> f32 {
-    let to_observer = (-observer_to_body).normalize_or_zero();
-    let to_star = body_to_star.normalize_or_zero();
-    0.5 * (1.0 + to_observer.dot(to_star))
-}
-
 // the bodies that can eclipse or hang in the sky of `body`: a planet's moons; a moon's parent and siblings.
 // In body's own frame, nearest by apparent size first, at most MAX_FAMILY.
 pub fn family_of(system: &SolarSystem, body: usize, t: f64) -> Vec<FamilyBody> {
@@ -118,15 +109,16 @@ pub fn pack_family(f: &[FamilyBody]) -> [[f32; 4]; MAX_FAMILY * 2] {
 }
 
 // sun visibility at `camera` (in `body`'s frame) at time t, and the sky/fill dim factor derived from it
-pub fn camera_visibility(system: &SolarSystem, body: usize, camera: Vec3, t: f64) -> (f32, f32) {
+pub fn camera_visibility(
+    system: &SolarSystem,
+    body: usize,
+    family: &[FamilyBody],
+    camera: Vec3,
+    t: f64,
+) -> (f32, f32) {
     let p = &system.planets[body];
-    let sun_dir = p.sun_dir_in_planet_frame(DVec3::ZERO, t);
-    let v = sun_visibility(
-        camera,
-        sun_dir,
-        p.star_angular_radius(&system.star),
-        &family_of(system, body, t),
-    );
+    let sun_dir = p.sun_dir_in_planet_frame(system.star.position(), t);
+    let v = sun_visibility(camera, sun_dir, p.star_angular_radius(&system.star), family);
     (v, SKY_DIM_MIN + (1.0 - SKY_DIM_MIN) * v)
 }
 
@@ -229,18 +221,6 @@ mod tests {
     }
 
     #[test]
-    fn phases_follow_the_dot_product() {
-        // observer at the origin, body 5 units along +X
-        let obs = Vec3::X * 5.0;
-        let quarter = lit_fraction(obs, Vec3::Y * 5.0);
-        assert!((quarter - 0.5).abs() < 0.01, "{quarter}");
-        // star on the observer's side of the body (body_to_star toward the observer): full
-        assert!(lit_fraction(obs, Vec3::NEG_X) > 0.99);
-        // star behind the body as seen from the observer: new
-        assert!(lit_fraction(obs, Vec3::X) < 0.01);
-    }
-
-    #[test]
     fn the_family_is_the_camera_bodys_moons_or_its_parent_and_siblings() {
         let s = crate::space::solar_system::tests::with_moon();
         let m = s.planets.len() - 1;
@@ -274,8 +254,17 @@ mod tests {
     #[test]
     fn camera_visibility_is_full_without_a_family_and_dims_in_eclipse() {
         let s = crate::space::solar_system::tests::with_moon();
-        assert_eq!(camera_visibility(&s, 0, Vec3::ZERO, 5.0), (1.0, 1.0));
-        let (v, dim) = camera_visibility(&s, 2, Vec3::ZERO, 5.0);
+        let t = 5.0;
+        assert_eq!(
+            camera_visibility(&s, 0, &family_of(&s, 0, t), Vec3::ZERO, t),
+            (1.0, 1.0)
+        );
+        // a camera behind the moon as seen from the star: the moon is on the sun line
+        let fam = family_of(&s, 2, t);
+        let sun = s.planets[2].sun_dir_in_planet_frame(s.star.position(), t);
+        let cam = fam[0].centre - sun * 100.0;
+        let (v, dim) = camera_visibility(&s, 2, &fam, cam, t);
+        assert!(v < 1.0 && dim < 1.0, "v {v} dim {dim}");
         assert!((0.0..=1.0).contains(&v) && (SKY_DIM_MIN..=1.0).contains(&dim));
     }
 
