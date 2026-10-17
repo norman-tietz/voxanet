@@ -442,7 +442,7 @@ impl Planet {
             self.planet_type,
             self.traits,
         )
-        .with_flora(true, 1.0)
+        .with_flora(crate::planet::flora::plants_by_default(), 1.0)
     }
 
     // bake() plus the edits kept from an earlier visit (refused if they belong to another terrain)

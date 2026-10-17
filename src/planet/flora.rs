@@ -14,6 +14,18 @@ use std::sync::{Arc, RwLock};
 
 pub const ANCHOR_CELL: u32 = 6;
 pub const MAX_PLANT_HEIGHT: u32 = 12;
+
+// whether newly baked planets get plants; `--no-plants` turns it off for the whole run (`/plants on`
+// still switches the loaded planet)
+static PLANTS_BY_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_plants_by_default(on: bool) {
+    PLANTS_BY_DEFAULT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn plants_by_default() -> bool {
+    PLANTS_BY_DEFAULT.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub const MAX_PLANT_REACH: u32 = 3;
 
 // canopy radius in rings

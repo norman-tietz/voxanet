@@ -49,6 +49,11 @@ fn windowed(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--windowed")
 }
 
+// --no-plants: bake every planet without vegetation (faster meshing and rendering; `/plants on` still works)
+fn no_plants(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--no-plants")
+}
+
 // --seed <n>: the solar system seed (default 1): sets the star type and the planets
 fn parse_seed(args: &[String]) -> u64 {
     args.iter()
@@ -74,6 +79,7 @@ fn main() {
     SystemDiagnostics::print_startup_info();
     let initial_biome = parse_biome_arg();
     let seed = parse_seed(&std::env::args().collect::<Vec<_>>());
+    crate::planet::flora::set_plants_by_default(!no_plants(&std::env::args().collect::<Vec<_>>()));
     let event_loop = EventLoop::new().unwrap();
     let mut app = App {
         game: None,
@@ -2525,6 +2531,8 @@ mod tests {
         assert!(!windowed(&args(&["voxanet", "--seed", "3"])));
         assert!(windowed(&args(&["voxanet", "--windowed"])));
         assert!(windowed(&args(&["voxanet", "--seed", "3", "--windowed"])));
+        assert!(!no_plants(&args(&["voxanet", "--windowed"])));
+        assert!(no_plants(&args(&["voxanet", "--no-plants", "--windowed"])));
     }
 
     #[test]
