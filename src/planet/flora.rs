@@ -45,33 +45,6 @@ pub struct Species {
     pub beach_ok: bool,
 }
 
-const EARTH_LIKE: &[Species] = &[
-    Species {
-        name: "Oak",
-        trunk: BlockType::Wood,
-        crown: BlockType::Leaves,
-        tip: None,
-        ground: &[BlockType::Grass, BlockType::Dirt],
-        height: (4, 6),
-        template: Template::Blob(2),
-        density: 1.0,
-        band: (0.0, 0.25),
-        beach_ok: false,
-    },
-    Species {
-        name: "Pine",
-        trunk: BlockType::Wood,
-        crown: BlockType::Pine,
-        tip: None,
-        ground: &[BlockType::Grass, BlockType::Dirt, BlockType::Stone],
-        height: (6, 9),
-        template: Template::Cone(2),
-        density: 0.8,
-        band: (0.2, 0.55),
-        beach_ok: false,
-    },
-];
-
 #[allow(clippy::too_many_arguments)]
 const fn sp(
     name: &'static str,
@@ -100,6 +73,33 @@ const fn sp(
 }
 
 use BlockType as B;
+const EARTH_LIKE: &[Species] = &[
+    sp(
+        "Oak",
+        B::Wood,
+        B::Leaves,
+        None,
+        &[B::Grass, B::Dirt],
+        (4, 6),
+        Template::Blob(2),
+        1.0,
+        (0.0, 0.25),
+        false,
+    ),
+    sp(
+        "Pine",
+        B::Wood,
+        B::Pine,
+        None,
+        &[B::Grass, B::Dirt, B::Stone],
+        (6, 9),
+        Template::Cone(2),
+        0.8,
+        (0.25, 0.55),
+        false,
+    ),
+];
+
 const OCEAN: &[Species] = &[sp(
     "Palm",
     B::Wood,
@@ -579,6 +579,21 @@ pub fn plant_blocks(
 
 // the largest ring any template of the type's species reaches (at most MAX_PLANT_REACH)
 fn max_reach(t: PlanetType) -> u32 {
+    // computed once per type (this runs for every chunk)
+    static REACH: std::sync::OnceLock<Vec<(PlanetType, u32)>> = std::sync::OnceLock::new();
+    REACH
+        .get_or_init(|| {
+            PlanetType::ALL
+                .iter()
+                .map(|&t| (t, compute_reach(t)))
+                .collect()
+        })
+        .iter()
+        .find(|(k, _)| *k == t)
+        .map_or(0, |(_, r)| *r)
+}
+
+fn compute_reach(t: PlanetType) -> u32 {
     species_for(t)
         .iter()
         .flat_map(|sp| (sp.height.0..=sp.height.1).map(move |h| (sp, h)))
@@ -721,7 +736,10 @@ impl Flora {
         let made = Arc::new(decor_chunk(data, &self.cfg, key));
         let mut map = self.cache.write().unwrap();
         if map.len() >= MAX_CACHED_CHUNKS && !map.contains_key(&key) {
-            map.clear();
+            // drop one entry, not the whole cache (a flight over forests would regenerate everything)
+            if let Some(&old) = map.keys().next() {
+                map.remove(&old);
+            }
         }
         map.entry(key).or_insert(made).clone()
     }
@@ -745,6 +763,7 @@ impl Flora {
         self.cache.write().unwrap().retain(|k, _| keep(k));
     }
 
+    #[cfg(test)]
     pub fn clear(&self) {
         self.cache.write().unwrap().clear();
     }

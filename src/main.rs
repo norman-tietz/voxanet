@@ -197,6 +197,22 @@ fn loaded_here(loaded: (usize, usize), current: usize, i: usize) -> bool {
     loaded == (current, i)
 }
 
+// the /plants setting after a command: `on` keeps the density that `off` left (like /film keeps its
+// values), and a density of 0 comes back as the default 1
+fn plants_after(
+    cmd: crate::app::cmd::PlantsCommand,
+    on: bool,
+    density: f32,
+) -> Option<(bool, f32)> {
+    use crate::app::cmd::PlantsCommand;
+    match cmd {
+        PlantsCommand::Show => None,
+        PlantsCommand::On => Some((true, if on || density > 0.0 { density } else { 1.0 })),
+        PlantsCommand::Off => Some((false, density)),
+        PlantsCommand::Density(d) => Some((d > 0.0, d)),
+    }
+}
+
 // makes a baked planet the voxel engine's world: palette, full mesh reload streaming from
 // `stream_from` (planet frame), near impostor for the space renderer
 fn install_world(
@@ -1574,7 +1590,6 @@ impl Game {
             console.log(&msg, [0.0, 1.0, 0.0]); // also printed to the terminal
         }
         if let Some(cmd) = console.plants_request.take() {
-            use crate::app::cmd::PlantsCommand;
             let current = |planet: &PlanetData| {
                 planet
                     .flora
@@ -1582,12 +1597,7 @@ impl Game {
                     .map_or((false, 1.0), |f| (true, f.cfg.density))
             };
             let (on, density) = (*plants).unwrap_or_else(|| current(planet));
-            let next = match cmd {
-                PlantsCommand::Show => None,
-                PlantsCommand::On => Some((true, if on { density } else { 1.0 })),
-                PlantsCommand::Off => Some((false, density)),
-                PlantsCommand::Density(d) => Some((d > 0.0, d)),
-            };
+            let next = plants_after(cmd, on, density);
             // the loaded planet's plants only mean something while its voxel world is what you see
             if next.is_some() && *mode == GameMode::Space {
                 console.log("Land on a planet to change its plants.", [1.0, 0.5, 0.0]);
@@ -2241,6 +2251,22 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // /plants on after off keeps the density that was set
+    #[test]
+    fn plants_on_keeps_the_density_off_left() {
+        use crate::app::cmd::PlantsCommand;
+        let (on, d) = plants_after(PlantsCommand::Density(2.5), false, 1.0).unwrap();
+        assert!(on);
+        let (on, d) = plants_after(PlantsCommand::Off, on, d).unwrap();
+        assert_eq!((on, d), (false, 2.5));
+        assert_eq!(plants_after(PlantsCommand::On, on, d), Some((true, 2.5)));
+        assert_eq!(
+            plants_after(PlantsCommand::On, false, 0.0),
+            Some((true, 1.0))
+        );
+        assert_eq!(plants_after(PlantsCommand::Show, on, d), None);
+    }
 
     // a spawn stands clear of the plants: the cell at the spawn radius is open air
     #[test]
