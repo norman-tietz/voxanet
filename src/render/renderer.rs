@@ -1662,16 +1662,61 @@ impl Renderer {
                 (player_id.u / CHUNK_SIZE) as i64,
                 (player_id.v / CHUNK_SIZE) as i64,
             );
+            let mut prefetched: Vec<ChunkKey> = Vec::new();
             for du in -1..=1i64 {
                 for dv in -1..=1i64 {
                     let (u, v) = (cu + du, cv + dv);
                     if (0..n).contains(&u) && (0..n).contains(&v) {
-                        planet.decor_chunk(ChunkKey {
+                        let key = ChunkKey {
                             face: player_id.face,
                             u_idx: u as u32,
                             v_idx: v as u32,
-                        });
+                        };
+                        planet.decor_chunk(key);
+                        prefetched.push(key);
+                    } else if du == 0 || dv == 0 {
+                        // across a cube-face edge: the chunk of the column one step over the edge
+                        // (u or v clamped into the face, the step out of it taken by neighbor_column)
+                        let (su, sv) = (u.clamp(0, n - 1), v.clamp(0, n - 1));
+                        let cu_col =
+                            (su as u32 * CHUNK_SIZE + player_id.u % CHUNK_SIZE).min(res - 1);
+                        let cv_col =
+                            (sv as u32 * CHUNK_SIZE + player_id.v % CHUNK_SIZE).min(res - 1);
+                        let (eu, ev) = ((u - su).signum() as i32, (v - sv).signum() as i32);
+                        let edge_u = if eu < 0 { 0 } else { cu_col };
+                        let edge_v = if ev < 0 { 0 } else { cv_col };
+                        let edge_u = if eu > 0 { res - 1 } else { edge_u };
+                        let edge_v = if ev > 0 { res - 1 } else { edge_v };
+                        if let Some((f, nu, nv)) =
+                            planet.neighbor_column(player_id.face, edge_u, edge_v, eu, ev)
+                        {
+                            let key = ChunkKey {
+                                face: f,
+                                u_idx: nu / CHUNK_SIZE,
+                                v_idx: nv / CHUNK_SIZE,
+                            };
+                            planet.decor_chunk(key);
+                            prefetched.push(key);
+                        }
                     }
+                }
+            }
+            // chunks away from everything in view (no mesh to rebuild, no physics nearby) are dropped; a
+            // chunk of another face next to a seam may go too and is simply generated again
+            if self.frame_count % 32 == 0 {
+                if let Some(flora) = planet.flora.as_ref() {
+                    let near = |k: &ChunkKey| {
+                        (-1i64..=1).any(|du| {
+                            (-1i64..=1).any(|dv| {
+                                required_voxels.contains(&ChunkKey {
+                                    face: k.face,
+                                    u_idx: (k.u_idx as i64 + du).max(0) as u32,
+                                    v_idx: (k.v_idx as i64 + dv).max(0) as u32,
+                                })
+                            })
+                        })
+                    };
+                    flora.retain(|k| near(k) || prefetched.contains(k));
                 }
             }
         }

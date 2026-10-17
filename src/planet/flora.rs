@@ -286,10 +286,12 @@ pub fn plant_blocks(
 ) -> Vec<(BlockId, BlockType)> {
     let sp = &species_for(cfg.planet_type)[plant.species];
     let base = data.effective_height(plant.face, plant.u, plant.v);
-    let rs = rings(data, plant.face, plant.u, plant.v, MAX_PLANT_REACH);
+    let cells = template_cells(sp, plant.height);
+    let reach = cells.iter().map(|c| c.0).max().unwrap_or(0);
+    let rs = rings(data, plant.face, plant.u, plant.v, reach);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for (ring, offset, ty, ragged) in template_cells(sp, plant.height) {
+    for (ring, offset, ty, ragged) in cells {
         let Some(columns) = rs.get(ring as usize) else {
             continue;
         };
@@ -310,6 +312,17 @@ pub fn plant_blocks(
         }
     }
     out
+}
+
+// the largest ring any template of the type's species reaches (at most MAX_PLANT_REACH)
+fn max_reach(t: PlanetType) -> u32 {
+    species_for(t)
+        .iter()
+        .flat_map(|sp| (sp.height.0..=sp.height.1).map(move |h| (sp, h)))
+        .flat_map(|(sp, h)| template_cells(sp, h).into_iter().map(|c| c.0))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_PLANT_REACH)
 }
 
 // the plant blocks of one chunk, and per column of the chunk its highest plant layer
@@ -353,32 +366,49 @@ pub fn decor_chunk(data: &PlanetData, cfg: &FloraConfig, key: ChunkKey) -> Chunk
         return out;
     }
     let res = data.resolution;
+    let reach = max_reach(cfg.planet_type);
     let (u0, v0) = (key.u_idx * CHUNK_SIZE, key.v_idx * CHUNK_SIZE);
     let (u1, v1) = ((u0 + CHUNK_SIZE).min(res), (v0 + CHUNK_SIZE).min(res));
-    let mut seen: HashSet<(u8, u32, u32)> =
-        HashSet::with_capacity(((u1 - u0) * (v1 - v0)) as usize + 512);
     let mut candidates: Vec<(u8, u32, u32)> = Vec::new();
-    let mut frontier = Vec::new();
-    for u in u0..u1 {
-        for v in v0..v1 {
-            seen.insert((key.face, u, v));
-            candidates.push((key.face, u, v));
-            if u == u0 || u + 1 == u1 || v == v0 || v + 1 == v1 {
-                frontier.push((key.face, u, v));
-            }
-        }
-    }
-    for _ in 0..MAX_PLANT_REACH {
-        let mut next = Vec::new();
-        for &(f, u, v) in &frontier {
-            for c in data.column_neighbors(f, u, v) {
-                if seen.insert(c) {
-                    next.push(c);
-                    candidates.push(c);
+    if u0 >= reach && v0 >= reach && u1 + reach <= res && v1 + reach <= res {
+        // away from the face edges `reach` rings stay within `reach` columns in u and v: only the anchor
+        // cells over that square are looked at, each holding at most one candidate
+        let (a0, a1) = ((u0 - reach) / ANCHOR_CELL, (u1 + reach - 1) / ANCHOR_CELL);
+        let (b0, b1) = ((v0 - reach) / ANCHOR_CELL, (v1 + reach - 1) / ANCHOR_CELL);
+        for cu in a0..=a1 {
+            for cv in b0..=b1 {
+                let u = cu * ANCHOR_CELL + hash(cfg.seed, key.face, cu, cv, 1) % ANCHOR_CELL;
+                let v = cv * ANCHOR_CELL + hash(cfg.seed, key.face, cu, cv, 2) % ANCHOR_CELL;
+                if (u0 - reach..u1 + reach).contains(&u) && (v0 - reach..v1 + reach).contains(&v) {
+                    candidates.push((key.face, u, v));
                 }
             }
         }
-        frontier = next;
+    } else {
+        let mut seen: HashSet<(u8, u32, u32)> =
+            HashSet::with_capacity(((u1 - u0) * (v1 - v0)) as usize + 512);
+        let mut frontier = Vec::new();
+        for u in u0..u1 {
+            for v in v0..v1 {
+                seen.insert((key.face, u, v));
+                candidates.push((key.face, u, v));
+                if u == u0 || u + 1 == u1 || v == v0 || v + 1 == v1 {
+                    frontier.push((key.face, u, v));
+                }
+            }
+        }
+        for _ in 0..reach {
+            let mut next = Vec::new();
+            for &(f, u, v) in &frontier {
+                for c in data.column_neighbors(f, u, v) {
+                    if seen.insert(c) {
+                        next.push(c);
+                        candidates.push(c);
+                    }
+                }
+            }
+            frontier = next;
+        }
     }
     // overlapping plants resolve by anchor order (face, u, v): the later anchor's block wins, in any chunk
     candidates.sort_unstable();
@@ -445,6 +475,11 @@ impl Flora {
 
     pub fn evict(&self, key: ChunkKey) {
         self.cache.write().unwrap().remove(&key);
+    }
+
+    // drops the cached chunks `keep` rejects
+    pub fn retain(&self, keep: impl Fn(&ChunkKey) -> bool) {
+        self.cache.write().unwrap().retain(|k, _| keep(k));
     }
 
     pub fn clear(&self) {
