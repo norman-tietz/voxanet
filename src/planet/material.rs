@@ -19,6 +19,25 @@ pub enum BlockType {
     Ember,
     Ice,
     MoonDust,
+    // plants: placed by the flora generator (Task 2 on); until then only tests build them
+    #[allow(dead_code)]
+    Wood,
+    #[allow(dead_code)]
+    Leaves,
+    #[allow(dead_code)]
+    Pine,
+    #[allow(dead_code)]
+    Palm,
+    #[allow(dead_code)]
+    Cactus,
+    #[allow(dead_code)]
+    Stem,
+    #[allow(dead_code)]
+    Cap,
+    #[allow(dead_code)]
+    DeadWood,
+    #[allow(dead_code)]
+    Crystal,
 }
 
 impl BlockType {
@@ -36,6 +55,15 @@ impl BlockType {
             BlockType::Ember => [0.5, 0.22, 0.08],
             BlockType::Ice => [0.75, 0.88, 0.95],
             BlockType::MoonDust => [0.34, 0.335, 0.325],
+            BlockType::Wood => [0.36, 0.22, 0.10],
+            BlockType::Leaves => [0.12, 0.45, 0.10],
+            BlockType::Pine => [0.05, 0.28, 0.12],
+            BlockType::Palm => [0.30, 0.52, 0.10],
+            BlockType::Cactus => [0.14, 0.42, 0.20],
+            BlockType::Stem => [0.75, 0.70, 0.55],
+            BlockType::Cap => [0.55, 0.65, 0.18],
+            BlockType::DeadWood => [0.25, 0.20, 0.15],
+            BlockType::Crystal => [0.85, 0.30, 0.95],
         }
     }
 
@@ -53,6 +81,15 @@ impl BlockType {
             BlockType::Ember => "Ember",
             BlockType::Ice => "Ice",
             BlockType::MoonDust => "Moon dust",
+            BlockType::Wood => "Wood",
+            BlockType::Leaves => "Leaves",
+            BlockType::Pine => "Pine",
+            BlockType::Palm => "Palm",
+            BlockType::Cactus => "Cactus",
+            BlockType::Stem => "Stem",
+            BlockType::Cap => "Cap",
+            BlockType::DeadWood => "Dead wood",
+            BlockType::Crystal => "Crystal",
         }
     }
 
@@ -318,6 +355,15 @@ mod tests {
             BlockType::Ember,
             BlockType::Ice,
             BlockType::MoonDust,
+            BlockType::Wood,
+            BlockType::Leaves,
+            BlockType::Pine,
+            BlockType::Palm,
+            BlockType::Cactus,
+            BlockType::Stem,
+            BlockType::Cap,
+            BlockType::DeadWood,
+            BlockType::Crystal,
         ] {
             assert!(!ty.name().is_empty());
             let [r, g, b] = ty.color();
@@ -341,10 +387,63 @@ mod tests {
             BlockType::Obsidian,
             BlockType::Ember,
             BlockType::MoonDust,
+            BlockType::Wood,
+            BlockType::Leaves,
+            BlockType::Pine,
+            BlockType::Palm,
+            BlockType::Cactus,
+            BlockType::Stem,
+            BlockType::Cap,
+            BlockType::DeadWood,
+            BlockType::Crystal,
         ] {
             assert_eq!(ty.friction_scale(), 1.0);
         }
     }
+    #[test]
+    fn plant_blocks_have_names_colors_and_normal_friction() {
+        for (ty, name) in [
+            (BlockType::Wood, "Wood"),
+            (BlockType::Leaves, "Leaves"),
+            (BlockType::Pine, "Pine"),
+            (BlockType::Palm, "Palm"),
+            (BlockType::Cactus, "Cactus"),
+            (BlockType::Stem, "Stem"),
+            (BlockType::Cap, "Cap"),
+            (BlockType::DeadWood, "Dead wood"),
+            (BlockType::Crystal, "Crystal"),
+        ] {
+            assert_eq!(ty.name(), name);
+            let [r, g, b] = ty.color();
+            assert!(
+                (0.0..=2.0).contains(&r) && (0.0..=2.0).contains(&g) && (0.0..=2.0).contains(&b)
+            );
+            assert_eq!(ty.friction_scale(), 1.0);
+        }
+        // green things are greener than red, wood is brown
+        let g = BlockType::Leaves.color();
+        assert!(g[1] > g[0] && g[1] > g[2]);
+        let w = BlockType::Wood.color();
+        assert!(w[0] > w[2]);
+        // the placeable roles never include a plant
+        for t in crate::planet::biome::PlanetType::ALL {
+            for b in placeable(&t.def().palette) {
+                assert!(!matches!(
+                    b,
+                    BlockType::Wood
+                        | BlockType::Leaves
+                        | BlockType::Pine
+                        | BlockType::Palm
+                        | BlockType::Cactus
+                        | BlockType::Stem
+                        | BlockType::Cap
+                        | BlockType::DeadWood
+                        | BlockType::Crystal
+                ));
+            }
+        }
+    }
+
     #[test]
     fn lake_beds_and_shores_are_beach() {
         let (planet, (face, u, v)) =
