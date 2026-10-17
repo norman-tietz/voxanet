@@ -301,8 +301,14 @@ impl PlanetData {
     // the natural plant block at this cell, if any: only above the ground and within the plant height
     // range (other cells never touch the cache); edits are not consulted
     pub fn decor_block(&self, id: BlockId) -> Option<BlockType> {
-        let f = self.flora.as_ref()?;
+        self.flora.as_ref()?;
         let g = self.effective_height(id.face, id.u, id.v);
+        self.decor_block_above(id, g)
+    }
+
+    // `decor_block` with the column's ground height already known
+    fn decor_block_above(&self, id: BlockId, g: u32) -> Option<BlockType> {
+        let f = self.flora.as_ref()?;
         if id.layer <= g || id.layer > g + crate::planet::flora::MAX_PLANT_HEIGHT {
             return None;
         }
@@ -419,7 +425,7 @@ impl PlanetData {
         if id.layer > self.build_ceiling() {
             return Err(EditRefused::BuildLimit);
         }
-        let natural = self.natural_type(id);
+        let natural = self.decor_block(id).or_else(|| self.natural_type(id));
         let key = Self::get_chunk_key(id);
         let (was_mined, was_placed) = self.edits.chunks.get(&key).map_or((false, false), |m| {
             (m.mined.contains(&id), m.placed.contains_key(&id))
@@ -485,10 +491,24 @@ impl PlanetData {
         }
 
         // instead of a flat floor, we check the pre-calculated noise map
-        if id.layer <= self.effective_height(id.face, id.u, id.v) {
+        let g = self.effective_height(id.face, id.u, id.v);
+        if id.layer <= g {
             return true;
         }
-        self.flora.is_some() && self.decor_block(id).is_some()
+        self.flora.is_some() && self.decor_block_above(id, g).is_some()
+    }
+
+    // terrain plus edits, without the natural plants: what `surface` and the water rule measure
+    pub fn exists_terrain(&self, id: BlockId) -> bool {
+        if let Some(mods) = self.edits.chunks.get(&Self::get_chunk_key(id)) {
+            if mods.placed.contains_key(&id) {
+                return true;
+            }
+            if mods.mined.contains(&id) {
+                return false;
+            }
+        }
+        id.layer <= self.effective_height(id.face, id.u, id.v)
     }
 
     // the height `exists()`/mesh generation should treat as solid: on a liquid-less planet (no
@@ -514,7 +534,7 @@ impl PlanetData {
         }
         let floor = self.mining_floor();
         let mut layer = self.build_ceiling();
-        while layer >= floor && !self.exists(BlockId { face, layer, u, v }) {
+        while layer >= floor && !self.exists_terrain(BlockId { face, layer, u, v }) {
             layer -= 1;
         }
         layer // below the floor everything is bedrock
@@ -756,7 +776,8 @@ impl PlanetData {
     // or ocean, a pit dug into a lake bed, a hole dug below sea level elsewhere (no flow between them)
     pub fn holds_water(&self, face: u8, u: u32, v: u32) -> bool {
         let layer = self.terrain.water_level(face, u, v);
-        self.planet_type.def().liquid.is_some() && !self.exists(BlockId { face, layer, u, v })
+        self.planet_type.def().liquid.is_some()
+            && !self.exists_terrain(BlockId { face, layer, u, v })
     }
 
     // the radius of this column's water surface, 0 when it holds none
@@ -965,6 +986,41 @@ pub(crate) mod tests {
         let t = q.top(id.face, id.u, id.v);
         q.remove_block(BlockId { layer: t, ..id }).unwrap();
         assert!(q.top(id.face, id.u, id.v) < t);
+    }
+
+    #[test]
+    fn surface_ignores_plants_even_in_an_edited_chunk() {
+        let (mut p, id, _) = forest_planet();
+        let ground = p.effective_height(id.face, id.u, id.v);
+        // an edit in another column of the same chunk
+        let (ou, ov) = (
+            (id.u / CHUNK_SIZE) * CHUNK_SIZE + if id.u % CHUNK_SIZE == 0 { 1 } else { 0 },
+            id.v,
+        );
+        let g2 = p.effective_height(id.face, ou, ov);
+        p.remove_block(BlockId {
+            face: id.face,
+            layer: g2,
+            u: ou,
+            v: ov,
+        })
+        .unwrap();
+        assert!(p.column_edited(id.face, id.u, id.v));
+        assert_eq!(p.surface(id.face, id.u, id.v), ground);
+        assert!(p.top(id.face, id.u, id.v) >= id.layer);
+    }
+
+    #[test]
+    fn placing_a_plant_block_back_restores_it() {
+        let (mut p, id, ty) = forest_planet();
+        p.remove_block(id).unwrap();
+        assert_eq!(p.edits.count, 1);
+        p.add_block(id, ty).unwrap();
+        assert_eq!(
+            p.edits.count, 0,
+            "the mined entry is dropped, nothing placed"
+        );
+        assert_eq!(p.block_type(id), Some(ty));
     }
 
     #[test]
