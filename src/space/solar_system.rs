@@ -994,6 +994,41 @@ pub(crate) mod tests {
     use super::*;
 
     // the start system without its generated moons (Task 3 adds them) plus one test moon of planet #3
+    #[test]
+    fn gravity_hits_its_anchors_and_rises_with_the_radius() {
+        assert!((gravity_for_radius(40.0) - 0.15).abs() < 1e-6);
+        assert!((gravity_for_radius(160.0) - 0.6).abs() < 1e-6);
+        assert!((gravity_for_radius(1000.0) - 1.3).abs() < 1e-6);
+        let mut last = 0.0;
+        for r in (20..=1200).step_by(10) {
+            let g = gravity_for_radius(r as f32);
+            assert!(g >= last, "{r}");
+            last = g;
+        }
+        assert!(
+            gravity_for_radius(5.0) >= 0.1 && gravity_for_radius(5000.0) <= 1.3 + 1e-6,
+            "clamped"
+        );
+        // on the planets' range it is the variety base, 0.6 + 0.7 * size
+        for r in [160.0f32, 400.0, 777.0, 1000.0] {
+            let size = (r - MIN_PLANET_RADIUS) / (MAX_PLANET_RADIUS - MIN_PLANET_RADIUS);
+            assert!(
+                (gravity_for_radius(r) - (0.6 + 0.7 * size)).abs() < 1e-5,
+                "{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_baked_moon_carries_its_gravity() {
+        let mut s = with_moon();
+        let m = s.planets.len() - 1;
+        s.planets[m].traits = crate::space::moons::moon_traits(s.planets[m].radius);
+        let data = s.planets[m].bake();
+        assert!((data.traits.gravity - gravity_for_radius(40.0)).abs() < 1e-6);
+        assert!(data.traits.gravity < 0.2);
+    }
+
     pub(crate) fn with_moon() -> SolarSystem {
         let mut s = SolarSystem::generate(1);
         s.planets.retain(|p| !p.is_moon());

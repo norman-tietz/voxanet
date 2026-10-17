@@ -3944,7 +3944,7 @@ impl Renderer {
                 format!("#{} {}", i + 1, def.name),
                 format!("radius {:.0}", p.radius),
                 format!("day {:.0} s", p.day_length()),
-                format!("gravity {:.1} g", p.traits.gravity),
+                format!("gravity {:.2} g", p.traits.gravity),
                 if def.atmosphere.density == 0.0 {
                     "no weather".to_string()
                 } else {

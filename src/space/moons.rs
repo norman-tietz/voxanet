@@ -175,6 +175,11 @@ mod tests {
                 let mut last = 0.0_f64;
                 for (k, m) in moons.iter().enumerate() {
                     let r = m.orbit_radius / p.radius as f64;
+                    assert!(
+                        (0.15..=0.7).contains(&m.traits.gravity),
+                        "{}",
+                        m.traits.gravity
+                    );
                     assert!(r >= MOON_MIN_ORBIT_RADII - 1e-9, "{r}");
                     assert!(
                         r <= MOON_STABLE_FRACTION * hill + 1e-9,
@@ -244,6 +249,7 @@ mod tests {
     fn moon_traits_are_neutral() {
         let t = moon_traits(60.0);
         assert_eq!(PlanetTraits { gravity: 1.0, ..t }, PlanetTraits::NEUTRAL);
+        assert_eq!(moon_traits(60.0).gravity, gravity_for_radius(60.0));
     }
 
     #[test]
