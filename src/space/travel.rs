@@ -5,7 +5,9 @@
 
 use glam::{DQuat, DVec3, Quat, Vec3};
 
-use crate::space::solar_system::{Planet, SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED};
+use crate::space::solar_system::{
+    Planet, SolarSystem, HEAT_ZONE_RADII, SPACE_BOOST_SPEED, SYSTEM_SCALE,
+};
 
 pub const ORBIT_RADII: f64 = 3.5;
 const LUT: usize = 256;
@@ -15,7 +17,7 @@ const START_SHARE: f64 = 0.15; // the first 15 % turns it from where it looked i
 const CHECK_SAMPLES: usize = 256; // samples of the final heat-zone check
 
 pub fn duration(distance: f64) -> f64 {
-    (6.0 + 1.5 * (distance / 1000.0).max(1e-9).log10()).clamp(6.0, 12.0)
+    (6.0 + 1.5 * (distance / (1000.0 * SYSTEM_SCALE)).max(1e-9).log10()).clamp(6.0, 12.0)
 }
 
 // the automatic climb from the surface: faster with altitude (~2-3 s to the liftoff handover)
@@ -265,7 +267,7 @@ mod tests {
     #[test]
     fn trip_ends_at_the_orbit_point_at_arrival() {
         let s = sys();
-        let start = s.planets[0].position_at(0.0) + DVec3::new(0.0, 500.0, 0.0);
+        let start = s.planets[0].position_at(0.0) + DVec3::new(0.0, 500.0 * SYSTEM_SCALE, 0.0);
         let trip = Trip::plan(&s, 3, start, DVec3::Y, DVec3::X, 0.0);
         let t1 = trip.t0 + trip.duration;
         let p = &s.planets[3];
@@ -433,7 +435,9 @@ mod tests {
         let guess = s.planets[target].position_at(9.0);
         // start behind the target along -Z and to its side, heading +X+Z: the heading has to swing
         // across +Z (with a small vertical component) to come round to the planet
-        let start = guess - DVec3::Z * 30000.0 - DVec3::X * 6000.0 + DVec3::Y * 50.0;
+        let start =
+            guess - DVec3::Z * (30000.0 * SYSTEM_SCALE) - DVec3::X * (6000.0 * SYSTEM_SCALE)
+                + DVec3::Y * (50.0 * SYSTEM_SCALE);
         let heading = DVec3::new(1.0, 0.02, 1.0).normalize();
         let trip = Trip::plan(&s, target, start, heading, heading, 0.0);
         let look = Quat::from_rotation_arc(Vec3::NEG_Z, heading.as_vec3());
@@ -458,7 +462,8 @@ mod tests {
     fn arrival_moves_with_the_planet() {
         let s = sys();
         for target in [0, 3, 6] {
-            let start = s.planets[(target + 2) % 7].position_at(0.0) + DVec3::Y * 300.0;
+            let start =
+                s.planets[(target + 2) % 7].position_at(0.0) + DVec3::Y * (300.0 * SYSTEM_SCALE);
             let trip = Trip::plan(&s, target, start, DVec3::Y, DVec3::Y, 0.0);
             let t1 = trip.t0 + trip.duration;
             let p = &s.planets[target];

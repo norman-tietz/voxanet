@@ -43,7 +43,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         name: "Red dwarf",
         surface_color: [1.10, 0.45, 0.23],
         limb_color: [0.83, 0.21, 0.07],
-        radius: 1_800.0,
+        radius: 7_200.0,
         granulation: 0.35,
         granule_scale: 14.0,
         sunspots: 0.12,
@@ -56,7 +56,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         name: "Orange",
         surface_color: [1.10, 0.68, 0.35],
         limb_color: [0.83, 0.33, 0.12],
-        radius: 2_400.0,
+        radius: 9_600.0,
         granulation: 0.3,
         granule_scale: 16.0,
         sunspots: 0.08,
@@ -69,7 +69,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         name: "Yellow",
         surface_color: [1.10, 0.96, 0.69],
         limb_color: [0.83, 0.52, 0.25],
-        radius: 3_000.0,
+        radius: 12_000.0,
         granulation: 0.25,
         granule_scale: 18.0,
         sunspots: 0.05,
@@ -82,7 +82,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         name: "White",
         surface_color: [1.07, 1.07, 1.10],
         limb_color: [0.82, 0.76, 0.67],
-        radius: 3_300.0,
+        radius: 13_200.0,
         granulation: 0.2,
         granule_scale: 20.0,
         sunspots: 0.03,
@@ -95,7 +95,7 @@ const STAR_TYPES: [StarTypeDef; 5] = [
         name: "Blue giant",
         surface_color: [0.72, 0.84, 1.10],
         limb_color: [0.52, 0.59, 0.83],
-        radius: 3_600.0,
+        radius: 14_400.0,
         granulation: 0.15,
         granule_scale: 22.0,
         sunspots: 0.0,
@@ -162,7 +162,16 @@ pub struct SolarSystem {
 }
 
 const PLANET_COUNT: usize = 8;
-const INNER_ORBIT_RADIUS: f64 = 8_000.0;
+/// Every absolute distance, speed and acceleration of the solar system is the original value times this;
+/// every angle, period and share is unchanged (the start system is the old one x4). Reviewed and kept:
+/// map units (`D_MAX`, `STAR_MAP_RADIUS`, `LY_TO_VIEW`); radii-relative constants (`CAPTURE_RADII`/`RELEASE_RADII`,
+/// `CO_ROTATION_*_RADII`, `HEAT_ZONE_RADII`/`HEAT_LIMIT_RADII`, `landing.rs`'s `*_HANDOVER_RADII`,
+/// `MIN_CAPTURED_RADII`, `travel::ORBIT_RADII`, `universe::ARRIVAL_ORBITS`, the LOD multipliers,
+/// `ATMOSPHERE_SHELL_RADII`, the impostors' 60-radii lightning cut-off); block-scale surface constants (fog,
+/// lightning, precipitation, `FLY_*`, glide and landing rates); `travel::climb_speed` (altitude-proportional);
+/// `impostor::storm_base` (from the radius).
+pub const SYSTEM_SCALE: f64 = 4.0;
+const INNER_ORBIT_RADIUS: f64 = 8_000.0 * SYSTEM_SCALE;
 const ORBIT_RADIUS_GROWTH: f64 = 1.5; // each planet this many times farther out than the last
 const INNER_ORBIT_PERIOD_SECS: f64 = 180.0; // at INNER_ORBIT_RADIUS; Kepler beyond (orbit_speed_for)
                                             // seeded orbit variety (orbit_for): each radius x0.95..x1.10 around the spacing (neighbours keep a gap of
@@ -171,14 +180,14 @@ const INNER_ORBIT_PERIOD_SECS: f64 = 180.0; // at INNER_ORBIT_RADIUS; Kepler bey
 const ORBIT_JITTER_MIN: f64 = 0.95;
 const ORBIT_JITTER_MAX: f64 = 1.10;
 const MAX_ORBIT_TILT: f64 = 4.0 * std::f64::consts::PI / 180.0;
-const MIN_PLANET_RADIUS: f32 = 40.0;
-const MAX_PLANET_RADIUS: f32 = 250.0;
+pub(crate) const MIN_PLANET_RADIUS: f32 = 40.0 * SYSTEM_SCALE as f32;
+pub(crate) const MAX_PLANET_RADIUS: f32 = 250.0 * SYSTEM_SCALE as f32;
 // most planets a system can hold (generated + /system add): the space renderer sizes its per-planet
 // uniform buffer for this many
 pub const MAX_PLANETS: usize = 15;
 // /system add accepts radii in this range (bake time grows with the square of the radius)
 pub const MIN_ADDED_RADIUS: f32 = 20.0;
-pub const MAX_ADDED_RADIUS: f32 = 500.0;
+pub const MAX_ADDED_RADIUS: f32 = 1000.0;
 
 impl SolarSystem {
     pub fn generate(seed: u64) -> Self {
@@ -262,7 +271,7 @@ impl SolarSystem {
             return Err("The system is full (15 planets).");
         }
         if !(MIN_ADDED_RADIUS..=MAX_ADDED_RADIUS).contains(&radius) {
-            return Err("Planet radius must be 20-500.");
+            return Err("Planet radius must be 20-1000.");
         }
         let i = self.planets.len();
         let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(self.seed, i);
@@ -497,8 +506,8 @@ pub fn next_flight_frame(
     }
 }
 
-pub const SPACE_CRUISE_SPEED: f32 = 500.0;
-pub const SPACE_BOOST_SPEED: f32 = 2000.0;
+pub const SPACE_CRUISE_SPEED: f32 = 2000.0;
+pub const SPACE_BOOST_SPEED: f32 = 8000.0;
 
 pub struct SpaceFlight {
     pub position: DVec3,
@@ -673,7 +682,7 @@ pub const HEAT_ZONE_RADII: f64 = 2.0;
 pub const HEAT_LIMIT_RADII: f64 = 1.15;
 // outward push at full heat: eased flight pulls toward boost speed at up to ~8000 units/s^2
 // (SPACE_BOOST_SPEED / FLIGHT_EASE_SECONDS), so this always wins near the limit
-const HEAT_PUSH_ACCEL: f64 = 12_000.0;
+const HEAT_PUSH_ACCEL: f64 = 48_000.0;
 
 // heat 0..1 at `distance` from the star's centre (smooth: 0 at the zone's edge, 1 at the limit)
 pub fn star_heat(distance: f64, star_radius: f64) -> f32 {
@@ -793,7 +802,7 @@ mod tests {
     // the new outermost planet leaves #1-#7 as they were: all of a planet's data comes from (seed, index)
     #[test]
     fn the_first_seven_planets_are_unchanged() {
-        // literal values for seed 1, recorded before the Cratered planet was added
+        // literal values for seed 1, recorded before the Cratered planet and the 4x scale; scaled here
         const RADII: [f32; 7] = [
             168.48273, 228.66467, 244.23021, 118.63764, 229.99347, 128.8151, 65.814064,
         ];
@@ -810,9 +819,12 @@ mod tests {
         for i in 0..7 {
             let (r, phase, tilt, node) = orbit_for(1, i);
             let p = &s.planets[i];
-            assert!((p.radius - RADII[i]).abs() < 1e-3, "planet {i} radius");
             assert!(
-                (p.orbit_radius - ORBIT_RADII[i]).abs() < 1e-3,
+                (p.radius - RADII[i] * SYSTEM_SCALE as f32).abs() < 1e-3,
+                "planet {i} radius"
+            );
+            assert!(
+                (p.orbit_radius - ORBIT_RADII[i] * SYSTEM_SCALE).abs() < 1e-3,
                 "planet {i} orbit"
             );
             assert_eq!(p.orbit_radius, r);
@@ -826,11 +838,70 @@ mod tests {
         assert!(s.planets.len() <= MAX_PLANETS);
     }
 
+    // the 4x scale changes no angle: the star's apparent size and every planet's share of its orbit
+    #[test]
+    fn the_scale_keeps_every_angle() {
+        // the seed-1 values before SYSTEM_SCALE (the_first_seven_planets_are_unchanged's literals) and its
+        // Yellow star's old radius
+        const OLD_STAR: f64 = 3_000.0;
+        const RADII: [f32; 7] = [
+            168.48273, 228.66467, 244.23021, 118.63764, 229.99347, 128.8151, 65.814064,
+        ];
+        const ORBIT_RADII: [f64; 7] = [
+            8265.632315539202,
+            12703.207739244883,
+            17481.896074639295,
+            28813.253273767295,
+            43261.14888753833,
+            65883.98870669717,
+            92760.43226435978,
+        ];
+        let s = SolarSystem::generate(1);
+        assert!((s.star.radius - OLD_STAR * SYSTEM_SCALE).abs() < 1e-6);
+        for i in 0..7 {
+            let p = &s.planets[i];
+            let old_angle = (OLD_STAR / ORBIT_RADII[i]).min(1.0).asin() as f32;
+            assert!(
+                (p.star_angular_radius(&s.star) - old_angle).abs() < 1e-6,
+                "{i}"
+            );
+            let share = p.radius as f64 / p.orbit_radius;
+            assert!(
+                (share - RADII[i] as f64 / ORBIT_RADII[i]).abs() < 1e-8,
+                "{i}"
+            );
+        }
+        assert!(MIN_PLANET_RADIUS == 160.0 && MAX_PLANET_RADIUS == 1000.0);
+    }
+
+    #[test]
+    fn speeds_scale_with_the_distances_and_periods_do_not() {
+        let s = SolarSystem::generate(1);
+        // Kepler's reference is unchanged: 180 s at INNER_ORBIT_RADIUS (now 32,000)
+        assert!(
+            (orbit_speed_for(INNER_ORBIT_RADIUS) - std::f64::consts::TAU / INNER_ORBIT_PERIOD_SECS)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(INNER_ORBIT_RADIUS, 8_000.0 * SYSTEM_SCALE);
+        // crossing the gap between the two innermost orbits at cruise speed takes as long as before (500 u/s)
+        let gap = s.planets[1].orbit_radius - s.planets[0].orbit_radius;
+        assert!((gap / SPACE_CRUISE_SPEED as f64 - (gap / SYSTEM_SCALE) / 500.0).abs() < 1e-9);
+        assert_eq!(SPACE_BOOST_SPEED as f64, 2_000.0 * SYSTEM_SCALE);
+        // trips take as long as before
+        assert!(
+            (crate::space::travel::duration(40_000.0 * SYSTEM_SCALE) - (6.0 + 1.5 * 40f64.log10()))
+                .abs()
+                < 1e-9
+        );
+    }
+
     // a bake with stored edits contains them; one without doesn't
     #[test]
     fn bake_with_edits_restores_them() {
         let system = SolarSystem::generate(1);
-        let planet = &system.planets[0];
+        let mut planet = system.planets[0];
+        planet.radius = 40.0; // a small bake keeps the debug test quick (planet #1 is res 1348 at the 4x scale)
         let mut first = planet.bake();
         let (face, u, v) = (0u8, 40u32, 40u32);
         let top = first.terrain.get_height(face, u, v) + 1; // one block on the surface: under the ceiling
@@ -886,7 +957,9 @@ mod tests {
     fn adding_beyond_the_cap_or_out_of_range_fails() {
         let mut g = SolarSystem::generate(1);
         assert!(g.add_planet(PlanetType::Ice, 10.0).is_err());
-        assert!(g.add_planet(PlanetType::Ice, 600.0).is_err());
+        assert!(g
+            .add_planet(PlanetType::Ice, MAX_ADDED_RADIUS + 100.0)
+            .is_err());
         while g.planets.len() < MAX_PLANETS {
             g.add_planet(PlanetType::EarthLike, 50.0).unwrap();
         }
@@ -1304,6 +1377,7 @@ mod tests {
     #[test]
     fn bake_carries_the_traits() {
         let mut p = SolarSystem::generate(1).planets[6];
+        p.radius = 40.0; // keeps the bake quick in a debug test build
         p.traits.gravity = 0.7;
         assert_eq!(p.bake().traits.gravity, 0.7);
     }
@@ -1444,7 +1518,7 @@ mod tests {
         let g = SolarSystem::generate(7);
         for p in &g.planets {
             assert!(
-                (40.0..=250.0).contains(&p.radius),
+                (MIN_PLANET_RADIUS..=MAX_PLANET_RADIUS).contains(&p.radius),
                 "radius {} out of range",
                 p.radius
             );
@@ -1769,7 +1843,7 @@ mod tests {
             );
         }
         assert!(
-            flight.velocity.length() < 50.0,
+            flight.velocity.length() < 50.0 * SYSTEM_SCALE, // speeds scale with the system
             "{}",
             flight.velocity.length()
         );

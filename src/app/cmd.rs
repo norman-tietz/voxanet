@@ -26,7 +26,7 @@ const HELP_LINES: [&str; 13] = [
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <v>|mist <v>]|lightning [on|off|rate <v>]]   /perf <seconds> [label]",
-    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <20-500>   /map [n]   /travel <n>",
+    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <20-1000>   /map [n]   /travel <n>",
     "  /galaxy [n]   /jump <n>",
     "  /screenshot <path>             help",
 ];
@@ -52,7 +52,7 @@ fn parse_system_command(args: &[&str]) -> Result<SystemRequest, &'static str> {
                     planet_type,
                     radius,
                 }),
-                _ => Err("Usage: /system add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <radius 20-500>"),
+                _ => Err("Usage: /system add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <radius 20-1000>"),
             }
         }
         ["goto", n, radii] => {
@@ -696,7 +696,7 @@ mod tests {
         assert!(parse_system_command(&["add", "ice"]).is_err());
         assert!(parse_system_command(&["add", "lava", "100"]).is_err());
         assert!(parse_system_command(&["add", "ice", "10"]).is_err());
-        assert!(parse_system_command(&["add", "ice", "600"]).is_err());
+        assert!(parse_system_command(&["add", "ice", "1100"]).is_err());
         assert!(parse_system_command(&["add", "ice", "nan"]).is_err());
     }
 

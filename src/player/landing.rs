@@ -423,8 +423,8 @@ mod tests {
 
     #[test]
     fn fly_speed_matches_solar_system_cruise_at_the_handover_altitude() {
-        let h = handover_altitude(168.5);
-        assert!((h - 337.0).abs() < 1e-3, "2 radii above sea level: {h}");
+        let h = handover_altitude(168.5 * crate::space::solar_system::SYSTEM_SCALE as f32);
+        assert!((h - 1348.0).abs() < 1e-2, "2 radii above sea level: {h}");
         assert!(
             (fly_speed(5.0, false, h, Some(h)) - crate::space::solar_system::SPACE_CRUISE_SPEED)
                 .abs()
@@ -500,7 +500,12 @@ mod tests {
         let dt = 1.0 / 60.0;
         let (mut axis, mut lowest, mut hardest) = (None, f32::MAX, 0.0f32);
         for _ in 0..(seconds / dt) as u32 {
-            let mut speed = fly_speed(5.0, false, position.length() - 100.0, Some(200.0));
+            let mut speed = fly_speed(
+                5.0,
+                false,
+                position.length() - 100.0,
+                Some(200.0 * crate::space::solar_system::SYSTEM_SCALE as f32), // cruise speed scales, so does the handover
+            );
             if let Some(pull) = glide_assist(v, position, target, camera * Vec3::Y, axis, dt) {
                 v = pull.rotation * v;
                 camera = pull.rotation * camera;
