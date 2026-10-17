@@ -17,7 +17,6 @@ pub const MAX_PLANT_HEIGHT: u32 = 12;
 pub const MAX_PLANT_REACH: u32 = 3;
 
 // canopy radius in rings
-#[allow(dead_code)] // the other shapes are built by the species of Task 6
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Template {
     Blob(u32),
@@ -73,10 +72,171 @@ const EARTH_LIKE: &[Species] = &[
     },
 ];
 
+#[allow(clippy::too_many_arguments)]
+const fn sp(
+    name: &'static str,
+    trunk: BlockType,
+    crown: BlockType,
+    tip: Option<BlockType>,
+    ground: &'static [BlockType],
+    height: (u32, u32),
+    template: Template,
+    density: f32,
+    band: (f32, f32),
+    beach_ok: bool,
+) -> Species {
+    Species {
+        name,
+        trunk,
+        crown,
+        tip,
+        ground,
+        height,
+        template,
+        density,
+        band,
+        beach_ok,
+    }
+}
+
+use BlockType as B;
+const OCEAN: &[Species] = &[sp(
+    "Palm",
+    B::Wood,
+    B::Palm,
+    None,
+    &[B::Sand, B::Dirt, B::Grass, B::Stone],
+    (5, 8),
+    Template::Crown(2),
+    1.0,
+    (0.0, 1.0),
+    true,
+)];
+const DESERT: &[Species] = &[
+    sp(
+        "Cactus",
+        B::Cactus,
+        B::Cactus,
+        None,
+        &[B::Sand],
+        (2, 5),
+        Template::Arms,
+        0.6,
+        (0.0, 0.7),
+        false,
+    ),
+    sp(
+        "Dry shrub",
+        B::DeadWood,
+        B::DeadWood,
+        None,
+        &[B::Sand],
+        (1, 2),
+        Template::Column,
+        0.4,
+        (0.0, 1.0),
+        false,
+    ),
+];
+const ICE: &[Species] = &[
+    sp(
+        "Frozen pine",
+        B::Wood,
+        B::Snow,
+        None,
+        &[B::Stone, B::Snow, B::Ice],
+        (5, 8),
+        Template::Cone(2),
+        0.8,
+        (0.0, 1.0),
+        false,
+    ),
+    sp(
+        "Ice cluster",
+        B::Ice,
+        B::Ice,
+        None,
+        &[B::Stone, B::Snow, B::Ice],
+        (2, 4),
+        Template::Prisms,
+        0.5,
+        (0.0, 1.0),
+        false,
+    ),
+];
+const VOLCANIC: &[Species] = &[
+    sp(
+        "Obsidian spire",
+        B::Obsidian,
+        B::Obsidian,
+        Some(B::Ember),
+        &[B::Basalt, B::Ash, B::Obsidian],
+        (3, 8),
+        Template::Spire,
+        0.5,
+        (0.0, 1.0),
+        false,
+    ),
+    sp(
+        "Charred stump",
+        B::DeadWood,
+        B::DeadWood,
+        None,
+        &[B::Basalt, B::Ash, B::Obsidian],
+        (1, 3),
+        Template::Column,
+        0.5,
+        (0.0, 1.0),
+        false,
+    ),
+];
+const TOXIC: &[Species] = &[sp(
+    "Giant mushroom",
+    B::Stem,
+    B::Cap,
+    None,
+    &[B::Dirt, B::Ash, B::Obsidian, B::Stone],
+    (3, 6),
+    Template::Mushroom(2),
+    0.8,
+    (0.0, 1.0),
+    true,
+)];
+const SHATTERED: &[Species] = &[sp(
+    "Crystal cluster",
+    B::Crystal,
+    B::Crystal,
+    None,
+    &[B::Basalt, B::Ember],
+    (3, 7),
+    Template::Prisms,
+    0.6,
+    (0.0, 1.0),
+    false,
+)];
+const CRATERED: &[Species] = &[sp(
+    "Boulder pile",
+    B::Stone,
+    B::Basalt,
+    None,
+    &[B::MoonDust, B::Basalt, B::Stone],
+    (2, 4),
+    Template::Boulders,
+    0.7,
+    (0.0, 1.0),
+    true,
+)];
+
 pub fn species_for(t: PlanetType) -> &'static [Species] {
     match t {
         PlanetType::EarthLike => EARTH_LIKE,
-        _ => &[],
+        PlanetType::Ocean => OCEAN,
+        PlanetType::Desert => DESERT,
+        PlanetType::Ice => ICE,
+        PlanetType::Volcanic => VOLCANIC,
+        PlanetType::Toxic => TOXIC,
+        PlanetType::Shattered => SHATTERED,
+        PlanetType::Cratered => CRATERED,
     }
 }
 
@@ -238,29 +398,46 @@ pub fn rings(data: &PlanetData, face: u8, u: u32, v: u32, max: u32) -> Vec<Vec<(
     out
 }
 
-// (ring, layer offset above the anchor's ground, type, ragged: may be skipped for an uneven outline)
-fn template_cells(sp: &Species, h: u32) -> Vec<(u32, u32, BlockType, bool)> {
+// which columns of a ring a template cell fills
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Skip {
+    // all of them
+    No,
+    // all but about one in five (an uneven outline)
+    Ragged,
+    // only the columns whose hash (0..6) is below the number: nested counts give columns of different heights
+    Part(u32),
+}
+
+// (ring, layer offset above the anchor's ground, type, which columns); `hash` is the plant's own
+fn template_cells(sp: &Species, h: u32, hash: u32) -> Vec<(u32, u32, BlockType, Skip)> {
+    use Skip::{No, Part, Ragged};
     let mut c = Vec::new();
     match sp.template {
         Template::Blob(r) => {
             for o in 1..h {
-                c.push((0, o, sp.trunk, false));
+                c.push((0, o, sp.trunk, No));
             }
             for ring in 0..=r {
                 for o in [h - 1, h] {
                     if ring > 0 || o == h {
-                        c.push((ring, o, sp.crown, ring == r));
+                        c.push((ring, o, sp.crown, if ring == r { Ragged } else { No }));
                     }
                 }
             }
             for ring in 0..r {
-                c.push((ring, h + 1, sp.crown, ring + 1 == r));
+                c.push((
+                    ring,
+                    h + 1,
+                    sp.crown,
+                    if ring + 1 == r { Ragged } else { No },
+                ));
             }
-            c.push((0, h + 2, sp.crown, false));
+            c.push((0, h + 2, sp.crown, No));
         }
         Template::Cone(r) => {
             for o in 1..=h {
-                c.push((0, o, sp.trunk, false));
+                c.push((0, o, sp.trunk, No));
             }
             let start = (h / 3).max(1);
             let top = h + 1;
@@ -268,12 +445,89 @@ fn template_cells(sp: &Species, h: u32) -> Vec<(u32, u32, BlockType, bool)> {
                 let t = (o - start) as f32 / (top - start).max(1) as f32;
                 let radius = (r as f32 * (1.0 - t)).round() as u32;
                 for ring in 1..=radius {
-                    c.push((ring, o, sp.crown, false));
+                    c.push((ring, o, sp.crown, No));
                 }
             }
-            c.push((0, top, sp.tip.unwrap_or(sp.crown), false));
+            c.push((0, top, sp.tip.unwrap_or(sp.crown), No));
         }
-        _ => {}
+        Template::Crown(r) => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+            for ring in 1..=r {
+                c.push((ring, h + 1, sp.crown, if ring == 1 { Ragged } else { No }));
+            }
+            // drooping fronds
+            if r >= 2 {
+                c.push((r, h, sp.crown, Part(3)));
+            }
+            c.push((0, h + 1, sp.crown, No));
+        }
+        Template::Column => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+        }
+        Template::Arms => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+            if h >= 3 {
+                // one or two arms: a ring-1 column out, then up
+                let o = h / 2;
+                c.push((1, o, sp.trunk, Part(1 + hash % 2)));
+                c.push((1, o + 1, sp.trunk, Part(1 + hash % 2)));
+                c.push((1, o + 2, sp.trunk, Part(1 + hash % 2)));
+            }
+        }
+        Template::Spire => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+            for o in 1..=h / 2 {
+                c.push((1, o, sp.trunk, No));
+            }
+            if let Some(tip) = sp.tip {
+                if hash.is_multiple_of(4) {
+                    c.push((0, h, tip, No));
+                }
+            }
+        }
+        Template::Mushroom(r) => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+            for ring in 0..=r {
+                c.push((ring, h + 1, sp.crown, No));
+            }
+            c.push((r, h, sp.crown, No));
+        }
+        Template::Prisms => {
+            for o in 1..=h {
+                c.push((0, o, sp.trunk, No));
+            }
+            for (cols, lower) in [(3, 3), (2, 2), (1, 1)] {
+                for o in 1..=h.saturating_sub(lower) {
+                    c.push((1, o, sp.trunk, Part(cols)));
+                }
+            }
+        }
+        Template::Boulders => {
+            // mostly one stone, now and then the dark one
+            let ty = if hash.is_multiple_of(3) {
+                sp.crown
+            } else {
+                sp.trunk
+            };
+            for o in 1..=(h / 2 + 1).min(h) {
+                c.push((0, o, ty, No));
+            }
+            c.push((1, 1, ty, Part(3)));
+            c.push((1, 2, ty, Part(1)));
+            if h >= 3 {
+                c.push((2, 1, ty, Part(1)));
+            }
+        }
     }
     c
 }
@@ -286,12 +540,12 @@ pub fn plant_blocks(
 ) -> Vec<(BlockId, BlockType)> {
     let sp = &species_for(cfg.planet_type)[plant.species];
     let base = data.effective_height(plant.face, plant.u, plant.v);
-    let cells = template_cells(sp, plant.height);
+    let cells = template_cells(sp, plant.height, plant.hash);
     let reach = cells.iter().map(|c| c.0).max().unwrap_or(0);
     let rs = rings(data, plant.face, plant.u, plant.v, reach);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for (ring, offset, ty, ragged) in cells {
+    for (ring, offset, ty, skip) in cells {
         let Some(columns) = rs.get(ring as usize) else {
             continue;
         };
@@ -302,7 +556,12 @@ pub fn plant_blocks(
             if layer <= ground || layer > ground + MAX_PLANT_HEIGHT {
                 continue;
             }
-            if ragged && hash(plant.hash, face, u, v, layer).is_multiple_of(5) {
+            let skipped = match skip {
+                Skip::No => false,
+                Skip::Ragged => hash(plant.hash, face, u, v, layer).is_multiple_of(5),
+                Skip::Part(n) => hash(plant.hash, face, u, v, 77) % 6 >= n,
+            };
+            if skipped {
                 continue;
             }
             let id = BlockId { face, layer, u, v };
@@ -319,7 +578,7 @@ fn max_reach(t: PlanetType) -> u32 {
     species_for(t)
         .iter()
         .flat_map(|sp| (sp.height.0..=sp.height.1).map(move |h| (sp, h)))
-        .flat_map(|(sp, h)| template_cells(sp, h).into_iter().map(|c| c.0))
+        .flat_map(|(sp, h)| template_cells(sp, h, 0).into_iter().map(|c| c.0))
         .max()
         .unwrap_or(0)
         .min(MAX_PLANT_REACH)
@@ -770,16 +1029,90 @@ mod tests {
 
     #[test]
     fn every_template_stays_within_the_plant_reach_and_height() {
-        for t in [PlanetType::EarthLike] {
+        for t in PlanetType::ALL {
             for sp in species_for(t) {
                 for h in sp.height.0..=sp.height.1 {
-                    for (ring, offset, _, _) in template_cells(sp, h) {
+                    for (ring, offset, _, _) in template_cells(sp, h, 0)
+                        .into_iter()
+                        .chain(template_cells(sp, h, 1))
+                    {
                         assert!(ring <= MAX_PLANT_REACH, "{} ring {ring}", sp.name);
                         assert!(offset <= MAX_PLANT_HEIGHT, "{} offset {offset}", sp.name);
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_planet_type_has_plants_and_they_generate() {
+        for t in PlanetType::ALL {
+            assert!(!species_for(t).is_empty(), "{t:?} has no species");
+            let p = PlanetData::new_for_type(128, 9, t);
+            let cfg = FloraConfig {
+                planet_type: t,
+                seed: 9,
+                density: 4.0,
+            };
+            let (mut total_blocks, mut anchors) = (0usize, 0usize);
+            let mut kinds = HashSet::new();
+            for face in 0..6u8 {
+                for u in 0..128 {
+                    for v in 0..128 {
+                        if let Some(pl) = anchor_at(&p, &cfg, face, u, v) {
+                            anchors += 1;
+                            kinds.insert(pl.species);
+                            let b = plant_blocks(&p, &pl, &cfg);
+                            assert!(
+                                !b.is_empty(),
+                                "{t:?}/{} produced no blocks",
+                                species_for(t)[pl.species].name
+                            );
+                            assert!(b
+                                .iter()
+                                .all(|(id, _)| id.layer > p.effective_height(id.face, id.u, id.v)));
+                            assert!(b.iter().all(|(id, _)| id.layer
+                                <= p.effective_height(face, pl.u, pl.v) + MAX_PLANT_HEIGHT));
+                            total_blocks += b.len();
+                        }
+                    }
+                }
+            }
+            eprintln!("{t:?}: {anchors} anchors, {total_blocks} blocks, species {kinds:?}");
+            assert!(total_blocks > 50, "{t:?}: {total_blocks} blocks");
+            if species_for(t).len() > 1 && !matches!(t, PlanetType::Ice | PlanetType::Volcanic) {
+                assert!(kinds.len() >= 2, "{t:?}: {kinds:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn species_use_their_own_blocks() {
+        use BlockType::*;
+        let uses = |t: PlanetType, want: BlockType| {
+            let p = PlanetData::new_for_type(128, 9, t);
+            let cfg = FloraConfig {
+                planet_type: t,
+                seed: 9,
+                density: 4.0,
+            };
+            (0..6u8).any(|f| {
+                (0..128u32).any(|u| {
+                    (0..128u32).any(|v| {
+                        anchor_at(&p, &cfg, f, u, v).is_some_and(|pl| {
+                            plant_blocks(&p, &pl, &cfg).iter().any(|(_, b)| *b == want)
+                        })
+                    })
+                })
+            })
+        };
+        assert!(uses(PlanetType::Ocean, Palm));
+        assert!(uses(PlanetType::Desert, Cactus));
+        assert!(uses(PlanetType::Toxic, Cap) && uses(PlanetType::Toxic, Stem));
+        assert!(uses(PlanetType::Shattered, Crystal));
+        assert!(uses(PlanetType::Volcanic, Obsidian));
+        assert!(uses(PlanetType::Ice, Snow) || uses(PlanetType::Ice, Ice));
+        assert!(uses(PlanetType::Cratered, Stone) || uses(PlanetType::Cratered, Basalt));
     }
 
     #[test]

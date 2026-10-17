@@ -23,17 +23,11 @@ pub enum BlockType {
     Wood,
     Leaves,
     Pine,
-    #[allow(dead_code)] // built by the species of Task 6
     Palm,
-    #[allow(dead_code)] // built by the species of Task 6
     Cactus,
-    #[allow(dead_code)] // built by the species of Task 6
     Stem,
-    #[allow(dead_code)] // built by the species of Task 6
     Cap,
-    #[allow(dead_code)] // built by the species of Task 6
     DeadWood,
-    #[allow(dead_code)] // built by the species of Task 6
     Crystal,
 }
 
