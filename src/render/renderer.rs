@@ -3813,12 +3813,27 @@ impl Renderer {
                 }
             }
         };
-        for p in &system.planets {
+        for (i, p) in system.planets.iter().enumerate() {
             let period = std::f64::consts::TAU / p.orbit_speed.abs().max(1e-9);
             let n = crate::space::render::RING_SEGMENTS;
-            let pts: Vec<Vec3> = (0..n)
-                .map(|k| map.position(p.position_at(t + period * k as f64 / n as f64) - star))
-                .collect();
+            let pts: Vec<Vec3> = match p.parent {
+                None => (0..n)
+                    .map(|k| map.position(p.position_at(t + period * k as f64 / n as f64) - star))
+                    .collect(),
+                // a moon's ring: around its parent's mapped position, in the moon's orbital plane
+                Some(parent) => {
+                    let centre = map.position_of(system, parent, t);
+                    let r = map.moon_ring_radius(system, i);
+                    (0..n)
+                        .map(|k| {
+                            let tk = t + period * k as f64 / n as f64;
+                            let d = (p.position_at(tk) - system.planets[parent].position_at(tk))
+                                .normalize_or_zero();
+                            centre + d.as_vec3() * r
+                        })
+                        .collect()
+                }
+            };
             polyline(&pts, [0.55, 0.6, 0.7, 0.35], true, &mut rings);
         }
         debug_assert!(travel_line.len() <= crate::space::render::TRAVEL_LINE_POINTS);
@@ -3842,7 +3857,7 @@ impl Renderer {
                 })
                 .collect()
         };
-        let mapped = |i: usize| map.position(system.planets[i].position_at(t) - star);
+        let mapped = |i: usize| map.position_of(system, i, t);
         let ring_r = |i: usize| map.radius(system.planets[i].radius) * 1.6 + 0.4;
         if let Some(i) = map_view.selected {
             polyline(

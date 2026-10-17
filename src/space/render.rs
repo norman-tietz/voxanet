@@ -282,9 +282,7 @@ impl Layout<'_> {
         let pos = system.planets[i].position_at(t);
         match self {
             Layout::Real => pos - camera.position,
-            Layout::Map { map, eye } => {
-                map.render_offset(map.position(pos - system.star.position()), *eye)
-            }
+            Layout::Map { map, eye } => map.render_offset(map.position_of(system, i, t), *eye),
         }
     }
 

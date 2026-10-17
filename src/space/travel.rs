@@ -165,7 +165,7 @@ impl Trip {
             .unwrap_or(DVec3::Z);
         let mut reach = limit.max(start.distance(star)).max(arrival.distance(star)) * 1.5;
         for _ in 0..16 {
-            if trip.clears(star, (zone * 1.05).min(start.distance(star) * 0.999)) {
+            if trip.clears(|_| star, (zone * 1.05).min(start.distance(star) * 0.999)) {
                 break;
             }
             trip.ctrl[1] = star + side * reach + (start - star) * 0.5;
@@ -173,14 +173,48 @@ impl Trip {
             trip.lut = arc_lut(&trip.ctrl);
             reach *= 1.5;
         }
+        // a moon's parent is an obstacle too: the same swing-out around the parent's sphere
+        if let Some(parent) = p.parent.map(|i| system.planets[i]) {
+            let tm = t0 + dur * 0.5;
+            let pc = parent.position_at(tm);
+            let limit = parent.radius as f64 * HEAT_MARGIN;
+            let mid = (start + arrival) * 0.5 - pc;
+            let chord = (arrival - start).normalize_or(DVec3::X);
+            let side = (mid - chord * mid.dot(chord))
+                .try_normalize()
+                .or_else(|| chord.cross(DVec3::Y).try_normalize())
+                .unwrap_or(DVec3::Z);
+            let star_limit = (zone * 1.05).min(start.distance(star) * 0.999);
+            let ok = |t: &Trip| {
+                t.clears(|x| parent.position_at(x), limit) && t.clears(|_| star, star_limit)
+            };
+            // push both inner control points further out to one side, wider each time (either side,
+            // whichever keeps the star's zone clear too)
+            let base = trip.ctrl;
+            let mut reach = limit * 0.5;
+            'swing: for _ in 0..16 {
+                if ok(&trip) {
+                    break;
+                }
+                for sign in [1.0, -1.0] {
+                    trip.ctrl[1] = base[1] + side * sign * reach;
+                    trip.ctrl[2] = base[2] + side * sign * reach;
+                    trip.lut = arc_lut(&trip.ctrl);
+                    if ok(&trip) {
+                        break 'swing;
+                    }
+                }
+                reach *= 1.5;
+            }
+        }
         trip
     }
 
-    // the flown path stays farther than `limit` from the star
-    fn clears(&self, star: DVec3, limit: f64) -> bool {
+    // the flown path stays farther than `limit` from the obstacle (its position as a function of time)
+    fn clears(&self, obstacle: impl Fn(f64) -> DVec3, limit: f64) -> bool {
         (0..=CHECK_SAMPLES).all(|i| {
             let t = self.t0 + self.duration * i as f64 / CHECK_SAMPLES as f64;
-            self.position(t).distance(star) > limit
+            self.position(t).distance(obstacle(t)) > limit
         })
     }
 
@@ -254,6 +288,27 @@ mod tests {
 
     fn sys() -> SolarSystem {
         SolarSystem::generate(1)
+    }
+
+    // a trip to a moon never passes through its parent, from either side
+    #[test]
+    fn trips_to_a_moon_avoid_the_parent_sphere() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let m = s.planets.len() - 1;
+        let parent = s.planets[2];
+        for side in [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z] {
+            let start = parent.position_at(10.0) + side * 30.0 * parent.radius as f64;
+            let trip = Trip::plan(&s, m, start, -side, -side, 10.0);
+            for k in 0..=200 {
+                let t = trip.t0 + trip.duration * k as f64 / 200.0;
+                let d = (trip.position(t) - parent.position_at(t)).length();
+                assert!(
+                    d >= parent.radius as f64 * 1.1,
+                    "{side:?} {k}: {d} vs {}",
+                    parent.radius
+                );
+            }
+        }
     }
 
     #[test]

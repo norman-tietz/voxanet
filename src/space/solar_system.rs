@@ -316,6 +316,15 @@ impl SolarSystem {
             .unwrap_or(0)
     }
 
+    // the largest orbit radius among the planets (moons orbit their parents, not the star)
+    pub fn outermost_planet_orbit(&self) -> f64 {
+        self.planets
+            .iter()
+            .filter(|p| !p.is_moon())
+            .map(|p| p.orbit_radius)
+            .fold(0.0, f64::max)
+    }
+
     // bodies without a parent
     pub fn planet_count(&self) -> usize {
         self.planets.iter().filter(|p| p.parent.is_none()).count()
@@ -690,6 +699,22 @@ pub enum FlightFrame {
     Captured(usize), // index into SolarSystem::planets
 }
 
+// a moon of body `i` that captures `abs_pos` before `i` does: within CAPTURE_RADII of its own radii and
+// nearer in its own radii than `i` (the nearest such moon); None for a moon `i` or when there is none
+pub fn moon_takes_over(system: &SolarSystem, i: usize, abs_pos: DVec3, t: f64) -> Option<usize> {
+    let parent = &system.planets[i];
+    let own = (abs_pos - parent.position_at(t)).length() / parent.radius as f64;
+    system
+        .moons_of(i)
+        .map(|m| {
+            let p = &system.planets[m];
+            (m, (abs_pos - p.position_at(t)).length() / p.radius as f64)
+        })
+        .filter(|&(_, radii)| radii < CAPTURE_RADII && radii < own)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(m, _)| m)
+}
+
 // the frame flight should be in, given its position `pos` in its current frame (space when
 // Free, the planet frame when Captured)
 pub fn next_flight_frame(
@@ -700,7 +725,10 @@ pub fn next_flight_frame(
 ) -> FlightFrame {
     match frame {
         FlightFrame::Captured(i) => {
-            if pos.length() > RELEASE_RADII * system.planets[i].radius as f64 {
+            let abs = system.planets[i].from_planet_frame(pos, t);
+            if pos.length() > RELEASE_RADII * system.planets[i].radius as f64
+                || moon_takes_over(system, i, abs, t).is_some()
+            {
                 FlightFrame::Free
             } else {
                 frame
@@ -986,6 +1014,76 @@ pub(crate) mod tests {
             parent_orbit: Some(p.own_orbit()),
         });
         s
+    }
+
+    // inside a parent's capture sphere a moon wins once you are closer to it in its own radii; leaving the
+    // moon's sphere hands over to the parent without ping-pong
+    #[test]
+    fn capture_prefers_the_moon_near_it_and_hands_back_to_the_parent() {
+        let s = with_moon();
+        let m = s.planets.len() - 1;
+        let (mp, pp) = (&s.planets[m], &s.planets[2]);
+        let t = 123.0;
+        let moon = mp.position_at(t);
+        let near = moon + DVec3::new(2.0 * mp.radius as f64, 0.0, 0.0);
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Free, near, t),
+            FlightFrame::Captured(m)
+        );
+        let near_local = pp.to_planet_frame(near, t);
+        assert_eq!(moon_takes_over(&s, 2, near, t), Some(m));
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Captured(2), near_local, t),
+            FlightFrame::Free
+        );
+        assert_eq!(moon_takes_over(&s, m, near, t), None, "moons have no moons");
+        // away from the parent's side, 9 moon radii out is inside the moon's sphere but the parent is
+        // nearer in its radii (a moon of 40 at 3 parent radii: the point is ~3 parent radii from it)
+        let far = moon + (moon - pp.position_at(t)).normalize() * 9.0 * mp.radius as f64;
+        assert!(matches!(
+            next_flight_frame(&s, FlightFrame::Free, far, t),
+            FlightFrame::Captured(_)
+        ));
+        let far_local = pp.to_planet_frame(far, t);
+        if moon_takes_over(&s, 2, far, t).is_none() {
+            assert_eq!(
+                next_flight_frame(&s, FlightFrame::Captured(2), far_local, t),
+                FlightFrame::Captured(2)
+            );
+        }
+        let in_moon = DVec3::new(10.9 * mp.radius as f64, 0.0, 0.0);
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Captured(m), in_moon, t),
+            FlightFrame::Captured(m)
+        );
+        let out = DVec3::new(11.1 * mp.radius as f64, 0.0, 0.0);
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Captured(m), out, t),
+            FlightFrame::Free
+        );
+        // from there the parent captures and does not hand straight back to the moon: no ping-pong
+        let abs = mp.from_planet_frame(out, t);
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Free, abs, t),
+            FlightFrame::Captured(2)
+        );
+        let back = pp.to_planet_frame(abs, t);
+        assert_eq!(
+            next_flight_frame(&s, FlightFrame::Captured(2), back, t),
+            FlightFrame::Captured(2)
+        );
+    }
+
+    #[test]
+    fn the_outermost_planet_orbit_ignores_moons() {
+        let s = with_moon();
+        let expect = s
+            .planets
+            .iter()
+            .filter(|p| !p.is_moon())
+            .map(|p| p.orbit_radius)
+            .fold(0.0, f64::max);
+        assert_eq!(s.outermost_planet_orbit(), expect);
     }
 
     #[test]

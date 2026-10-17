@@ -18,6 +18,35 @@ pub fn should_land(distance_radii: f64, voxel_world_ready: bool) -> bool {
     voxel_world_ready && distance_radii < LAND_HANDOVER_RADII
 }
 
+// the landing handover onto body `i` (position `local` in its frame), refused while a moon of `i` is
+// nearer in its own radii: that moon captures first
+pub fn may_land_on(
+    system: &crate::space::solar_system::SolarSystem,
+    i: usize,
+    local: glam::DVec3,
+    t: f64,
+    voxel_world_ready: bool,
+) -> bool {
+    let p = &system.planets[i];
+    should_land(local.length() / p.radius as f64, voxel_world_ready)
+        && crate::space::solar_system::moon_takes_over(system, i, p.from_planet_frame(local, t), t)
+            .is_none()
+}
+
+// the voxel engine hands back to captured flight: high enough, or a moon of the loaded body takes over
+// (a moon at 2.5-3.5 parent radii lies inside the voxel zone)
+pub fn must_lift_off(
+    system: &crate::space::solar_system::SolarSystem,
+    i: usize,
+    local: glam::DVec3,
+    t: f64,
+) -> bool {
+    let p = &system.planets[i];
+    should_lift_off((local.length() / p.radius as f64) as f32)
+        || crate::space::solar_system::moon_takes_over(system, i, p.from_planet_frame(local, t), t)
+            .is_some()
+}
+
 pub fn should_lift_off(distance_radii: f32) -> bool {
     distance_radii > LIFTOFF_HANDOVER_RADII
 }
@@ -379,6 +408,26 @@ pub fn keep_above_planet(pos: glam::DVec3, planet_radius: f64) -> glam::DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a moon inside the parent's landing zone blocks landing on the parent and forces the liftoff
+    #[test]
+    fn a_nearer_moon_blocks_landing_and_forces_liftoff() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let (m, t) = (s.planets.len() - 1, 50.0);
+        let (pp, mp) = (&s.planets[2], &s.planets[s.planets.len() - 1]);
+        let moon_local = pp.to_planet_frame(mp.position_at(t), t);
+        // 2 moon radii from the moon, ~3 parent radii from the parent: inside the landing distance
+        let local = moon_local + moon_local.normalize() * 2.0 * mp.radius as f64;
+        assert!(local.length() / (pp.radius as f64) < LAND_HANDOVER_RADII + 0.5);
+        assert!(!may_land_on(&s, 2, local, t, true));
+        assert!(must_lift_off(&s, 2, local, t));
+        // far from the moon, landing works and no liftoff is forced
+        let away = -moon_local.normalize() * 2.0 * pp.radius as f64;
+        assert!(may_land_on(&s, 2, away, t, true));
+        assert!(!may_land_on(&s, 2, away, t, false));
+        assert!(!must_lift_off(&s, 2, away, t));
+        let _ = m;
+    }
 
     // the handover overlay starts as the impostor alone and fades out smoothly, then stops
     #[test]

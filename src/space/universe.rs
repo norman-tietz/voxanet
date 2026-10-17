@@ -60,11 +60,7 @@ impl Universe {
     // where a jump arrives: at the system's edge on the side facing `from_dir` (the direction toward the
     // previous system, galaxy axes = system axes), looking at the star
     pub fn arrival_pose(system: &SolarSystem, from_dir: DVec3) -> (DVec3, Quat) {
-        let outer = system
-            .planets
-            .iter()
-            .map(|p| p.orbit_radius)
-            .fold(1.0, f64::max);
+        let outer = system.outermost_planet_orbit().max(1.0);
         let dir = from_dir.normalize_or(DVec3::Z);
         let pos = system.star.position() + dir * outer * ARRIVAL_ORBITS;
         let rot = Quat::from_rotation_arc(Vec3::NEG_Z, (-dir).as_vec3());

@@ -798,8 +798,12 @@ impl Game {
                 renderer.update_view(player.position, planet);
 
                 // high enough above the planet: hand back to captured space flight
-                let radius = system.planets[*loaded_world].radius;
-                if crate::player::landing::should_lift_off(player.position.length() / radius) {
+                if crate::player::landing::must_lift_off(
+                    system,
+                    *loaded_world,
+                    player.position.as_dvec3(),
+                    clock.now(),
+                ) {
                     lift_off_from = Some(*loaded_world);
                 }
             }
@@ -1019,10 +1023,11 @@ impl Game {
                             println!("Voxel world for #{} ready", i + 1);
                             *voxel_ready_announced = true;
                         }
-                        let distance_radii =
-                            space_flight.position.length() / system.planets[i].radius as f64;
-                        if crate::player::landing::should_land(
-                            distance_radii,
+                        if crate::player::landing::may_land_on(
+                            system,
+                            i,
+                            space_flight.position,
+                            t,
                             renderer.view_covered(),
                         ) {
                             land_on = Some(i);
