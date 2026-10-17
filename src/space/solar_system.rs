@@ -152,6 +152,31 @@ pub struct Planet {
     // planet_radius_for's hash so radius and terrain shape don't correlate
     pub noise_seed: u32,
     pub traits: crate::planet::traits::PlanetTraits, // per-planet variation (NEUTRAL = the type exactly)
+    // moons: the index of the planet this one orbits (always smaller than its own), its letter (0 = a),
+    // and the parent's orbit around the star, so position_at stays self-contained. None / 0 / None for planets
+    pub parent: Option<usize>,
+    pub moon_index: u8,
+    pub parent_orbit: Option<OrbitParams>,
+}
+
+// a circular orbit: around the star for a planet, around the parent for a moon
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrbitParams {
+    pub radius: f64,
+    pub speed: f64, // radians/s, positive counterclockwise looking down +Y
+    pub phase: f64,
+    pub tilt: f64,
+    pub node: f64,
+}
+
+impl OrbitParams {
+    // on a circle of `radius`, tilted by `tilt` about a horizontal axis (direction `node`) out of XZ
+    pub fn position_at(&self, t: f64) -> DVec3 {
+        let angle = self.phase + self.speed * t;
+        let flat = DVec3::new(self.radius * angle.cos(), 0.0, self.radius * angle.sin());
+        let axis = DVec3::new(self.node.cos(), 0.0, self.node.sin());
+        DQuat::from_axis_angle(axis, self.tilt) * flat
+    }
 }
 
 #[derive(Debug)]
@@ -182,9 +207,12 @@ const ORBIT_JITTER_MAX: f64 = 1.10;
 const MAX_ORBIT_TILT: f64 = 4.0 * std::f64::consts::PI / 180.0;
 pub(crate) const MIN_PLANET_RADIUS: f32 = 40.0 * SYSTEM_SCALE as f32;
 pub(crate) const MAX_PLANET_RADIUS: f32 = 250.0 * SYSTEM_SCALE as f32;
-// most planets a system can hold (generated + /system add): the space renderer sizes its per-planet
-// uniform buffer for this many
-pub const MAX_PLANETS: usize = 15;
+// most bodies (planets + moons) a system can hold: the space renderer sizes its per-body uniform buffer,
+// ring budget and mesh cache for this many
+pub const MAX_PLANETS: usize = 48;
+// most planets (bodies without a parent) a system can hold; /system add refuses beyond it (the 48th planet
+// would sit past f32 depth precision)
+pub const MAX_PLANET_COUNT: usize = 15;
 // /system add accepts radii in this range (bake time grows with the square of the radius)
 pub const MIN_ADDED_RADIUS: f32 = 20.0;
 pub const MAX_ADDED_RADIUS: f32 = 1000.0;
@@ -204,6 +232,9 @@ impl SolarSystem {
                     planet_type: PlanetType::ALL[i % PlanetType::ALL.len()],
                     noise_seed: noise_seed_for(seed, i),
                     traits: crate::planet::traits::PlanetTraits::NEUTRAL,
+                    parent: None,
+                    moon_index: 0,
+                    parent_orbit: None,
                 }
             })
             .collect();
@@ -238,6 +269,9 @@ impl SolarSystem {
                     planet_type,
                     noise_seed: noise_seed_for(seed, i),
                     traits: crate::space::variety::traits_for(seed, i, planet_type, radius),
+                    parent: None,
+                    moon_index: 0,
+                    parent_orbit: None,
                 }
             })
             .collect();
@@ -259,6 +293,17 @@ impl SolarSystem {
             .unwrap_or(0)
     }
 
+    // bodies without a parent
+    pub fn planet_count(&self) -> usize {
+        self.planets.iter().filter(|p| p.parent.is_none()).count()
+    }
+
+    // the moons orbiting planet `parent`
+    #[cfg_attr(not(test), allow(dead_code))] // used from Task 3 on
+    pub fn moons_of(&self, parent: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.planets.len()).filter(move |&i| self.planets[i].parent == Some(parent))
+    }
+
     // debug (/system add): appends a planet of the given type and radius on the next orbit outward,
     // shaped like the generated ones (same orbit progression, phase spread and seeded terrain);
     // returns its index
@@ -268,13 +313,18 @@ impl SolarSystem {
         radius: f32,
     ) -> Result<usize, &'static str> {
         if self.planets.len() >= MAX_PLANETS {
+            return Err("The system is full (48 bodies).");
+        }
+        if self.planet_count() >= MAX_PLANET_COUNT {
             return Err("The system is full (15 planets).");
         }
         if !(MIN_ADDED_RADIUS..=MAX_ADDED_RADIUS).contains(&radius) {
             return Err("Planet radius must be 20-1000.");
         }
         let i = self.planets.len();
-        let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(self.seed, i);
+        // orbit and terrain seed follow the planet's ordinal, not the list index (moons sit in the list)
+        let n = self.planet_count();
+        let (orbit_radius, orbit_phase, orbit_tilt, orbit_node) = orbit_for(self.seed, n);
         self.planets.push(Planet {
             orbit_radius,
             orbit_speed: orbit_speed_for(orbit_radius),
@@ -283,8 +333,11 @@ impl SolarSystem {
             orbit_node,
             radius,
             planet_type,
-            noise_seed: noise_seed_for(self.seed, i),
+            noise_seed: noise_seed_for(self.seed, n),
             traits: crate::planet::traits::PlanetTraits::NEUTRAL,
+            parent: None,
+            moon_index: 0,
+            parent_orbit: None,
         });
         Ok(i)
     }
@@ -349,7 +402,7 @@ fn planet_radius_for(seed: u64, index: usize) -> f32 {
 
 // deterministic pseudo-random seed per (system seed, index), independent of planet_radius_for's
 // hash (different multiplier constant) so a planet's size and its terrain shape don't correlate
-fn noise_seed_for(seed: u64, index: usize) -> u32 {
+pub(crate) fn noise_seed_for(seed: u64, index: usize) -> u32 {
     let mut h = seed
         .wrapping_mul(0xD6E8_FEB8_6659_FD93)
         .wrapping_add(index as u64);
@@ -363,23 +416,80 @@ fn noise_seed_for(seed: u64, index: usize) -> u32 {
     (h & 0xFFFF_FFFF) as u32
 }
 
+// "3" for planet #3, "3b" for its second moon
+#[cfg_attr(not(test), allow(dead_code))] // used from Task 6 on
+pub fn body_label(system: &SolarSystem, i: usize) -> String {
+    let p = &system.planets[i];
+    match p.parent {
+        None => (system.planets[..i]
+            .iter()
+            .filter(|q| q.parent.is_none())
+            .count()
+            + 1)
+        .to_string(),
+        Some(parent) => format!(
+            "{}{}",
+            body_label(system, parent),
+            (b'a' + p.moon_index.min(25)) as char
+        ),
+    }
+}
+
+// the body a label names ("3", "3b", case-insensitive), None if there is no such body
+#[cfg_attr(not(test), allow(dead_code))] // used from Task 6 on
+pub fn parse_body(system: &SolarSystem, s: &str) -> Option<usize> {
+    let s = s.trim().to_ascii_lowercase();
+    let digits = s.trim_end_matches(|c: char| c.is_ascii_lowercase());
+    let letters = &s[digits.len()..];
+    let n: usize = digits.parse().ok().filter(|&n| n >= 1)?;
+    let planet = system
+        .planets
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.parent.is_none())
+        .nth(n - 1)?
+        .0;
+    match letters.len() {
+        0 => Some(planet),
+        1 => {
+            let k = letters.as_bytes()[0] - b'a';
+            system
+                .moons_of(planet)
+                .find(|&m| system.planets[m].moon_index == k)
+        }
+        _ => None,
+    }
+}
+
 impl Planet {
     // the star's angular radius seen from this planet (radians): its apparent size in the planet's sky
     pub fn star_angular_radius(&self, star: &Star) -> f32 {
-        (star.radius / self.orbit_radius).min(1.0).asin() as f32
+        // a moon sees the star from its parent's distance, not from its own tiny orbit
+        let a = self.parent_orbit.map_or(self.orbit_radius, |o| o.radius);
+        (star.radius / a).min(1.0).asin() as f32
     }
 
-    // on a circle of orbit_radius around the star, tilted by orbit_tilt about a horizontal axis
-    // (direction orbit_node) out of the common orbital plane (XZ)
+    pub fn own_orbit(&self) -> OrbitParams {
+        OrbitParams {
+            radius: self.orbit_radius,
+            speed: self.orbit_speed,
+            phase: self.orbit_phase,
+            tilt: self.orbit_tilt,
+            node: self.orbit_node,
+        }
+    }
+
+    pub fn is_moon(&self) -> bool {
+        self.parent.is_some()
+    }
+
+    // around the star for a planet; for a moon the parent's position plus its own orbit around the parent
     pub fn position_at(&self, t: f64) -> DVec3 {
-        let angle = self.orbit_phase + self.orbit_speed * t;
-        let flat = DVec3::new(
-            self.orbit_radius * angle.cos(),
-            0.0,
-            self.orbit_radius * angle.sin(),
-        );
-        let axis = DVec3::new(self.orbit_node.cos(), 0.0, self.orbit_node.sin());
-        DQuat::from_axis_angle(axis, self.orbit_tilt) * flat
+        let own = self.own_orbit().position_at(t);
+        match &self.parent_orbit {
+            Some(o) => o.position_at(t) + own,
+            None => own,
+        }
     }
 
     // The planet frame: origin at the planet centre, turned by the spin angle about +Y, the axis
@@ -392,12 +502,22 @@ impl Planet {
     }
 
     // how fast the planet's frame turns about +Y, rad/s (spin_angle)
+    // A moon is tidally locked: its frame turns once per orbit, so the parent stays put in its sky
+    // (day_length for a moon is derived from this rate, not the other way round)
     pub fn spin_rate(&self) -> f64 {
+        if self.is_moon() {
+            return self.orbit_speed;
+        }
         std::f64::consts::TAU / self.day_length() + self.orbit_speed
     }
 
-    // seconds per solar day: the type's day length scaled by this planet's trait
+    // seconds per solar day: a planet's type day length scaled by its trait; a moon's is the synodic period
+    // of its locked spin against the star (about one orbit: the parent barely moves around the star meanwhile)
     pub fn day_length(&self) -> f64 {
+        if let Some(po) = self.parent_orbit {
+            let rel = (self.orbit_speed - po.speed).abs().max(1e-9);
+            return std::f64::consts::TAU / rel;
+        }
         self.planet_type.def().day_length_secs as f64 * self.traits.day_scale as f64
     }
 
@@ -751,8 +871,119 @@ pub fn format_distance(d: f64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // the start system without its generated moons (Task 3 adds them) plus one test moon of planet #3
+    pub(crate) fn with_moon() -> SolarSystem {
+        let mut s = SolarSystem::generate(1);
+        s.planets.retain(|p| !p.is_moon());
+        let parent = 2;
+        let p = s.planets[parent];
+        s.planets.push(Planet {
+            orbit_radius: 3.0 * p.radius as f64,
+            orbit_speed: std::f64::consts::TAU / 150.0,
+            orbit_phase: 0.7,
+            orbit_tilt: 0.05,
+            orbit_node: 1.1,
+            radius: 40.0,
+            planet_type: PlanetType::Cratered,
+            noise_seed: 99,
+            traits: crate::planet::traits::PlanetTraits::NEUTRAL,
+            parent: Some(parent),
+            moon_index: 0,
+            parent_orbit: Some(p.own_orbit()),
+        });
+        s
+    }
+
+    #[test]
+    fn a_moon_orbits_its_parent_at_its_radius() {
+        let s = with_moon();
+        let (m, p) = (&s.planets[s.planets.len() - 1], &s.planets[2]);
+        for t in [0.0, 17.0, 400.0, 1234.5] {
+            let d = (m.position_at(t) - p.position_at(t)).length();
+            assert!((d - m.orbit_radius).abs() < 1e-6, "{t}: {d}");
+        }
+        assert!(m.is_moon() && !p.is_moon());
+    }
+
+    #[test]
+    fn a_moon_is_tidally_locked_to_its_parent() {
+        let s = with_moon();
+        let m = &s.planets[s.planets.len() - 1];
+        // the parent's direction in the moon's frame is the same at every time (up to the tilt's libration)
+        let dir = |t: f64| {
+            m.to_planet_frame(s.planets[2].position_at(t), t)
+                .normalize()
+        };
+        let d0 = dir(0.0);
+        for t in [10.0, 55.5, 149.0, 600.0] {
+            assert!(dir(t).dot(d0) > 0.99, "{t}: {}", dir(t).dot(d0));
+        }
+        assert!((m.spin_rate() - m.orbit_speed).abs() < 1e-12);
+        // its solar day is about one orbit (the parent barely moves around the star meanwhile)
+        let day = m.day_length();
+        let orbit = std::f64::consts::TAU / m.orbit_speed;
+        // (planet #3 moves round the star at about a quarter of the moon's rate here, so the synodic day is ~35 % longer)
+        let parent_speed = s.planets[2].orbit_speed;
+        assert!((day - std::f64::consts::TAU / (m.orbit_speed - parent_speed)).abs() < 1e-6);
+        assert!((day - orbit).abs() < 0.5 * orbit, "{day} vs {orbit}");
+    }
+
+    #[test]
+    fn a_moon_sees_the_star_at_its_parents_distance() {
+        let s = with_moon();
+        let (m, p) = (&s.planets[s.planets.len() - 1], &s.planets[2]);
+        assert_eq!(
+            m.star_angular_radius(&s.star),
+            p.star_angular_radius(&s.star)
+        );
+    }
+
+    // /system add after moons exist puts the new planet on the next planet orbit, not on 1.5^(list length)
+    #[test]
+    fn add_planet_orbits_by_planet_count() {
+        let mut s = with_moon();
+        let n = s.planet_count();
+        assert_eq!(n, 8);
+        let i = s.add_planet(PlanetType::Desert, 200.0).unwrap();
+        assert_eq!(i, s.planets.len() - 1);
+        let expected = orbit_for(s.seed, n).0;
+        assert!((s.planets[i].orbit_radius - expected).abs() < 1e-6);
+        assert_eq!(
+            s.planets[i].noise_seed,
+            noise_seed_for(s.seed, n),
+            "seeded by the planet ordinal"
+        );
+        assert_eq!(s.planet_count(), 9);
+        assert!(s.planets[i].parent.is_none());
+        assert_eq!(body_label(&s, i), "9");
+        // the planet cap counts planets, not bodies
+        while s.planet_count() < MAX_PLANET_COUNT {
+            s.add_planet(PlanetType::Ice, 100.0).unwrap();
+        }
+        assert!(s.add_planet(PlanetType::Ice, 100.0).is_err());
+    }
+
+    #[test]
+    fn labels_number_planets_and_letter_moons() {
+        let s = with_moon();
+        let m = s.planets.len() - 1;
+        assert_eq!(body_label(&s, 0), "1");
+        assert_eq!(body_label(&s, 2), "3");
+        assert_eq!(body_label(&s, m), "3a");
+        assert_eq!(parse_body(&s, "3"), Some(2));
+        assert_eq!(parse_body(&s, "3a"), Some(m));
+        assert_eq!(parse_body(&s, "3A"), Some(m));
+        assert_eq!(parse_body(&s, "3b"), None, "only one moon");
+        assert_eq!(parse_body(&s, "9"), None);
+        assert_eq!(parse_body(&s, "0"), None);
+        assert_eq!(parse_body(&s, "a"), None);
+        assert_eq!(parse_body(&s, ""), None);
+        // a moon moves with its parent: the parent's lookups are unchanged
+        assert_eq!(s.moons_of(2).collect::<Vec<_>>(), vec![m]);
+    }
 
     #[test]
     fn generate_varied_is_deterministic() {
@@ -780,9 +1011,10 @@ mod tests {
             s.planets[3].traits,
             crate::planet::traits::PlanetTraits::NEUTRAL
         );
-        while s.planets.len() < MAX_PLANETS {
+        while s.planet_count() < MAX_PLANET_COUNT {
             s.add_planet(PlanetType::Ice, 100.0).unwrap();
         }
+        assert_eq!(s.planet_count(), MAX_PLANET_COUNT);
         assert!(s.add_planet(PlanetType::Ice, 100.0).is_err());
     }
 
@@ -960,14 +1192,14 @@ mod tests {
         assert!(g
             .add_planet(PlanetType::Ice, MAX_ADDED_RADIUS + 100.0)
             .is_err());
-        while g.planets.len() < MAX_PLANETS {
+        while g.planet_count() < MAX_PLANET_COUNT {
             g.add_planet(PlanetType::EarthLike, 50.0).unwrap();
         }
         assert!(
             g.add_planet(PlanetType::EarthLike, 50.0).is_err(),
-            "full at MAX_PLANETS"
+            "full at MAX_PLANET_COUNT"
         );
-        assert_eq!(g.planets.len(), MAX_PLANETS);
+        assert_eq!(g.planet_count(), MAX_PLANET_COUNT);
     }
 
     // captured over a planet's equator (local up = +X here), levelled, looking along the horizon:

@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn map_fits_fifteen_planets_without_overlap() {
         let mut s = SolarSystem::generate(1);
-        while s.planets.len() < 15 {
+        while s.planet_count() < crate::space::solar_system::MAX_PLANET_COUNT {
             s.add_planet(crate::planet::biome::PlanetType::Ice, 400.0)
                 .unwrap();
         }

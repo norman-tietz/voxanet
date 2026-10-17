@@ -1862,12 +1862,12 @@ mod tests {
     #[test]
     fn a_full_solar_system_seen_from_its_outermost_planet_has_ordered_depths() {
         let mut system = SolarSystem::generate(1);
-        while system.planets.len() < MAX_PLANETS {
+        while system.planet_count() < crate::space::solar_system::MAX_PLANET_COUNT {
             system
                 .add_planet(crate::planet::biome::PlanetType::Ice, 100.0)
                 .unwrap();
         }
-        let outer = system.planets[MAX_PLANETS - 1];
+        let outer = *system.planets.iter().rev().find(|p| !p.is_moon()).unwrap();
         let t = 0.0;
         let camera = outer.position_at(t) + glam::DVec3::new(0.0, 3.0 * outer.radius as f64, 0.0);
         let mut bodies: Vec<(glam::DVec3, f32)> =
