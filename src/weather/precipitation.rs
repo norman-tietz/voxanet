@@ -179,15 +179,15 @@ impl RoofGrid {
         Some((x as usize, y as usize))
     }
 
-    // each cell: the radius of its column's highest surface, the top block (edits included) or the
-    // water, whichever is higher; 0 where no column is found
+    // each cell: the radius of its column's highest surface, the top block (edits and plants included,
+    // so canopies are roofs) or the water, whichever is higher; 0 where no column is found
     pub fn build(planet: &PlanetData, cam: Vec3) -> RoofGrid {
         let res = planet.resolution;
         let f = frame_at(cam);
         let top = |p: Vec3| -> f32 {
             planet.cell_at(p).map_or(0.0, |id| {
                 let block = crate::meshing::gen::CoordSystem::get_layer_radius(
-                    planet.surface(id.face, id.u, id.v) + 1,
+                    planet.top(id.face, id.u, id.v) + 1,
                     res,
                 );
                 block.max(planet.water_surface_radius(id.face, id.u, id.v))
@@ -195,7 +195,14 @@ impl RoofGrid {
         };
         // the plane sits on the ground under the camera, so every cell centre is inside the planet's
         // layers (cell_at needs a position, its radius picks the layer only)
-        let r0 = top(f.up * res as f32 * 0.5).max(res as f32 * 0.25);
+        let ground_r = planet.cell_at(f.up * res as f32 * 0.5).map_or(0.0, |id| {
+            crate::meshing::gen::CoordSystem::get_layer_radius(
+                planet.surface(id.face, id.u, id.v) + 1,
+                res,
+            )
+            .max(planet.water_surface_radius(id.face, id.u, id.v))
+        });
+        let r0 = ground_r.max(res as f32 * 0.25);
         let mut g = RoofGrid {
             origin: f.up * r0,
             east: f.east,
@@ -495,6 +502,26 @@ mod tests {
         s.apply(WeatherCommand::Off, WeatherKind::Rain, Vec3::X, 10.0);
         let f = s.force_uniform();
         assert_eq!(pr.update(0.016, cam, &p, &s, &f, 10.0).instances, 0);
+    }
+
+    // a canopy is a roof: with plants the grid is never lower than without, and higher somewhere
+    #[test]
+    fn the_roof_grid_includes_plants() {
+        let bare = PlanetData::new_for_type(96, 5, PlanetType::EarthLike);
+        let forest = bare.clone().with_flora(true, 3.0);
+        let mut higher = 0;
+        for k in 0..60 {
+            let a = k as f32 * 2.399_963;
+            let y = 1.0 - 2.0 * (k as f32 + 0.5) / 60.0;
+            let r = (1.0 - y * y).sqrt();
+            let cam = ground(&bare, Vec3::new(r * a.cos(), y, r * a.sin()));
+            let (g, flat) = (RoofGrid::build(&forest, cam), RoofGrid::build(&bare, cam));
+            for (a, b) in g.radii.iter().zip(&flat.radii) {
+                assert!(a >= b);
+                higher += (a > b) as usize;
+            }
+        }
+        assert!(higher > 0, "some cells are under a canopy");
     }
 
     #[test]

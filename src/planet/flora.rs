@@ -33,7 +33,6 @@ pub enum Template {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Species {
-    #[allow(dead_code)] // read by /plants (Task 5)
     pub name: &'static str,
     pub trunk: BlockType,
     pub crown: BlockType,
@@ -126,6 +125,23 @@ pub fn forest_mask(cfg: &FloraConfig, dir: Vec3) -> f32 {
 }
 const MASK_LO: f32 = -0.1;
 const MASK_HI: f32 = 0.1;
+
+// the share (0..=1) of the LOD colour that leans toward the first species' crown: the forest mask times
+// that species' density; 0 without flora, over water or where the type has no species
+pub fn forest_tint(data: &PlanetData, face: u8, u: u32, v: u32) -> f32 {
+    let Some(f) = data.flora.as_ref() else {
+        return 0.0;
+    };
+    let Some(sp) = species_for(f.cfg.planet_type).first() else {
+        return 0.0;
+    };
+    let h = data.effective_height(face, u, v);
+    if h <= data.terrain.sea_level() || data.terrain.water_level(face, u, v) >= h {
+        return 0.0;
+    }
+    let dir = CoordSystem::get_block_center(face, u, v, h, data.resolution).normalize();
+    (sp.density * f.cfg.density * forest_mask(&f.cfg, dir)).clamp(0.0, 1.0)
+}
 
 // the anchor planted in column (face, u, v), if any
 pub fn anchor_at(data: &PlanetData, cfg: &FloraConfig, face: u8, u: u32, v: u32) -> Option<Plant> {
@@ -373,12 +389,10 @@ impl Flora {
         map.entry(key).or_insert(made).clone()
     }
 
-    #[allow(dead_code)] // used by the renderer (Task 5)
     pub fn evict(&self, key: ChunkKey) {
         self.cache.write().unwrap().remove(&key);
     }
 
-    #[allow(dead_code)] // used when the cell shape changes (Task 5)
     pub fn clear(&self) {
         self.cache.write().unwrap().clear();
     }

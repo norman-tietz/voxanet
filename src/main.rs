@@ -60,13 +60,12 @@ fn parse_seed(args: &[String]) -> u64 {
 
 // the world-space distance from the planet center to just above the ground along `dir`, using the
 // liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
+// the radius `margin` above the column's highest solid block, plants included
 fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
     let res = planet.resolution;
     if let Some(id) = planet.cell_at(dir * (res as f32 / 2.0)) {
-        crate::meshing::gen::CoordSystem::get_layer_radius(
-            planet.effective_height(id.face, id.u, id.v),
-            res,
-        ) + margin
+        crate::meshing::gen::CoordSystem::get_layer_radius(planet.top(id.face, id.u, id.v), res)
+            + margin
     } else {
         (res as f32 / 2.0) + 20.0
     }
@@ -210,7 +209,9 @@ fn install_world(
 ) {
     *planet = baked.data;
     // the terrain style's cells (/style hex) carry over to every planet installed
-    planet.cells = crate::meshing::lowpoly::cells_for(crate::meshing::lowpoly::style());
+    planet.set_cells(crate::meshing::lowpoly::cells_for(
+        crate::meshing::lowpoly::style(),
+    ));
     controller.selected_block =
         crate::planet::material::placeable(&planet.planet_type.def().palette)[0];
     renderer.force_reload_all(planet, stream_from);
@@ -1552,6 +1553,39 @@ impl Game {
         if let Some(msg) = renderer.take_perf_message() {
             console.log(&msg, [0.0, 1.0, 0.0]); // also printed to the terminal
         }
+        if let Some(cmd) = console.plants_request.take() {
+            use crate::app::cmd::PlantsCommand;
+            // the loaded planet's plants only mean something while its voxel world is what you see
+            if *mode == GameMode::Space {
+                console.log("Land on a planet to change its plants.", [1.0, 0.5, 0.0]);
+            } else {
+                let (on, density) = planet
+                    .flora
+                    .as_ref()
+                    .map_or((false, 1.0), |f| (true, f.cfg.density));
+                let next = match cmd {
+                    PlantsCommand::Show => None,
+                    PlantsCommand::On => Some((true, if on { density } else { 1.0 })),
+                    PlantsCommand::Off => Some((false, density)),
+                    PlantsCommand::Density(d) => Some((d > 0.0, d)),
+                };
+                if let Some((on, density)) = next {
+                    // a fresh flora (and cache) replaces the old one; the meshes are rebuilt
+                    planet.set_flora(on, density);
+                    renderer.force_reload_all(planet, player.position);
+                }
+                let species = crate::planet::flora::species_for(planet.planet_type)
+                    .iter()
+                    .map(|s| s.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let msg = match planet.flora.as_ref() {
+                    Some(f) => format!("Plants: on, density {} ({species})", f.cfg.density),
+                    None => "Plants: off".to_string(),
+                };
+                console.log(&msg, [0.0, 1.0, 0.0]);
+            }
+        }
         if let Some(cmd) = console.weather_request.take() {
             use crate::weather::WeatherCommand;
             // in space flight the player's position and the loaded planet's type are stale: only the
@@ -1623,7 +1657,7 @@ impl Game {
         }
         if let Some(style) = console.style_request.take() {
             crate::meshing::lowpoly::set_style(style);
-            planet.cells = crate::meshing::lowpoly::cells_for(style);
+            planet.set_cells(crate::meshing::lowpoly::cells_for(style));
             renderer.force_reload_all(planet, player.position);
             console.log(&format!("Terrain style: {style:?}"), [0.0, 1.0, 0.0]);
         }
@@ -2180,6 +2214,27 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a spawn stands clear of the plants: the cell at the spawn radius is open air
+    #[test]
+    fn spawn_radius_clears_the_plants() {
+        let p = PlanetData::new_for_type(96, 5, crate::planet::biome::PlanetType::EarthLike)
+            .with_flora(true, 3.0);
+        let mut over_plants = 0;
+        for k in 0..400 {
+            let a = k as f32 * 2.399_963;
+            let y = 1.0 - 2.0 * (k as f32 + 0.5) / 400.0;
+            let r = (1.0 - y * y).sqrt();
+            let dir = glam::Vec3::new(r * a.cos(), y, r * a.sin());
+            let radius = spawn_radius(&p, dir, 1.5);
+            let id = p.cell_at(dir * radius).expect("inside the world");
+            assert!(!p.exists(id), "spawned inside block {id:?}");
+            let id = p.cell_at(dir * (96.0 * 0.5)).unwrap();
+            over_plants +=
+                (p.top(id.face, id.u, id.v) > p.effective_height(id.face, id.u, id.v)) as usize;
+        }
+        assert!(over_plants > 0, "some spawn columns carry plants");
+    }
 
     // Review Focus 5: the autopilot owns the flight frame while it runs, so the planets it passes can't
     // capture it mid-trip (next_flight_frame runs only in the manual arm, which asserts it's chosen)

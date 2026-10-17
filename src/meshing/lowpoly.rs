@@ -166,21 +166,26 @@ pub fn build_chunk_lowpoly(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Ve
     }
     let mut inds: Vec<u32> = (0..verts.len() as u32).collect();
 
-    // placed blocks: cubes, faces culled only against other placed blocks
+    // placed blocks and the natural plants: cubes, faces culled only against other such blocks
+    let mut idx = verts.len() as u32;
+    let mut cubes: Vec<BlockId> = Vec::new();
     if let Some(mods) = data.edits.chunks.get(&key) {
-        let mut idx = verts.len() as u32;
-        for &id in mods.placed.keys() {
-            crate::meshing::gen::MeshGen::add_voxel_with(
-                id,
-                data,
-                &mut verts,
-                &mut inds,
-                &mut idx,
-                &|b| field.placed(b),
-                true,
-                crate::meshing::gen::vertex_ao(),
-            );
-        }
+        cubes.extend(mods.placed.keys().copied());
+    }
+    if let Some(decor) = data.decor_chunk(key) {
+        cubes.extend(decor.blocks.keys().copied().filter(|&id| field.placed(id)));
+    }
+    for id in cubes {
+        crate::meshing::gen::MeshGen::add_voxel_with(
+            id,
+            data,
+            &mut verts,
+            &mut inds,
+            &mut idx,
+            &|b| field.placed(b),
+            true,
+            crate::meshing::gen::vertex_ao(),
+        );
     }
     (verts, inds)
 }
@@ -200,7 +205,11 @@ impl<'a> Field<'a> {
     }
 
     fn placed(&self, id: BlockId) -> bool {
-        self.mods(id).is_some_and(|m| m.placed.contains_key(&id))
+        match self.mods(id) {
+            Some(m) if m.placed.contains_key(&id) => true,
+            Some(m) if m.mined.contains(&id) => false,
+            _ => self.data.decor_block(id).is_some(),
+        }
     }
 
     // a cell carved out of the drawn terrain: mined, or natural air above a mined column top. Over a dip

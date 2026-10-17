@@ -272,8 +272,21 @@ impl PlanetData {
         }
     }
 
+    // the cell shape; the plants' hex rings depend on it, so the decor cache starts over
+    pub fn set_cells(&mut self, cells: CellShape) {
+        self.cells = cells;
+        if let Some(f) = self.flora.as_ref() {
+            f.clear();
+        }
+    }
+
     // plants on or off; a fresh cache for this planet's type and seed
     pub fn with_flora(mut self, on: bool, density: f32) -> Self {
+        self.set_flora(on, density);
+        self
+    }
+
+    pub fn set_flora(&mut self, on: bool, density: f32) {
         self.flora = on.then(|| {
             Arc::new(crate::planet::flora::Flora::new(
                 crate::planet::flora::FloraConfig {
@@ -283,7 +296,6 @@ impl PlanetData {
                 },
             ))
         });
-        self
     }
 
     // the natural plant block at this cell, if any: only above the ground and within the plant height
@@ -300,13 +312,11 @@ impl PlanetData {
             .copied()
     }
 
-    #[allow(dead_code)] // used by the meshers (Task 5)
     pub fn decor_chunk(&self, key: ChunkKey) -> Option<Arc<crate::planet::flora::ChunkDecor>> {
         Some(self.flora.as_ref()?.chunk(self, key))
     }
 
     // the column's highest solid layer including plants (after edits); never below `surface`
-    #[allow(dead_code)] // used by rain and spawn (Task 5)
     pub fn top(&self, face: u8, u: u32, v: u32) -> u32 {
         let s = self.surface(face, u, v);
         let Some(f) = self.flora.as_ref() else {
@@ -911,6 +921,23 @@ pub(crate) mod tests {
         // mining the placed block mines the plant block under it too
         q.remove_block(id2).unwrap();
         assert!(!q.exists(id2));
+    }
+
+    // the canopy rings follow the cell shape, so switching it empties the decor cache
+    #[test]
+    fn changing_the_cells_clears_the_decor_cache() {
+        let mut p = PlanetData::new_for_type(64, 3, PlanetType::EarthLike).with_flora(true, 1.0);
+        let key = ChunkKey {
+            face: 0,
+            u_idx: 0,
+            v_idx: 0,
+        };
+        let square = p.decor_chunk(key).unwrap().blocks.len();
+        assert!(p.flora.as_ref().unwrap().len() > 0);
+        p.set_cells(CellShape::Hex);
+        assert_eq!(p.flora.as_ref().unwrap().len(), 0);
+        let hex = p.decor_chunk(key).unwrap().blocks.len();
+        assert_ne!(square, hex, "6 rings differ from 4");
     }
 
     #[test]

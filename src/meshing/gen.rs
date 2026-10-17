@@ -659,6 +659,11 @@ impl MeshGen {
             }
         }
 
+        // the chunk's natural plants (mined ones fail the exists check below)
+        if let Some(decor) = data.decor_chunk(key) {
+            candidates.extend(decor.blocks.keys().copied());
+        }
+
         // current Chunk Modifications
         if let Some(mods) = data.edits.chunks.get(&key) {
             for &id in mods.placed.keys() {
@@ -785,6 +790,9 @@ impl MeshGen {
                     });
                 }
             }
+        }
+        if let Some(decor) = data.decor_chunk(key) {
+            candidates.extend(decor.blocks.keys().copied());
         }
         for k in keys {
             let Some(mods) = data.edits.chunks.get(&k) else {
@@ -1397,6 +1405,7 @@ impl MeshGen {
             def.liquid.is_none() && h == sea && data.terrain.get_height(key.face, su, sv) < sea;
         // below the column's water level: a lake's or the sea's (Ice: always sea level)
         let water = data.terrain.water_level(key.face, su, sv);
+        let is_land = !(h < water || filled_basin);
         let color = if h < water || filled_basin {
             match def.liquid {
                 // a glowing liquid (lava) is opaque; its glow isn't modelled here
@@ -1447,6 +1456,22 @@ impl MeshGen {
                 })
                 .unwrap_or(surface);
             lod_land_color(surface, below, slope)
+        };
+        // groves show from afar: the land mixes toward the species' crown colour
+        let tint = if is_land {
+            crate::planet::flora::forest_tint(data, key.face, su, sv)
+        } else {
+            0.0
+        };
+        let color = match (tint > 0.0, data.flora.as_ref()) {
+            (true, Some(f)) => {
+                let crown = crate::planet::flora::species_for(f.cfg.planet_type)[0]
+                    .crown
+                    .color();
+                let t = 0.5 * tint;
+                [0, 1, 2].map(|i| color[i] + (crown[i] - color[i]) * t)
+            }
+            _ => color,
         };
         (pos, normal, color)
     }
@@ -2873,6 +2898,73 @@ mod hex_mesh_tests {
             planet.cells = CellShape::Hex;
             assert_closed(&planet);
         }
+    }
+
+    // plants are chunk geometry: a forest planet meshes closed (also across chunk borders and cube-face
+    // seams), has more vertices than the bare one, and some of them carry the leaves' colour
+    #[test]
+    fn a_forest_planet_meshes_closed_and_has_leaf_colours() {
+        let mut bare = PlanetData::new_for_type(64, 3, crate::planet::biome::PlanetType::EarthLike);
+        bare.cells = CellShape::Hex;
+        let mut forest = bare.clone().with_flora(true, 3.0);
+        forest.cells = CellShape::Hex;
+        let count = |p: &PlanetData| -> (usize, usize) {
+            let crowns = [BlockType::Leaves.color(), BlockType::Pine.color()];
+            let (mut all, mut leaves) = (0, 0);
+            for key in all_keys(p) {
+                let (verts, _) = MeshGen::build_chunk_hex_with(key, p, false);
+                all += verts.len();
+                leaves += verts
+                    .iter()
+                    .filter(|v| {
+                        // a crown's hue at some brightness (faces are shaded by a factor)
+                        crowns.iter().any(|c| {
+                            let k = v.color[1] / c[1];
+                            (0.1..=1.1).contains(&k)
+                                && (0..3).all(|i| (v.color[i] - c[i] * k).abs() < 0.01)
+                        })
+                    })
+                    .count();
+            }
+            (all, leaves)
+        };
+        let (bare_all, bare_leaves) = count(&bare);
+        let (all, leaves) = count(&forest);
+        assert!(
+            all > bare_all + 1000,
+            "plants add geometry: {bare_all} -> {all}"
+        );
+        assert!(leaves > bare_leaves + 100, "leaf colours: {leaves}");
+        assert_closed(&forest);
+        // the cube style as well: every plant block is a candidate there too
+        let cubes: usize = all_keys(&forest)
+            .into_iter()
+            .map(|k| MeshGen::build_chunk_cubes_with(k, &forest, false).0.len())
+            .sum();
+        let bare_cubes: usize = all_keys(&bare)
+            .into_iter()
+            .map(|k| MeshGen::build_chunk_cubes_with(k, &bare, false).0.len())
+            .sum();
+        assert!(cubes > bare_cubes + 1000, "{bare_cubes} -> {cubes}");
+    }
+
+    #[test]
+    fn lod_forest_tint_is_zero_without_flora_and_bounded_with_it() {
+        use crate::planet::flora::forest_tint;
+        let bare = PlanetData::new_for_type(64, 3, crate::planet::biome::PlanetType::EarthLike);
+        let forest = bare.clone().with_flora(true, 1.0);
+        let mut tinted = 0;
+        for face in 0..6u8 {
+            for u in (0..64).step_by(3) {
+                for v in (0..64).step_by(3) {
+                    assert_eq!(forest_tint(&bare, face, u, v), 0.0);
+                    let t = forest_tint(&forest, face, u, v);
+                    assert!((0.0..=1.0).contains(&t));
+                    tinted += (t > 0.0) as usize;
+                }
+            }
+        }
+        assert!(tinted > 50, "some columns lean toward the crown: {tinted}");
     }
 
     #[test]

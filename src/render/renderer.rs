@@ -1654,6 +1654,28 @@ impl Renderer {
             }
         }
 
+        // the plants of the player's chunk and its neighbours are generated here, on the main thread, before
+        // physics asks `exists` about them (cache hits afterwards)
+        if let (true, Some(player_id)) = (planet.flora.is_some(), player_id) {
+            let n = res.div_ceil(CHUNK_SIZE) as i64;
+            let (cu, cv) = (
+                (player_id.u / CHUNK_SIZE) as i64,
+                (player_id.v / CHUNK_SIZE) as i64,
+            );
+            for du in -1..=1i64 {
+                for dv in -1..=1i64 {
+                    let (u, v) = (cu + du, cv + dv);
+                    if (0..n).contains(&u) && (0..n).contains(&v) {
+                        planet.decor_chunk(ChunkKey {
+                            face: player_id.face,
+                            u_idx: u as u32,
+                            v_idx: v as u32,
+                        });
+                    }
+                }
+            }
+        }
+
         // a mesh that is no longer required (voxel chunk or LOD node) stays until every required mesh
         // overlapping its area has loaded, so splits, merges and voxel <-> LOD hand-overs never leave a hole
         let missing: Vec<(u8, u32, u32, u32)> = required_voxels
@@ -1733,6 +1755,9 @@ impl Renderer {
                     CHUNK_SIZE,
                 )
             {
+                if let Some(flora) = planet.flora.as_ref() {
+                    flora.evict(k);
+                }
                 if let Some(mesh) = self.chunks.remove(&k) {
                     if self.near_ao(mesh.center, mesh.radius) {
                         self.ao_geometry_epoch += 1;
