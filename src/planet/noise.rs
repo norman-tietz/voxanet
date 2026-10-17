@@ -838,7 +838,7 @@ impl NoiseGenerator {
     }
 
     // fractal Brownian motion, roughly -1..1
-    fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
+    pub(crate) fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
         let (mut sum, mut amp, mut norm, mut freq) = (0.0, 1.0, 0.0, 1.0);
         for _ in 0..octaves {
             sum += self.perlin(p * freq) * amp;

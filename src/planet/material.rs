@@ -19,24 +19,21 @@ pub enum BlockType {
     Ember,
     Ice,
     MoonDust,
-    // plants: placed by the flora generator (Task 2 on); until then only tests build them
-    #[allow(dead_code)]
+    // plants: placed by the flora generator (src/planet/flora.rs)
     Wood,
-    #[allow(dead_code)]
     Leaves,
-    #[allow(dead_code)]
     Pine,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     Palm,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     Cactus,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     Stem,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     Cap,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     DeadWood,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // built by the species of Task 6
     Crystal,
 }
 

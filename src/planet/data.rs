@@ -713,7 +713,7 @@ impl PlanetData {
     }
 
     // the terrain's own block at this position, ignoring edits
-    fn natural_type(&self, id: BlockId) -> Option<BlockType> {
+    pub(crate) fn natural_type(&self, id: BlockId) -> Option<BlockType> {
         let height = self.terrain.get_height(id.face, id.u, id.v);
         let def = self.planet_type.def();
         let effective_height = if def.liquid.is_none() {
