@@ -88,7 +88,12 @@ impl MapLayout {
                 (n + 1, mm.max(self.radius(system.planets[j].radius)))
             });
         let inner = 1.15 * marker + mm;
-        let outer = (0.45 * self.orbit_gap() - mm).max(inner + 2.2 * mm * (n + 1) as f32);
+        // never beyond 0.45 of an orbit gap (the biggest parent with many moons accepts overlapping moon
+        // markers rather than rings crossing the neighbouring orbit)
+        let cap = 0.45 * self.orbit_gap() - mm;
+        let outer = (cap.max(inner + 2.2 * mm * (n + 1) as f32))
+            .min(cap)
+            .max(inner);
         inner + (outer - inner) * (m.moon_index + 1) as f32 / (n + 1) as f32
     }
 
@@ -628,6 +633,32 @@ mod tests {
             reach(6),
             reach(7)
         );
+    }
+
+    #[test]
+    fn rings_of_the_biggest_parent_stay_inside_half_an_orbit_gap() {
+        use crate::space::solar_system::{tests::with_moon, Planet};
+        let mut s = with_moon();
+        let template = s.planets.pop().unwrap();
+        s.planets[2].radius = 250.0;
+        for k in 0..6 {
+            s.planets.push(Planet {
+                parent: Some(2),
+                moon_index: k,
+                radius: 40.0,
+                parent_orbit: Some(s.planets[2].own_orbit()),
+                ..template
+            });
+        }
+        let map = MapLayout::new(&s);
+        for j in s.moons_of(2) {
+            let reach = map.moon_ring_radius(&s, j) + map.radius(s.planets[j].radius);
+            assert!(
+                reach <= 0.45 * map.orbit_gap() + 1e-4,
+                "{reach} vs {}",
+                map.orbit_gap()
+            );
+        }
     }
 
     #[test]
