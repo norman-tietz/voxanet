@@ -38,6 +38,7 @@ const LIGHTNING_DOME_GAIN: f32 = 0.25;     // the dome's brightening at full sce
 // exp² air fog density, tuned for the scale defined in gen.rs
 const FOG_DENSITY: f32 = 0.0015;
 // storm and mist fog (weather/fog.rs mirrors these)
+const ECLIPSE_SKY_DIM_MIN: f32 = 0.25;  // sky and fill light at a total eclipse (mirrors space/eclipse.rs)
 const FOG_STORM_LO: f32 = 0.25;        // storm value where the haze starts
 const FOG_STRUCTURE: f32 = 0.6;        // the storm density swings by this share around its mean
 const FOG_STRUCT_SCALE: f32 = 0.02;    // structure noise cells per unit

@@ -1,3 +1,4 @@
+pub mod eclipse;
 pub mod galaxy;
 pub mod icosphere;
 pub mod impostor;
