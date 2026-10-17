@@ -60,7 +60,8 @@ pub struct HwRt {
     ao_flip: usize, // acc[ao_flip] is this frame's output, the other one the previous frame's
     tlas: wgpu::Tlas,
     capacity: u32,
-    used: usize, // TLAS instance slots filled last frame
+    used: usize,        // TLAS instance slots filled last frame
+    built: Option<u64>, // the mesh-set generation the TLAS was last built for
 }
 
 impl HwRt {
@@ -213,6 +214,7 @@ impl HwRt {
             tlas: Self::make_tlas(device, capacity),
             capacity,
             used: 0,
+            built: None,
         }
     }
 
@@ -276,13 +278,20 @@ impl HwRt {
         blas
     }
 
-    // rebuild the TLAS over these chunk BLASes; call before the compute pass in the same encoder
+    // rebuild the TLAS over these chunk BLASes; call before the compute pass in the same encoder.
+    // `generation` names the set of meshes: the instances are identity transforms of fixed BLASes, so
+    // while it is unchanged the TLAS built for it is still exact and the rebuild is skipped
     pub fn update<'a>(
         &mut self,
         device: &wgpu::Device,
         enc: &mut wgpu::CommandEncoder,
+        generation: u64,
         blases: impl Iterator<Item = &'a wgpu::Blas>,
     ) {
+        if self.built == Some(generation) {
+            return;
+        }
+        self.built = Some(generation);
         let blases: Vec<&wgpu::Blas> = blases.collect();
         if blases.len() as u32 > self.capacity {
             self.capacity = (blases.len() as u32).next_power_of_two();

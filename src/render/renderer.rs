@@ -212,6 +212,8 @@ pub struct Renderer {
 
     chunks: HashMap<ChunkKey, ChunkMesh>,
     lod_chunks: HashMap<LodKey, ChunkMesh>,
+    // bumped whenever a mesh enters or leaves `chunks`/`lod_chunks`: the TLAS is rebuilt only then
+    mesh_generation: u64,
 
     // --- UNIFORMS ---
     global_buf: wgpu::Buffer,
@@ -1199,6 +1201,7 @@ impl Renderer {
             pipeline_line,
             chunks: HashMap::new(),
             lod_chunks: HashMap::new(),
+            mesh_generation: 0,
             global_buf,
             global_bind,
             biome_buf,
@@ -1788,6 +1791,7 @@ impl Renderer {
                 continue;
             }
             if let Some(mesh) = self.lod_chunks.remove(&k) {
+                self.mesh_generation += 1;
                 if self.near_ao(mesh.center, mesh.radius) {
                     self.ao_geometry_epoch += 1;
                 }
@@ -1828,6 +1832,7 @@ impl Renderer {
                     flora.evict(k);
                 }
                 if let Some(mesh) = self.chunks.remove(&k) {
+                    self.mesh_generation += 1;
                     if self.near_ao(mesh.center, mesh.radius) {
                         self.ao_geometry_epoch += 1;
                     }
@@ -2100,6 +2105,7 @@ impl Renderer {
         if self.near_ao(real_center, real_radius) {
             self.ao_geometry_epoch += 1;
         }
+        self.mesh_generation += 1;
         self.lod_chunks.insert(
             key,
             ChunkMesh {
@@ -2185,6 +2191,7 @@ impl Renderer {
         self.edit_epoch += 1; // the progressive AO starts over (ao.rs)
         self.chunks.clear();
         self.lod_chunks.clear();
+        self.mesh_generation += 1;
         self.load_queue.clear();
         self.pending_chunks.clear();
         self.pending_lods.clear();
@@ -2383,6 +2390,7 @@ impl Renderer {
         if self.near_ao(real_center, real_radius) {
             self.ao_geometry_epoch += 1;
         }
+        self.mesh_generation += 1;
         self.chunks.insert(
             key,
             ChunkMesh {
@@ -3056,7 +3064,7 @@ impl Renderer {
                     .values()
                     .chain(self.lod_chunks.values())
                     .filter_map(|m| m.blas.as_ref());
-                hw.update(&self.device, &mut enc, blases);
+                hw.update(&self.device, &mut enc, self.mesh_generation, blases);
             }
         }
         // --- PASS 1: GEOMETRY (DEFERRED G-BUFFER, FULL RESOLUTION) ---
