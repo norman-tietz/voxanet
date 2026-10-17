@@ -343,13 +343,31 @@ pub fn project(camera: &SpaceCamera, offset: Vec3, screen: (f32, f32)) -> Option
     ))
 }
 
-pub struct SpaceRenderer {
-    pub fog_scale: f32, // the storm fog setting (0 = off), Renderer sets it every frame
-    pub fog_wind: Vec3, // the storm fog's scrolled offset
+// the voxel engine's look and weather that the impostors share; Renderer sets it every frame
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImpostorLook {
+    pub plastic: [f32; 4], // the voxel terrain's plastic look (plastic.rs impostor_uniform)
+    pub light: [f32; 4],   // the voxel terrain's fill-light tuning (light.rs)
+    pub fog_scale: f32,    // the storm fog setting (0 = off)
     pub weather_force: crate::weather::WeatherForce, // the forced weather, for the lightning schedule
-    pub lightning: LightningSettings, // lightning on/rate (off with the weather), Renderer sets it every frame
-    pub plastic: [f32; 4], // the voxel terrain's plastic look for the impostors (Renderer sets it every frame)
-    pub light: [f32; 4],   // the voxel terrain's fill-light tuning, likewise (light.rs)
+    pub lightning: LightningSettings,                // lightning on/rate (off with the weather)
+}
+
+impl Default for ImpostorLook {
+    fn default() -> Self {
+        Self {
+            plastic: crate::render::plastic::PlasticSettings::default().impostor_uniform(),
+            light: crate::render::light::LightSettings::default().uniform(),
+            fog_scale: 1.0,
+            weather_force: crate::weather::WeatherSettings::default().force_uniform(),
+            lightning: LightningSettings::default(),
+        }
+    }
+}
+
+pub struct SpaceRenderer {
+    pub look: ImpostorLook, // the voxel terrain's look and weather for the impostors
+    pub fog_wind: Vec3,     // the storm fog's scrolled offset
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     star_buf: wgpu::Buffer,
@@ -986,12 +1004,8 @@ impl SpaceRenderer {
         });
 
         Self {
-            plastic: crate::render::plastic::PlasticSettings::default().impostor_uniform(),
-            fog_scale: 1.0,
+            look: ImpostorLook::default(),
             fog_wind: Vec3::ZERO,
-            weather_force: crate::weather::WeatherSettings::default().force_uniform(),
-            lightning: LightningSettings::default(),
-            light: crate::render::light::LightSettings::default().uniform(),
             camera_buf,
             camera_bind,
             star_buf,
@@ -1085,11 +1099,7 @@ impl SpaceRenderer {
                 i,
                 camera_relative,
                 t,
-                self.plastic,
-                self.light,
-                self.fog_scale,
-                &self.weather_force,
-                &self.lightning,
+                &self.look,
                 matches!(layout, Layout::Real),
             ));
         }
@@ -1237,13 +1247,16 @@ impl SpaceRenderer {
         i: usize,
         camera_relative: Vec3, // the planet's offset from the camera (Layout::planet_offset)
         t: f64,
-        plastic: [f32; 4],
-        light: [f32; 4],
-        fog_scale: f32,
-        force: &crate::weather::WeatherForce,
-        lightning: &LightningSettings,
+        look: &ImpostorLook,
         with_lightning: bool, // false in the map layout, whose camera offsets are in map units
     ) -> PlanetUniform {
+        let ImpostorLook {
+            plastic,
+            light,
+            fog_scale,
+            weather_force: ref force,
+            ref lightning,
+        } = *look;
         let p = &system.planets[i];
         let body_pos = p.position_at(t);
         let light_dir = (-body_pos).normalize_or_zero().as_vec3();
@@ -1354,11 +1367,7 @@ impl SpaceRenderer {
                     .planet_offset(system, index, camera, t)
                     .as_vec3(),
                 t,
-                self.plastic,
-                self.light,
-                self.fog_scale,
-                &self.weather_force,
-                &self.lightning,
+                &self.look,
                 true,
             )]),
         );
@@ -1629,6 +1638,21 @@ mod tests {
         // + plastic, + atmosphere, + fog_tint, + flash, + strikes
     }
 
+    // the impostors' look with no plastic or fill-light tuning, and this fog, weather and lightning
+    fn test_look(
+        fog_scale: f32,
+        weather_force: crate::weather::WeatherForce,
+        lightning: LightningSettings,
+    ) -> ImpostorLook {
+        ImpostorLook {
+            plastic: [0.0; 4],
+            light: [0.0; 4],
+            fog_scale,
+            weather_force,
+            lightning,
+        }
+    }
+
     fn quiet_force() -> crate::weather::WeatherForce {
         crate::weather::WeatherSettings::default().force_uniform()
     }
@@ -1661,12 +1685,16 @@ mod tests {
         let mut t = 2000.0;
         while t < 2600.0 {
             let cam = Vec3::new(0.0, 0.0, -2000.0);
-            let u = SpaceRenderer::planet_uniform(
-                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &on, true,
-            );
+            let u =
+                SpaceRenderer::planet_uniform(&system, i, cam, t, &test_look(1.0, force, on), true);
             seen |= u.strikes.iter().any(|s| s[3] > 0.0);
             let n = SpaceRenderer::planet_uniform(
-                &system, i, cam, t, [0.0; 4], [0.0; 4], 1.0, &force, &off, true,
+                &system,
+                i,
+                cam,
+                t,
+                &test_look(1.0, force, off),
+                true,
             );
             assert!(n.strikes.iter().all(|s| s[3] == 0.0));
             t += 0.25;
@@ -1687,11 +1715,7 @@ mod tests {
                 i,
                 Vec3::ZERO,
                 0.0,
-                [0.0; 4],
-                [0.0; 4],
-                1.0,
-                &quiet_force(),
-                &LightningSettings::default(),
+                &test_look(1.0, quiet_force(), LightningSettings::default()),
                 true,
             );
             assert_eq!(u.atmosphere[0], p.planet_type.def().atmosphere.density);
@@ -1707,11 +1731,7 @@ mod tests {
             0,
             Vec3::Z * 500.0,
             0.0,
-            [0.0; 4],
-            [0.0; 4],
-            1.0,
-            &quiet_force(),
-            &LightningSettings::default(),
+            &test_look(1.0, quiet_force(), LightningSettings::default()),
             true,
         );
         let tinted = system.planets[0].planet_type.def().atmosphere.tinted(0.2);
@@ -1728,11 +1748,7 @@ mod tests {
             0,
             Vec3::ZERO,
             0.0,
-            [0.0; 4],
-            [0.0; 4],
-            1.0,
-            &quiet_force(),
-            &LightningSettings::default(),
+            &test_look(1.0, quiet_force(), LightningSettings::default()),
             true,
         );
         let off = SpaceRenderer::planet_uniform(
@@ -1740,11 +1756,7 @@ mod tests {
             0,
             Vec3::ZERO,
             0.0,
-            [0.0; 4],
-            [0.0; 4],
-            0.0,
-            &quiet_force(),
-            &LightningSettings::default(),
+            &test_look(0.0, quiet_force(), LightningSettings::default()),
             true,
         );
         let kind = crate::weather::WeatherKind::for_planet(system.planets[0].planet_type);

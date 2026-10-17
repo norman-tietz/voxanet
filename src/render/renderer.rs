@@ -2559,15 +2559,7 @@ impl Renderer {
         sun_dir: Vec3, // toward the sun, in the planet frame; computed by the game (home vs planet)
         backdrop: &crate::space::render::Backdrop, // the solar system behind the voxel world, drawn first
     ) {
-        // the impostors share the voxel terrain's plastic look (plastic.rs)
-        self.system.plastic = self.plastic.impostor_uniform();
-        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
-            self.weather.fog.density
-        } else {
-            0.0
-        };
-        self.system.fog_wind = self.fog_wind;
-        self.system.light = self.light.uniform();
+        self.sync_impostor_look();
         self.update_console_mesh(console.height_fraction);
 
         if controller.show_collisions {
@@ -3547,6 +3539,19 @@ impl Renderer {
         self.text_atlas.trim();
     }
 
+    // the impostors share the voxel terrain's plastic look (plastic.rs), its fill light and its storm fog;
+    // the weather force and lightning follow in update_sky_maps
+    fn sync_impostor_look(&mut self) {
+        self.system.look.plastic = self.plastic.impostor_uniform();
+        self.system.look.fog_scale = if self.weather.on && self.weather.fog.on {
+            self.weather.fog.density
+        } else {
+            0.0
+        };
+        self.system.fog_wind = self.fog_wind;
+        self.system.look.light = self.light.uniform();
+    }
+
     // the weather map and the cloud map for this frame, in both modes (`t`: the clock; the maps wrap it
     // hourly like the shaders). The weather first: the cloud bake adds its storm term (weather.rs)
     fn update_sky_maps(&mut self, t: f64) {
@@ -3558,8 +3563,8 @@ impl Renderer {
         self.cloud_map.set_force(self.weather_force);
         self.cloud_map.update(&self.device, &self.queue, t);
         // the impostors' lightning schedule follows this frame's force, not last frame's
-        self.system.weather_force = self.weather_force;
-        self.system.lightning = crate::weather::lightning::LightningSettings {
+        self.system.look.weather_force = self.weather_force;
+        self.system.look.lightning = crate::weather::lightning::LightningSettings {
             on: self.weather.on && self.weather.lightning.on,
             ..self.weather.lightning
         };
@@ -3650,15 +3655,7 @@ impl Renderer {
         console: &Console,
     ) {
         self.perf_tick("system");
-        // the impostors share the voxel terrain's plastic look (plastic.rs)
-        self.system.plastic = self.plastic.impostor_uniform();
-        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
-            self.weather.fog.density
-        } else {
-            0.0
-        };
-        self.system.fog_wind = self.fog_wind;
-        self.system.light = self.light.uniform();
+        self.sync_impostor_look();
         self.update_sky_maps(t);
         self.env_reset = true; // the first planet frame after Space mode bakes the map whole
         self.precip.reset(); // the landing starts the particles over
@@ -3762,14 +3759,7 @@ impl Renderer {
         use crate::space::map::{MapLayout, MAP_FOV_Y};
         use crate::space::render::{project, Layout, RingVertex, SpaceCamera};
         self.perf_tick("map");
-        self.system.plastic = self.plastic.impostor_uniform();
-        self.system.fog_scale = if self.weather.on && self.weather.fog.on {
-            self.weather.fog.density
-        } else {
-            0.0
-        };
-        self.system.fog_wind = self.fog_wind;
-        self.system.light = self.light.uniform();
+        self.sync_impostor_look();
         self.update_sky_maps(t);
         let out = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(o)
