@@ -127,21 +127,31 @@ fn age_since(t: f32, start: f32) -> f32 {
     }
 }
 
+// the planet a strike schedule runs on
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrikePlanet {
+    pub kind: WeatherKind, // how often its storms strike (kind_rate)
+    pub radius: f32,       // the surface sphere the strikes lie on
+    pub seed: u32,         // varies the sites per planet
+}
+
 // The strikes alive at clock `t` (wrapped at 3600) seen from `cam` (planet frame): every cell of a cube-face
 // grid over the planet's surface (n x n per face, cells about CELL_SIZE wide), a strike per cell and slot
 // jittered inside the cell, within `range` of the camera (`f32::MAX`: the whole planet), strongest first, at
-// most MAX_STRIKES. `rate` is the /weather lightning setting, `planet_seed` varies the sites per planet.
-#[allow(clippy::too_many_arguments)]
+// most MAX_STRIKES. `rate` is the /weather lightning setting.
 pub fn active_strikes(
-    kind: WeatherKind,
+    planet: StrikePlanet,
     rate: f32,
-    planet_radius: f32,
-    planet_seed: u32,
     cam: Vec3,
     range: f32,
     t: f32,
     force: &WeatherForce,
 ) -> Vec<Strike> {
+    let StrikePlanet {
+        kind,
+        radius: planet_radius,
+        seed: planet_seed,
+    } = planet;
     let per_slot = RATE_FULL * kind_rate(kind) * rate;
     if per_slot <= 0.0 || planet_radius <= 0.0 {
         return vec![];
@@ -236,11 +246,9 @@ pub fn gpu_strikes(strikes: &[Strike]) -> [[f32; 4]; MAX_STRIKES] {
 
 // the strikes to draw this frame in the voxel frame: none with lightning or the weather off
 pub fn frame_strikes(
-    kind: WeatherKind,
+    planet: StrikePlanet,
     settings: &LightningSettings,
     weather_on: bool,
-    planet_radius: f32,
-    planet_seed: u32,
     cam: Vec3,
     t: f32,
     force: &WeatherForce,
@@ -248,16 +256,7 @@ pub fn frame_strikes(
     if !settings.on || !weather_on {
         return vec![];
     }
-    active_strikes(
-        kind,
-        settings.rate,
-        planet_radius,
-        planet_seed,
-        cam,
-        RANGE,
-        t,
-        force,
-    )
+    active_strikes(planet, settings.rate, cam, RANGE, t, force)
 }
 
 // one bolt segment for lightning.wgsl: a (xyz, width), b (xyz, brightness)
@@ -466,6 +465,15 @@ mod tests {
         WeatherKind::for_planet(t)
     }
 
+    // the test planet of radius R with that weather
+    fn on_r(kind: WeatherKind) -> StrikePlanet {
+        StrikePlanet {
+            kind,
+            radius: R,
+            seed: SEED,
+        }
+    }
+
     // a force that makes the region within about 60 degrees of +Y one storm of value 1 (natural storms go on elsewhere)
     fn full_storm() -> WeatherForce {
         let mut s = WeatherSettings::default();
@@ -496,16 +504,7 @@ mod tests {
         let mut t = 0.0;
         while t < 3600.0 {
             // sample mid-life of the slot's strikes: ask for all cells at several ages
-            for s in active_strikes(
-                kind,
-                1.0,
-                R,
-                SEED,
-                Vec3::new(0.0, R, 0.0),
-                f32::MAX,
-                t,
-                force,
-            ) {
+            for s in active_strikes(on_r(kind), 1.0, Vec3::new(0.0, R, 0.0), f32::MAX, t, force) {
                 all.push((t, s));
             }
             t += 0.25;
@@ -544,8 +543,8 @@ mod tests {
     fn the_schedule_is_deterministic() {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
-        let a = active_strikes(k, 1.0, R, SEED, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
-        let b = active_strikes(k, 1.0, R, SEED, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
+        let a = active_strikes(on_r(k), 1.0, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
+        let b = active_strikes(on_r(k), 1.0, Vec3::new(0.0, R, 0.0), f32::MAX, 123.4, &f);
         assert_eq!(a, b);
     }
 
@@ -571,9 +570,7 @@ mod tests {
         // only at the neighbourhood of the camera there, and after the force has faded in
         let mut t = 10.0;
         while t < 600.0 {
-            assert!(
-                active_strikes(k, 1.0, R, SEED, Vec3::Y * R, 100.0, t, &clear_sky()).is_empty()
-            );
+            assert!(active_strikes(on_r(k), 1.0, Vec3::Y * R, 100.0, t, &clear_sky()).is_empty());
             t += 0.5;
         }
     }
@@ -607,7 +604,7 @@ mod tests {
             let mut n = 0;
             let mut t = 0.0;
             while t < 1200.0 {
-                n += active_strikes(k, rate, R, SEED, Vec3::Y * R, f32::MAX, t, &f).len();
+                n += active_strikes(on_r(k), rate, Vec3::Y * R, f32::MAX, t, &f).len();
                 t += 0.25;
             }
             n
@@ -633,7 +630,7 @@ mod tests {
         let k = kind(PlanetType::EarthLike);
         let mut t = 0.0;
         while t < 300.0 {
-            let v = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t, &f);
+            let v = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, t, &f);
             assert!(v.len() <= MAX_STRIKES);
             let score = |s: &Strike| s.intensity;
             for w in v.windows(2) {
@@ -650,7 +647,7 @@ mod tests {
         let cam = Vec3::new(0.0, R, 0.0);
         let mut t = 0.0;
         while t < 300.0 {
-            for s in active_strikes(k, 3.0, R, SEED, cam, 800.0, t, &f) {
+            for s in active_strikes(on_r(k), 3.0, cam, 800.0, t, &f) {
                 assert!(s.pos.distance(cam) <= 800.0, "{}", s.pos.distance(cam));
             }
             t += 0.25;
@@ -662,8 +659,8 @@ mod tests {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
         // t = 3599.9 and 3599.9 - 3600 are the same moment: the same strikes (up to f32 rounding)
-        let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3599.9, &f);
-        let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3599.9 - WRAP, &f);
+        let a = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, 3599.9, &f);
+        let b = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, 3599.9 - WRAP, &f);
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(&b) {
             assert!(x.seed == y.seed && x.pos == y.pos && (x.age - y.age).abs() < 1e-2);
@@ -674,8 +671,8 @@ mod tests {
         let mut pairs = 0;
         for i in 0..200 {
             let t0 = 10.0 + i as f32 * 1.5;
-            let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t0, &f);
-            let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, t0 + 0.1, &f);
+            let a = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, t0, &f);
+            let b = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, t0 + 0.1, &f);
             for x in &a {
                 if let Some(y) = b.iter().find(|y| y.seed == x.seed) {
                     pairs += 1;
@@ -689,8 +686,8 @@ mod tests {
             }
         }
         assert!(pairs > 0);
-        let a = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 3600.1, &f);
-        let b = active_strikes(k, 3.0, R, SEED, Vec3::Y * R, f32::MAX, 0.1, &f);
+        let a = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, 3600.1, &f);
+        let b = active_strikes(on_r(k), 3.0, Vec3::Y * R, f32::MAX, 0.1, &f);
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(&b) {
             assert!(x.seed == y.seed && x.pos == y.pos && (x.age - y.age).abs() < 1e-2);
@@ -778,7 +775,18 @@ mod tests {
             let mut seen = std::collections::HashSet::new();
             let mut t = 0.0;
             while t < 120.0 {
-                for s in active_strikes(k, 1.0, r, SEED, Vec3::Y * r, f32::MAX, t, &f) {
+                for s in active_strikes(
+                    StrikePlanet {
+                        kind: k,
+                        radius: r,
+                        seed: SEED,
+                    },
+                    1.0,
+                    Vec3::Y * r,
+                    f32::MAX,
+                    t,
+                    &f,
+                ) {
                     seen.insert(key(s.pos));
                 }
                 t += 0.25;
@@ -795,7 +803,18 @@ mod tests {
             let mut v = std::collections::HashSet::new();
             let mut t = 0.0;
             while t < 120.0 {
-                for s in active_strikes(k, 1.0, R, seed, Vec3::Y * R, f32::MAX, t, &f) {
+                for s in active_strikes(
+                    StrikePlanet {
+                        kind: k,
+                        radius: R,
+                        seed,
+                    },
+                    1.0,
+                    Vec3::Y * R,
+                    f32::MAX,
+                    t,
+                    &f,
+                ) {
                     v.insert(key(s.pos));
                 }
                 t += 0.25;
@@ -815,7 +834,19 @@ mod tests {
         let mut near = false;
         let mut t = 0.0;
         while t < 60.0 {
-            near |= !active_strikes(k, 1.0, 168.0, SEED, cam, 300.0, t, &f).is_empty();
+            near |= !active_strikes(
+                StrikePlanet {
+                    kind: k,
+                    radius: 168.0,
+                    seed: SEED,
+                },
+                1.0,
+                cam,
+                300.0,
+                t,
+                &f,
+            )
+            .is_empty();
             t += 0.25;
         }
         assert!(near);
@@ -830,7 +861,18 @@ mod tests {
             let mut v = std::collections::HashSet::new();
             let mut t = slot as f32 * SLOT_SECS;
             while t < (slot + 1) as f32 * SLOT_SECS {
-                for s in active_strikes(k, 3.0, 40.0, SEED, Vec3::Y * 40.0, f32::MAX, t, &f) {
+                for s in active_strikes(
+                    StrikePlanet {
+                        kind: k,
+                        radius: 40.0,
+                        seed: SEED,
+                    },
+                    3.0,
+                    Vec3::Y * 40.0,
+                    f32::MAX,
+                    t,
+                    &f,
+                ) {
                     v.insert(key(s.pos));
                 }
                 t += 0.05;
@@ -864,11 +906,11 @@ mod tests {
         let f = full_storm();
         let k = kind(PlanetType::EarthLike);
         for cam in [Vec3::ZERO, Vec3::Y * R] {
-            for s in active_strikes(k, 3.0, R, SEED, cam, f32::MAX, 10.0, &f) {
+            for s in active_strikes(on_r(k), 3.0, cam, f32::MAX, 10.0, &f) {
                 assert!(s.pos.is_finite() && s.intensity.is_finite());
             }
             assert!(flash_at(
-                &active_strikes(k, 3.0, R, SEED, cam, f32::MAX, 10.0, &f),
+                &active_strikes(on_r(k), 3.0, cam, f32::MAX, 10.0, &f),
                 cam,
                 R
             )
@@ -885,10 +927,10 @@ mod tests {
         let mut found = false;
         let mut t = 0.0;
         while t < 120.0 {
-            found |= !frame_strikes(k, &on, true, R, SEED, Vec3::Y * R, t, &f).is_empty();
-            assert!(frame_strikes(k, &off, true, R, SEED, Vec3::Y * R, t, &f).is_empty());
+            found |= !frame_strikes(on_r(k), &on, true, Vec3::Y * R, t, &f).is_empty();
+            assert!(frame_strikes(on_r(k), &off, true, Vec3::Y * R, t, &f).is_empty());
             assert!(
-                frame_strikes(k, &on, false, R, SEED, Vec3::Y * R, t, &f).is_empty(),
+                frame_strikes(on_r(k), &on, false, Vec3::Y * R, t, &f).is_empty(),
                 "weather off"
             );
             t += 0.25;

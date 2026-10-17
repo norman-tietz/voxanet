@@ -1258,10 +1258,12 @@ impl SpaceRenderer {
         let strikes = if lightning.on && with_lightning && camera_relative.length() < 60.0 * radius
         {
             crate::weather::lightning::active_strikes(
-                crate::weather::WeatherKind::for_planet(p.planet_type),
+                crate::weather::lightning::StrikePlanet {
+                    kind: crate::weather::WeatherKind::for_planet(p.planet_type),
+                    radius,
+                    seed: p.noise_seed,
+                },
                 lightning.rate,
-                radius,
-                p.noise_seed,
                 cam_in_planet,
                 f32::MAX,
                 (t % 3600.0) as f32,

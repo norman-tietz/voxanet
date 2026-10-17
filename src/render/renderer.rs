@@ -2708,11 +2708,13 @@ impl Renderer {
 
         // lightning (weather/lightning.rs): the strikes near the camera, the scene flash they cause
         self.strikes = crate::weather::lightning::frame_strikes(
-            kind,
+            crate::weather::lightning::StrikePlanet {
+                kind,
+                radius: planet.resolution as f32 * 0.5,
+                seed: planet.seed,
+            },
             &self.weather.lightning,
             self.weather.on,
-            planet.resolution as f32 * 0.5,
-            planet.seed,
             cam_pos,
             time,
             &self.weather_force,
