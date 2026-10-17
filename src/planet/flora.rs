@@ -147,7 +147,7 @@ const ICE: &[Species] = &[
         &[B::Stone, B::Snow, B::Ice],
         (5, 8),
         Template::Cone(2),
-        0.8,
+        0.4,
         (0.0, 1.0),
         false,
     ),
@@ -159,7 +159,7 @@ const ICE: &[Species] = &[
         &[B::Stone, B::Snow, B::Ice],
         (2, 4),
         Template::Prisms,
-        0.5,
+        0.25,
         (0.0, 1.0),
         false,
     ),
@@ -198,7 +198,7 @@ const TOXIC: &[Species] = &[sp(
     &[B::Dirt, B::Ash, B::Obsidian, B::Stone],
     (3, 6),
     Template::Mushroom(2),
-    0.8,
+    0.45,
     (0.0, 1.0),
     true,
 )];
@@ -1226,6 +1226,35 @@ mod tests {
                 .filter(|&&(a, b)| !links.contains(&(b, a)))
                 .count();
             assert_eq!(asymmetric, 0, "res {res} {cells:?}");
+        }
+    }
+
+    // cargo test --release decor_chunk_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn decor_chunk_bench() {
+        for t in [PlanetType::EarthLike, PlanetType::Ice, PlanetType::Toxic] {
+            let p = PlanetData::new_for_type(500, 7, t);
+            let cfg = FloraConfig {
+                planet_type: t,
+                seed: 7,
+                density: 1.0,
+            };
+            let n = (500 / 32) as u32;
+            let start = std::time::Instant::now();
+            let mut count = 0;
+            for i in 0..100u32 {
+                let key = ChunkKey {
+                    face: (i % 6) as u8,
+                    u_idx: (i * 7) % n,
+                    v_idx: (i * 11) % n,
+                };
+                count += decor_chunk(&p, &cfg, key).blocks.len();
+            }
+            eprintln!(
+                "{t:?}: decor_chunk x100 {:?}, {count} blocks",
+                start.elapsed()
+            );
         }
     }
 }
