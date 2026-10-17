@@ -104,6 +104,7 @@ pub struct ChunkMesh {
     pub morph: Option<wgpu::Buffer>, // LOD meshes: LodMorph per vertex (drawn with the vs_lod pipeline)
     pub morph_factor: f32, // LOD meshes: 1 = the parent's shape, 0 = its own (Renderer::update_view)
     pub params: [f32; 4],  // LocalUniform params last written to uniform_buf
+    pub groups: Vec<crate::meshing::cull::IndexGroup>, // closed voxel styles: index ranges with normal cones (cull.rs); empty = draw all
 }
 
 // translucent water surface of a voxel chunk, drawn by fs_water after the deferred lighting

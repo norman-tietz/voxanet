@@ -598,6 +598,25 @@ impl MeshGen {
         }
     }
 
+    // build_chunk plus the back-face groups of the closed styles (cull.rs); the index buffer is reordered
+    // into the groups, the same triangles. Low-poly gets no groups.
+    pub fn build_chunk_grouped(
+        key: ChunkKey,
+        data: &PlanetData,
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<crate::meshing::cull::IndexGroup>) {
+        use crate::meshing::cull::{group_indices, Closed};
+        use crate::meshing::lowpoly::TerrainStyle;
+        let style = crate::meshing::lowpoly::style_for(data);
+        let (v, i) = Self::build_chunk(key, data);
+        let kind = match style {
+            TerrainStyle::Cubes => Closed::Cubes,
+            TerrainStyle::Hex => Closed::Hex,
+            TerrainStyle::LowPoly => return (v, i, Vec::new()),
+        };
+        let (i, groups) = group_indices(&v, &i, kind);
+        (v, i, groups)
+    }
+
     pub fn build_chunk_cubes(key: ChunkKey, data: &PlanetData) -> (Vec<Vertex>, Vec<u32>) {
         Self::build_chunk_cubes_with(key, data, vertex_ao())
     }
@@ -3052,5 +3071,87 @@ mod hex_mesh_tests {
             }
         }
         assert!(fans > 0);
+    }
+}
+
+#[cfg(test)]
+mod cull_group_tests {
+    use super::*;
+    use crate::meshing::cull::{group_indices, Closed};
+
+    fn tri_set(v: &[Vertex], i: &[u32]) -> Vec<[[u32; 3]; 3]> {
+        let key = |k: u32| {
+            let p = v[k as usize].pos;
+            [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()]
+        };
+        let mut t: Vec<_> = i
+            .chunks_exact(3)
+            .map(|t| [key(t[0]), key(t[1]), key(t[2])])
+            .collect();
+        t.sort();
+        t
+    }
+
+    fn check(cells: CellShape, kind: Closed, res: u32) {
+        let mut planet = PlanetData::new(res);
+        planet.cells = cells;
+        for key in [
+            ChunkKey {
+                face: 0,
+                u_idx: 0,
+                v_idx: 0,
+            },
+            ChunkKey {
+                face: 2,
+                u_idx: 1,
+                v_idx: 1,
+            },
+        ] {
+            let (v, i) = if kind == Closed::Hex {
+                MeshGen::build_chunk_hex_with(key, &planet, true)
+            } else {
+                MeshGen::build_chunk_cubes_with(key, &planet, true)
+            };
+            let (gi, groups) = group_indices(&v, &i, kind);
+            assert_eq!(tri_set(&v, &i), tri_set(&v, &gi), "same triangles");
+            assert_eq!(
+                groups.iter().map(|g| g.count).sum::<u32>() as usize,
+                gi.len()
+            );
+            assert!(groups.len() > 3, "{kind:?}: {} groups", groups.len());
+            let mut grouped = 0;
+            for g in &groups {
+                if g.half_angle >= std::f32::consts::FRAC_PI_2 {
+                    continue;
+                }
+                grouped += g.count;
+                for t in gi[g.first as usize..(g.first + g.count) as usize].chunks_exact(3) {
+                    let p = |k: u32| Vec3::from_array(v[k as usize].pos);
+                    let mut n = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).normalize();
+                    let vn: Vec3 = t
+                        .iter()
+                        .map(|&k| Vec3::from_array(v[k as usize].normal))
+                        .sum();
+                    if n.dot(vn) < 0.0 {
+                        n = -n;
+                    }
+                    assert!(n.dot(g.axis).clamp(-1.0, 1.0).acos() <= g.half_angle);
+                }
+            }
+            assert!(
+                grouped as usize * 10 > gi.len() * 9,
+                "most triangles grouped"
+            );
+        }
+    }
+
+    #[test]
+    fn cube_groups_are_a_permutation_inside_their_cones() {
+        check(CellShape::Square, Closed::Cubes, 256);
+    }
+
+    #[test]
+    fn hex_groups_are_a_permutation_inside_their_cones() {
+        check(CellShape::Hex, Closed::Hex, 256);
     }
 }

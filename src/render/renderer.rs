@@ -155,7 +155,15 @@ impl BiomeUniform {
 
 // a voxel chunk's meshes from a worker thread: key, terrain vertices/indices, water vertices/indices
 // mesh worker results, tagged with the reload generation they were started in (Renderer::generation)
-type ChunkGeometry = (u64, ChunkKey, Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>);
+type ChunkGeometry = (
+    u64,
+    ChunkKey,
+    Vec<Vertex>,
+    Vec<u32>,
+    Vec<crate::meshing::cull::IndexGroup>,
+    Vec<Vertex>,
+    Vec<u32>,
+);
 type LodGeometry = (u64, LodKey, Vec<Vertex>, Vec<u32>, Vec<LodMorph>);
 
 // planets up to this many voxel chunks (6 faces x 16 x 16: every generated planet, radius <= 250) are
@@ -2122,6 +2130,7 @@ impl Renderer {
                 morph: Some(morph_buf),
                 morph_factor: 1.0, // the parent's shape until update_view says otherwise
                 params: [0.0, 0.0, 0.0, 0.0],
+                groups: Vec::new(),
             },
         );
         self.animator.start_spawn(AnyKey::Lod(key));
@@ -2135,7 +2144,7 @@ impl Renderer {
     }
     fn process_load_queue(&mut self, _player_pos: Vec3, planet: &PlanetData) {
         let mut upload_budget = 4;
-        while let Ok((generation, key, v, i, wv, wi)) = self.mesh_rx.try_recv() {
+        while let Ok((generation, key, v, i, groups, wv, wi)) = self.mesh_rx.try_recv() {
             if generation != self.generation {
                 continue;
             } // meshed for a previous planet
@@ -2144,7 +2153,7 @@ impl Renderer {
             // belong to the next face's chunks): dropping it left the chunk missing, so it was meshed
             // again every frame, nearest first, taking the spawn slots — the planet streamed in at a
             // few chunks a second and view_covered never came
-            self.upload_chunk_buffers(key, v, i, wv, wi);
+            self.upload_chunk_buffers(key, v, i, groups, wv, wi);
             upload_budget -= 1;
             if upload_budget <= 0 {
                 break;
@@ -2172,9 +2181,9 @@ impl Renderer {
                 let tx = self.mesh_tx.clone();
                 let generation = self.generation;
                 std::thread::spawn(move || {
-                    let (v, i) = MeshGen::build_chunk(key, &planet_clone);
+                    let (v, i, groups) = MeshGen::build_chunk_grouped(key, &planet_clone);
                     let (wv, wi) = MeshGen::build_water(key, &planet_clone);
-                    let _ = tx.send((generation, key, v, i, wv, wi));
+                    let _ = tx.send((generation, key, v, i, groups, wv, wi));
                 });
             } else {
                 break;
@@ -2219,9 +2228,9 @@ impl Renderer {
         for key in keys {
             if self.chunks.contains_key(&key) {
                 // kept even when empty, like process_load_queue's results (removing it re-requested it)
-                let (v, i) = MeshGen::build_chunk(key, planet);
+                let (v, i, groups) = MeshGen::build_chunk_grouped(key, planet);
                 let (wv, wi) = MeshGen::build_water(key, planet);
-                self.upload_chunk_buffers(key, v, i, wv, wi);
+                self.upload_chunk_buffers(key, v, i, groups, wv, wi);
             }
         }
     }
@@ -2309,6 +2318,7 @@ impl Renderer {
         key: ChunkKey,
         v: Vec<Vertex>,
         i: Vec<u32>,
+        groups: Vec<crate::meshing::cull::IndexGroup>,
         wv: Vec<Vertex>,
         wi: Vec<u32>,
     ) {
@@ -2407,6 +2417,7 @@ impl Renderer {
                 morph: None,
                 morph_factor: 0.0,
                 params: [start_opacity, 0.0, 0.0, 0.0],
+                groups,
             },
         );
 
@@ -3110,7 +3121,17 @@ impl Renderer {
                     pass.set_vertex_buffer(1, morph.slice(..));
                 }
                 pass.set_index_buffer(mesh.i_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+                if mesh.groups.is_empty() || controller.is_wireframe {
+                    pass.draw_indexed(0..mesh.num_inds, 0, 0..1);
+                } else {
+                    crate::meshing::cull::visible_ranges(
+                        &mesh.groups,
+                        mesh.center,
+                        mesh.radius,
+                        cam_pos,
+                        |a, b| pass.draw_indexed(a..b, 0, 0..1),
+                    );
+                }
             };
             for mesh in self.chunks.values() {
                 if cull_frustum.intersects_sphere(mesh.center, mesh.radius) {
