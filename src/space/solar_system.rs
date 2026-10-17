@@ -1863,6 +1863,19 @@ pub(crate) mod tests {
         }
     }
 
+    // the bake of the largest planet (radius 1000, resolution 2000); run with
+    // `cargo test --release largest_planet_bake -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn largest_planet_bake_time() {
+        let mut p = inner_planet();
+        p.radius = MAX_PLANET_RADIUS;
+        let t = std::time::Instant::now();
+        let data = p.bake();
+        println!("bake radius {}: {:?}", p.radius, t.elapsed());
+        drop(data);
+    }
+
     #[test]
     fn voxel_resolution_is_twice_the_radius() {
         let mut p = inner_planet();
