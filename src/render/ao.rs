@@ -315,6 +315,15 @@ pub fn within_ao_reach(
 mod tests {
     use super::*;
 
+    // glam's deprecated Mat4::perspective_rh, kept on purpose: its replacement
+    // (glam::camera::rh::proj::directx::perspective) computes the depth terms through 1 / (far - near),
+    // not far / (near - far), so its matrices are not bit-identical to the ones these tests were written
+    // against (look_at_rh's replacement, look_at_mat4, is, and is used directly)
+    fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> glam::Mat4 {
+        #[allow(deprecated)]
+        glam::Mat4::perspective_rh(fov_y, aspect, near, far)
+    }
+
     #[test]
     fn default_settings_feed_the_uniform() {
         let s = AoSettings::default();
@@ -445,10 +454,10 @@ mod tests {
     // a world point onto the previous frame's shadow-target texel (centres at integer coordinates)
     #[test]
     fn reprojection_lands_on_the_right_texel() {
-        use glam::{Mat4, Vec3};
+        use glam::Vec3;
         let size = (200u32, 100u32);
-        let proj = Mat4::perspective_rh(1.2, 2.0, 0.1, 1000.0);
-        let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let proj = perspective_rh(1.2, 2.0, 0.1, 1000.0);
+        let view = glam::camera::rh::view::look_at_mat4(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
         let vp = proj * view;
         // straight ahead: the centre of the target (texel centres at k + 0.5 → coordinate k)
         let q = reproject(Vec3::new(0.0, 0.0, -10.0), vp, size).unwrap();
@@ -461,7 +470,7 @@ mod tests {
         assert!(up.y < q.y);
         // a camera moved sideways by one texel's width at the point's depth: one texel off
         let texel_world = 2.0 * 10.0 * (1.2f32 / 2.0).tan() / size.1 as f32;
-        let moved = Mat4::look_at_rh(
+        let moved = glam::camera::rh::view::look_at_mat4(
             Vec3::X * texel_world,
             Vec3::X * texel_world + Vec3::NEG_Z,
             Vec3::Y,
@@ -568,8 +577,8 @@ mod tests {
     fn history_offset_is_zero_for_a_still_camera() {
         use glam::{Mat4, Vec3};
         let size = (1549u32, 968u32);
-        let vp = Mat4::perspective_rh(1.4, 1920.0 / 1200.0, 0.1, 1000.0)
-            * Mat4::look_at_rh(
+        let vp = perspective_rh(1.4, 1920.0 / 1200.0, 0.1, 1000.0)
+            * glam::camera::rh::view::look_at_mat4(
                 Vec3::new(1.0, 2.0, 3.0),
                 Vec3::new(0.3, -0.2, -5.0),
                 Vec3::Y,
