@@ -336,7 +336,6 @@ impl SolarSystem {
     }
 
     // debug (/system add moon): a moon of planet `parent` on the next free orbit inside its stable zone
-    #[cfg_attr(not(test), allow(dead_code))] // used by /system add moon (Task 6)
     pub fn add_moon(
         &mut self,
         parent: usize,
@@ -517,7 +516,6 @@ pub(crate) fn noise_seed_for(seed: u64, index: usize) -> u32 {
 }
 
 // "3" for planet #3, "3b" for its second moon
-#[cfg_attr(not(test), allow(dead_code))] // used from Task 6 on
 pub fn body_label(system: &SolarSystem, i: usize) -> String {
     let p = &system.planets[i];
     match p.parent {
@@ -536,7 +534,6 @@ pub fn body_label(system: &SolarSystem, i: usize) -> String {
 }
 
 // the body a label names ("3", "3b", case-insensitive), None if there is no such body
-#[cfg_attr(not(test), allow(dead_code))] // used from Task 6 on
 pub fn parse_body(system: &SolarSystem, s: &str) -> Option<usize> {
     let s = s.trim().to_ascii_lowercase();
     let digits = s.trim_end_matches(|c: char| c.is_ascii_lowercase());

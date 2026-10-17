@@ -67,12 +67,11 @@ impl Universe {
         (pos, rot)
     }
 
-    // the HUD's location line (both modes): the current solar system's name, and the planet (`index`,
-    // 0-based) when you're on it or captured by it, labelled like the compass ("#7 Shattered")
-    pub fn location_label(&self, planet: Option<(usize, &str)>) -> String {
+    // the HUD's location line (both modes): the current solar system's name, and the planet (its label) when you're on it or captured by it, labelled like the compass ("#7 Shattered")
+    pub fn location_label(&self, planet: Option<(String, &str)>) -> String {
         let system = &self.galaxy.systems[self.current].name;
         match planet {
-            Some((i, kind)) => format!("{system} · #{} {kind}", i + 1),
+            Some((label, kind)) => format!("{system} · #{label} {kind}"),
             None => system.clone(),
         }
     }
@@ -89,8 +88,12 @@ mod tests {
         let name = u.galaxy.systems[0].name.clone();
         assert_eq!(u.location_label(None), name);
         assert_eq!(
-            u.location_label(Some((6, "Shattered"))),
+            u.location_label(Some(("7".into(), "Shattered"))),
             format!("{name} · #7 Shattered")
+        );
+        assert_eq!(
+            u.location_label(Some(("3b".into(), "Cratered"))),
+            format!("{name} · #3b Cratered")
         );
     }
 

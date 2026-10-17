@@ -361,6 +361,24 @@ fn console_bottom_ndc(height_fraction: f32) -> f32 {
     1.0 - 2.0 * CONSOLE_SCREEN_FRACTION * height_fraction
 }
 
+// whether body `i` has a compass marker: planets always; a moon only within 30 parent radii of its parent
+// (`camera_pos` in system space), else the strip fills with the moons of every planet
+pub(crate) fn moon_on_compass(
+    system: &crate::space::solar_system::SolarSystem,
+    i: usize,
+    camera_pos: glam::DVec3,
+    t: f64,
+) -> bool {
+    let p = &system.planets[i];
+    match p.parent {
+        None => true,
+        Some(parent) => {
+            let pp = &system.planets[parent];
+            (camera_pos - pp.position_at(t)).length() < 30.0 * pp.radius as f64
+        }
+    }
+}
+
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let instance = wgpu::Instance::default();
@@ -3914,12 +3932,20 @@ impl Renderer {
             } else {
                 ""
             };
+            let k = if p.is_moon() { 0.8 } else { 1.0 };
             texts.push((
-                format!("#{} {}{here}", i + 1, def.name),
+                format!(
+                    "#{} {}{here}",
+                    crate::space::solar_system::body_label(system, i),
+                    def.name
+                ),
                 px.x + r_px + 6.0,
                 px.y - 9.0,
                 15.0,
-                light(def.palette.ground.color(), if bright { 1.0 } else { 0.75 }),
+                light(
+                    def.palette.ground.color(),
+                    k * if bright { 1.0 } else { 0.75 },
+                ),
             ));
         }
         if let Some(px) = ship_map.and_then(|c| project(&camera, to_render(c), screen)) {
@@ -3940,9 +3966,25 @@ impl Renderer {
                 (None, Some(s)) => Some(s),
                 _ => None,
             };
-            let lines = [
-                format!("#{} {}", i + 1, def.name),
-                format!("radius {:.0}", p.radius),
+            let moon_of = p.parent.map(|q| {
+                format!(
+                    "moon of #{} {}",
+                    crate::space::solar_system::body_label(system, q),
+                    system.planets[q].planet_type.def().name
+                )
+            });
+            let lines: Vec<String> = [
+                Some(format!(
+                    "#{} {}",
+                    crate::space::solar_system::body_label(system, i),
+                    def.name
+                )),
+                moon_of,
+                Some(format!("radius {:.0}", p.radius)),
+            ]
+            .into_iter()
+            .flatten()
+            .chain([
                 format!("day {:.0} s", p.day_length()),
                 format!("gravity {:.2} g", p.traits.gravity),
                 if def.atmosphere.density == 0.0 {
@@ -3967,7 +4009,8 @@ impl Renderer {
                 } else {
                     "Enter / click again: travel".into()
                 },
-            ];
+            ])
+            .collect();
             let (x0, y0) = (20.0, screen.1 - 20.0 - lines.len() as f32 * 20.0 - 16.0);
             panel = Some([
                 (x0 - 10.0) as u32,
@@ -4155,9 +4198,19 @@ impl Renderer {
             let planets = match planets {
                 Some(s) => {
                     let kinds = crate::space::map::distinct_kinds(
-                        s.planets.iter().map(|p| p.planet_type.def().name),
+                        s.planets
+                            .iter()
+                            .filter(|p| !p.is_moon())
+                            .map(|p| p.planet_type.def().name),
                     );
-                    format!("{} planets: {}", s.planets.len(), kinds.join(", "))
+                    let planets = s.planet_count();
+                    let moons = s.planets.len() - planets;
+                    let more = if moons > 0 {
+                        format!(", {moons} moons")
+                    } else {
+                        String::new()
+                    };
+                    format!("{planets} planets: {}{more}", kinds.join(", "))
                 }
                 None => "planets: unexplored".to_string(),
             };
@@ -4451,9 +4504,16 @@ impl Renderer {
             [1.0, 0.9, 0.4],
         );
         for (i, p) in system.planets.iter().enumerate() {
+            if !moon_on_compass(system, i, camera.position, t) {
+                continue;
+            }
             let def = p.planet_type.def();
             add_marker(
-                format!("#{} {}", i + 1, def.name),
+                format!(
+                    "#{} {}",
+                    crate::space::solar_system::body_label(system, i),
+                    def.name
+                ),
                 p.position_at(t),
                 p.radius as f64,
                 def.palette.ground.color(),
@@ -4725,6 +4785,20 @@ pub(crate) fn chunks_to_refresh(id: BlockId, planet: &PlanetData) -> HashSet<Chu
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // the compass lists moons only near the camera (within 30 parent radii of the parent)
+    #[test]
+    fn moons_show_on_the_compass_only_near_their_parent() {
+        let s = crate::space::solar_system::tests::with_moon();
+        let m = s.planets.len() - 1;
+        let parent = s.planets[2];
+        let near =
+            parent.position_at(5.0) + glam::DVec3::new(10.0 * parent.radius as f64, 0.0, 0.0);
+        let far = parent.position_at(5.0) + glam::DVec3::new(50.0 * parent.radius as f64, 0.0, 0.0);
+        assert!(moon_on_compass(&s, m, near, 5.0));
+        assert!(!moon_on_compass(&s, m, far, 5.0));
+        assert!(moon_on_compass(&s, 0, far, 5.0), "planets always show");
+    }
 
     // every generated planet (radius 40..=250, solar_system.rs) is streamed whole as voxel chunks; the
     // bigger ones /system add makes (up to radius 500) keep the LOD quadtree

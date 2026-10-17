@@ -1,21 +1,36 @@
 use crate::player::entity::Player;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SystemRequest {
     Home, // respawn on the start planet
     Goto {
-        planet: usize,
+        body: String,
         radii: f32,
-    }, // 1-based planet number; distance from its centre in its radii
+    }, // a body label ("3", "3b"); distance from its centre in its radii
     Add {
         planet_type: crate::planet::biome::PlanetType,
         radius: f32,
     }, // debug: append a planet to the solar system
+    AddMoon {
+        parent: String,
+        planet_type: crate::planet::biome::PlanetType,
+        radius: f32,
+    }, // debug: add a moon to the planet with this label
+    Time(f64), // debug: set the game clock (seconds)
+}
+
+// a body label: a planet number of 1 or more, then at most one moon letter ("3", "3b")
+fn is_body_label(s: &str) -> bool {
+    let digits = s.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let letters = &s[digits.len()..];
+    letters.len() <= 1
+        && digits.parse::<usize>().is_ok_and(|n| n >= 1)
+        && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
-const HELP_LINES: [&str; 13] = [
+const HELP_LINES: [&str; 14] = [
     "Commands (up/down recall earlier ones):",
     "Commands without a value show the current setting:",
     "  /debug_mode [true|false]       /view [first|third]",
@@ -26,20 +41,41 @@ const HELP_LINES: [&str; 13] = [
     "  /plastic [on|off|roughness|specular|smudge|scratch|reflection <v>|env [on|off]]",
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <v>|mist <v>]|lightning [on|off|rate <v>]]   /perf <seconds> [label]",
-    "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <20-1000>   /map [n]   /travel <n>",
+    "  /system home | goto <n|na> <radii> | add <type> <20-1000> | add moon <n> <type> <radius> | time <s>",
+    "  /map [n|na]   /travel <n|na>   (types: earthlike volcanic ice desert toxic ocean shattered cratered)",
     "  /galaxy [n]   /jump <n>",
     "  /screenshot <path>             help",
 ];
 const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
 const HELP_COLOR: [f32; 3] = [0.8, 0.8, 0.8];
 
-const SYSTEM_USAGE: &str = "Usage: /system home|goto <n> <radii>|add <type> <radius>";
+const SYSTEM_USAGE: &str = "Usage: /system home|goto <n|na> <radii>|add <type> <radius>|add moon <n> <type> <radius>|time <seconds>";
 
 // parses the words after "/system"; the planet number's upper bound is checked by the game, which
 // knows how many planets the solar system has
 fn parse_system_command(args: &[&str]) -> Result<SystemRequest, &'static str> {
     match args {
         ["home"] => Ok(SystemRequest::Home),
+        ["time", secs] => match secs.parse::<f64>() {
+            Ok(s) if s.is_finite() && s >= 0.0 => Ok(SystemRequest::Time(s)),
+            _ => Err("Usage: /system time <seconds, 0 or more>"),
+        },
+        ["add", "moon", parent, planet_type, radius] => {
+            let planet_type = crate::planet::biome::PlanetType::from_name(planet_type);
+            let radius = radius.parse::<f32>().ok().filter(|r| r.is_finite());
+            match (
+                is_body_label(parent) && !parent.ends_with(|c: char| c.is_ascii_alphabetic()),
+                planet_type,
+                radius,
+            ) {
+                (true, Some(planet_type), Some(radius)) => Ok(SystemRequest::AddMoon {
+                    parent: parent.to_string(),
+                    planet_type,
+                    radius,
+                }),
+                _ => Err("Usage: /system add moon <planet number> <type> <radius>"),
+            }
+        }
         ["add", planet_type, radius] => {
             let planet_type = crate::planet::biome::PlanetType::from_name(planet_type);
             let radius = radius.parse::<f32>().ok().filter(|r| {
@@ -56,14 +92,16 @@ fn parse_system_command(args: &[&str]) -> Result<SystemRequest, &'static str> {
             }
         }
         ["goto", n, radii] => {
-            let planet = n.parse::<usize>().ok().filter(|&n| n >= 1);
+            let body = Some(n.to_string()).filter(|n| is_body_label(n));
             let radii = radii
                 .parse::<f32>()
                 .ok()
                 .filter(|r| r.is_finite() && *r > 1.0);
-            match (planet, radii) {
-                (Some(planet), Some(radii)) => Ok(SystemRequest::Goto { planet, radii }),
-                _ => Err("Usage: /system goto <planet number> <distance in radii, more than 1>"),
+            match (body, radii) {
+                (Some(body), Some(radii)) => Ok(SystemRequest::Goto { body, radii }),
+                _ => Err(
+                    "Usage: /system goto <planet number or 3b> <distance in radii, more than 1>",
+                ),
             }
         }
         _ => Err(SYSTEM_USAGE),
@@ -87,8 +125,8 @@ pub struct Console {
     pub perf_request: Option<(f32, String)>, // set by /perf: seconds and label (perf.rs)
     pub galaxy_request: Option<Option<usize>>, // set by /galaxy [n]: toggle the galaxy view, or open it with system n selected
     pub jump_request: Option<usize>,           // set by /jump <n>: jump to solar system n (0-based)
-    pub travel_request: Option<usize>, // set by /travel <n>: fly to planet n's orbit (0-based)
-    pub map_request: Option<Option<usize>>, // set by /map [n]: toggle the map, or open it with planet n selected
+    pub travel_request: Option<String>, // set by /travel <n|na>: fly to that body's orbit (a label)
+    pub map_request: Option<Option<String>>, // set by /map [n|na]: toggle the map, or open it with that body selected
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::render::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     pub shadow_request: Option<crate::render::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
@@ -311,15 +349,15 @@ impl Console {
                 _ => self.log("Usage: /jump <system number>", [1.0, 0.5, 0.0]),
             },
 
-            "/travel" => match parts.get(1).map(|n| n.parse::<usize>()) {
-                Some(Ok(n)) if n >= 1 => self.travel_request = Some(n - 1),
-                _ => self.log("Usage: /travel <planet number>", [1.0, 0.5, 0.0]),
+            "/travel" => match parts.get(1) {
+                Some(l) if is_body_label(l) => self.travel_request = Some(l.to_string()),
+                _ => self.log("Usage: /travel <planet number or 3b>", [1.0, 0.5, 0.0]),
             },
 
-            "/map" => match parts.get(1).map(|n| n.parse::<usize>()) {
+            "/map" => match parts.get(1) {
                 None => self.map_request = Some(None),
-                Some(Ok(n)) if n >= 1 => self.map_request = Some(Some(n - 1)),
-                _ => self.log("Usage: /map [planet number]", [1.0, 0.5, 0.0]),
+                Some(l) if is_body_label(l) => self.map_request = Some(Some(l.to_string())),
+                _ => self.log("Usage: /map [planet number or 3b]", [1.0, 0.5, 0.0]),
             },
 
             "/perf" => match crate::app::perf::parse_command(&parts[1..]) {
@@ -649,10 +687,42 @@ mod tests {
         assert_eq!(
             parse_system_command(&["goto", "2", "3.5"]),
             Ok(SystemRequest::Goto {
-                planet: 2,
+                body: "2".into(),
                 radii: 3.5
             })
         );
+    }
+
+    #[test]
+    fn body_labels_parse_in_the_travel_map_and_goto_commands() {
+        let c = console_with(&["/travel 3b"]);
+        assert_eq!(c.travel_request.as_deref(), Some("3b"));
+        let c = console_with(&["/map 2a"]);
+        assert_eq!(c.map_request, Some(Some("2a".to_string())));
+        let c = console_with(&["/map"]);
+        assert_eq!(c.map_request, Some(None));
+        assert_eq!(
+            parse_system_command(&["goto", "3b", "6"]),
+            Ok(SystemRequest::Goto {
+                body: "3b".into(),
+                radii: 6.0
+            })
+        );
+        assert_eq!(
+            parse_system_command(&["add", "moon", "3", "cratered", "60"]),
+            Ok(SystemRequest::AddMoon {
+                parent: "3".into(),
+                planet_type: crate::planet::biome::PlanetType::Cratered,
+                radius: 60.0
+            })
+        );
+        assert_eq!(
+            parse_system_command(&["time", "250.5"]),
+            Ok(SystemRequest::Time(250.5))
+        );
+        assert!(parse_system_command(&["time", "x"]).is_err());
+        assert!(parse_system_command(&["goto", "!!", "6"]).is_err());
+        assert!(parse_system_command(&["add", "moon", "3b", "ice", "60"]).is_err());
     }
 
     #[test]
@@ -673,7 +743,7 @@ mod tests {
         assert_eq!(
             parse_system_command(&["goto", "2", "3.5"]),
             Ok(SystemRequest::Goto {
-                planet: 2,
+                body: "2".into(),
                 radii: 3.5
             })
         );
