@@ -1703,7 +1703,7 @@ impl Renderer {
             }
             // chunks away from everything in view (no mesh to rebuild, no physics nearby) are dropped; a
             // chunk of another face next to a seam may go too and is simply generated again
-            if self.frame_count % 32 == 0 {
+            if self.frame_count.is_multiple_of(32) {
                 if let Some(flora) = planet.flora.as_ref() {
                     let near = |k: &ChunkKey| {
                         (-1i64..=1).any(|du| {
