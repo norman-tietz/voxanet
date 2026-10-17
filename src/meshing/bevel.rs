@@ -91,6 +91,14 @@ pub fn polygon_lines(pieces: &[((i64, i64), (i64, i64))]) -> Vec<usize> {
 
 pub const DEFAULT_WIDTH: f32 = 0.06; // world units (about a block's 6 %)
 pub const DEFAULT_CAVITY: f32 = 0.2; // albedo darkening right at an edge
+const FAR_MARGIN: f32 = 2.0;
+// the scratch's width (shader.wgsl SCRATCH_WIDTH) vanishes below half a pixel: 2 * width px at 1 px
+const SCRATCH_REACH: f32 = 0.012;
+
+// world units a bevel of `width` (or a scratch) is about one pixel wide at, with a safety margin
+pub fn far_distance(width: f32, rad_per_px: f32) -> f32 {
+    FAR_MARGIN * width.max(SCRATCH_REACH) / rad_per_px.max(1e-7)
+}
 
 // the bevel look, tuned with /bevel (cmd.rs); GlobalUniform.bevel = uniform()
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,8 +119,16 @@ impl Default for BevelSettings {
 }
 
 impl BevelSettings {
-    pub fn uniform(&self) -> [f32; 4] {
-        [self.width, self.cavity, 0.0, 0.0]
+    // rad_per_px: the view's radians per screen pixel (GlobalUniform.motion.y)
+    pub fn uniform(&self, rad_per_px: f32) -> [f32; 4] {
+        [self.width, self.cavity, self.far_distance(rad_per_px), 0.0]
+    }
+
+    // camera distance beyond which fs_geom skips the bevel and the scratches: they have faded out
+    // there already (bevel under ~1 px wide, scratch under half a pixel), so skipping is exact.
+    // `FAR_MARGIN` covers a pixel being smaller than the centre's at the screen edge
+    pub fn far_distance(&self, rad_per_px: f32) -> f32 {
+        far_distance(self.width, rad_per_px)
     }
 }
 
@@ -322,9 +338,32 @@ mod tests {
     }
 
     #[test]
+    fn far_distance_is_where_the_bevel_is_gone() {
+        // 80 degree fov at 900 px: the default bevel is 1 px wide at ~32 units, cut at twice that
+        let rad = 80f32.to_radians() / 900.0;
+        let far = far_distance(DEFAULT_WIDTH, rad);
+        assert!((far - 2.0 * DEFAULT_WIDTH / rad).abs() < 1e-3);
+        assert!(far > 60.0 && far < 100.0, "{far}");
+        // the shader's fade is zero at 1 px, which is half of the cut
+        assert!(DEFAULT_WIDTH / (far * rad) <= 1.0);
+        // a thin bevel still keeps the scratch reach; finer pixels push the cut out
+        assert_eq!(far_distance(0.0, rad), 2.0 * 0.012 / rad);
+        assert!(far_distance(DEFAULT_WIDTH, rad / 2.0) > 1.99 * far);
+    }
+
+    #[test]
     fn default_settings_feed_the_uniform() {
         let s = BevelSettings::default();
-        assert_eq!(s.uniform(), [DEFAULT_WIDTH, DEFAULT_CAVITY, 0.0, 0.0]);
+        let rad = 1.4 / 900.0;
+        assert_eq!(
+            s.uniform(rad),
+            [
+                DEFAULT_WIDTH,
+                DEFAULT_CAVITY,
+                far_distance(DEFAULT_WIDTH, rad),
+                0.0
+            ]
+        );
         assert_eq!((DEFAULT_WIDTH, DEFAULT_CAVITY), (0.06, 0.2));
     }
     #[test]

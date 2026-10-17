@@ -2825,7 +2825,9 @@ impl Renderer {
                 0.0,
                 0.0,
             ],
-            bevel: self.bevel.uniform(),
+            bevel: self
+                .bevel
+                .uniform(controller.fov_y() / self.config.height as f32),
             plastic: self.plastic.uniform(),
             plastic_ext: self.plastic.uniform_ext(),
             light: self.light.uniform(),

@@ -8,7 +8,7 @@ struct Global {
     sun_dir: vec4<f32>,
     screen: vec4<f32>, // width, height in pixels, z: sea surface radius (0 = no water), w: time in seconds
     motion: vec4<f32>, // x: radial motion blur strength 0..1, from the player's current speed; y: radians per screen pixel (clouds.wgsl)
-    bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening (fs_geom, bevel.rs)
+    bevel: vec4<f32>, // x: block bevel width in world units (0 = off), y: cavity darkening, z: camera distance beyond which bevels and scratches are skipped (fs_geom, bevel.rs)
     plastic: vec4<f32>, // x: base roughness, y: specular strength (0 = off), z: smudge, w: scratch (plastic.rs)
     plastic_ext: vec4<f32>, // x: sky reflection weight (plastic.rs)
     light: vec4<f32>, // x: ground bounce, y: wrap lighting (light.rs)
@@ -725,8 +725,11 @@ struct GeomOut {
 // edge, so two faces meeting at 90° agree there) and the albedo darkens by up to global.bevel.y; both
 // fade out where the band is under ~2 px wide. Returns the normal and the albedo factor.
 fn bevel_normal(N: vec3<f32>, edge0: vec4<f32>, edge1: vec4<f32>, ex0: vec4<f32>, ey0: vec4<f32>,
-                ex1: vec4<f32>, ey1: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> vec4<f32> {
+                ex1: vec4<f32>, ey1: vec4<f32>, px: vec3<f32>, py: vec3<f32>, dist: f32) -> vec4<f32> {
     let w = global.bevel.x;
+    if (dist > global.bevel.z) {
+        return vec4<f32>(N, 1.0);
+    }
     let near = min(min(edge0, edge1).xy, min(edge0, edge1).zw);
     if (w <= 0.0 || min(near.x, near.y) >= w) {
         return vec4<f32>(N, 1.0);
@@ -796,11 +799,11 @@ fn face_gradient(dx: f32, dy: f32, px: vec3<f32>, py: vec3<f32>) -> vec3<f32> {
 // they'd be thinner than about a pixel. ex0/ey0, px/py: screen derivatives fs_geom took before its
 // dither discard.
 fn plastic_roughness(world_pos: vec3<f32>, edge0: vec4<f32>, edge1: vec4<f32>, ex0: vec4<f32>,
-                     ey0: vec4<f32>, px: vec3<f32>, py: vec3<f32>) -> f32 {
+                     ey0: vec4<f32>, px: vec3<f32>, py: vec3<f32>, dist: f32) -> f32 {
     var r = global.plastic.x;
     let n = 0.65 * value_noise3(world_pos * 0.33) + 0.35 * value_noise3(world_pos * 0.71);
     r += global.plastic.z * smoothstep(0.45, 0.8, n);
-    if (global.plastic.w <= 0.0 || edge0.x >= 1e3) {
+    if (global.plastic.w <= 0.0 || edge0.x >= 1e3 || dist > global.bevel.z) {
         return clamp(r, 0.05, 1.0);
     }
     // the second axis (scratch_slots): 3 for squares, 1 for polygons and masked wall ends
@@ -874,13 +877,14 @@ fn fs_geom(in: VertexOut) -> GeomOut {
         }
     }
     // block bevels, after the low-poly branch: its facets carry no edges, its placed cubes do
-    let bev = bevel_normal(normal, in.edge0, in.edge1, ex0, ey0, ex1, ey1, px, py);
+    let cam_dist = distance(global.camera_pos.xyz, in.world_pos);
+    let bev = bevel_normal(normal, in.edge0, in.edge1, ex0, ey0, ex1, ey1, px, py, cam_dist);
     normal = bev.xyz;
     color = color * bev.w;
     out.albedo = vec4<f32>(color, water_depth);
     out.normal = vec4<f32>(normal * 0.5 + 0.5, 0.0);
-    out.dist = distance(global.camera_pos.xyz, in.world_pos);
-    out.gloss = plastic_roughness(in.world_pos, in.edge0, in.edge1, ex0, ey0, px, py);
+    out.dist = cam_dist;
+    out.gloss = plastic_roughness(in.world_pos, in.edge0, in.edge1, ex0, ey0, px, py, cam_dist);
     return out;
 }
 
