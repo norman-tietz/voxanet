@@ -4,12 +4,12 @@
 
 use crate::meshing::gen::CoordSystem;
 use crate::planet::biome::PlanetType;
-use crate::planet::data::{BlockId, PlanetData};
+use crate::planet::data::{BlockId, ChunkKey, PlanetData, CHUNK_SIZE};
 use crate::planet::material::BlockType;
 use crate::planet::noise::NoiseGenerator;
 use crate::weather::smoothstep;
 use glam::Vec3;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const ANCHOR_CELL: u32 = 6;
 pub const MAX_PLANT_HEIGHT: u32 = 12;
@@ -276,6 +276,68 @@ pub fn plant_blocks(
     out
 }
 
+// the plant blocks of one chunk, and per column of the chunk its highest plant layer
+pub struct ChunkDecor {
+    pub blocks: HashMap<BlockId, BlockType>,
+    pub tops: HashMap<(u32, u32), u32>,
+}
+
+// Pure: every anchor whose plant can reach the chunk is generated whole and its blocks inside the chunk kept.
+// Such an anchor lies in the chunk or within MAX_PLANT_REACH rings of it; the outside ones are found by
+// expanding the chunk's outermost columns through `column_neighbors`, which crosses cube-face seams.
+pub fn decor_chunk(data: &PlanetData, cfg: &FloraConfig, key: ChunkKey) -> ChunkDecor {
+    let mut out = ChunkDecor {
+        blocks: HashMap::new(),
+        tops: HashMap::new(),
+    };
+    if species_for(cfg.planet_type).is_empty() {
+        return out;
+    }
+    let res = data.resolution;
+    let (u0, v0) = (key.u_idx * CHUNK_SIZE, key.v_idx * CHUNK_SIZE);
+    let (u1, v1) = ((u0 + CHUNK_SIZE).min(res), (v0 + CHUNK_SIZE).min(res));
+    let mut seen: HashSet<(u8, u32, u32)> =
+        HashSet::with_capacity(((u1 - u0) * (v1 - v0)) as usize + 512);
+    let mut candidates: Vec<(u8, u32, u32)> = Vec::new();
+    let mut frontier = Vec::new();
+    for u in u0..u1 {
+        for v in v0..v1 {
+            seen.insert((key.face, u, v));
+            candidates.push((key.face, u, v));
+            if u == u0 || u + 1 == u1 || v == v0 || v + 1 == v1 {
+                frontier.push((key.face, u, v));
+            }
+        }
+    }
+    for _ in 0..MAX_PLANT_REACH {
+        let mut next = Vec::new();
+        for &(f, u, v) in &frontier {
+            for c in data.column_neighbors(f, u, v) {
+                if seen.insert(c) {
+                    next.push(c);
+                    candidates.push(c);
+                }
+            }
+        }
+        frontier = next;
+    }
+    // overlapping plants resolve by anchor order (face, u, v): the later anchor's block wins, in any chunk
+    candidates.sort_unstable();
+    for (f, u, v) in candidates {
+        let Some(plant) = anchor_at(data, cfg, f, u, v) else {
+            continue;
+        };
+        for (id, t) in plant_blocks(data, &plant, cfg) {
+            if PlanetData::chunk_key(id) == key {
+                let top = out.tops.entry((id.u, id.v)).or_insert(id.layer);
+                *top = (*top).max(id.layer);
+                out.blocks.insert(id, t);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +499,118 @@ mod tests {
         // no block is generated twice
         let mut ids = HashSet::new();
         assert!(blocks.iter().all(|(id, _)| ids.insert(*id)));
+    }
+
+    #[test]
+    fn chunks_agree_on_every_tree_across_borders_and_seams() {
+        for (res, cells) in [
+            (64u32, CellShape::Hex),
+            (100, CellShape::Hex),
+            (64, CellShape::Square),
+        ] {
+            let mut p = PlanetData::new_for_type(res, 11, PlanetType::EarthLike);
+            p.cells = cells;
+            let cfg = FloraConfig {
+                planet_type: PlanetType::EarthLike,
+                seed: 11,
+                density: 3.0,
+            };
+            let mut whole = HashMap::new();
+            let mut plants = 0;
+            for face in 0..6u8 {
+                for u in 0..res {
+                    for v in 0..res {
+                        if let Some(pl) = anchor_at(&p, &cfg, face, u, v) {
+                            plants += 1;
+                            for (id, t) in plant_blocks(&p, &pl, &cfg) {
+                                whole.insert(id, t);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(plants > 20, "res {res}: only {plants} plants");
+            let chunks = res.div_ceil(CHUNK_SIZE);
+            let mut union = HashMap::new();
+            for face in 0..6u8 {
+                for cu in 0..chunks {
+                    for cv in 0..chunks {
+                        let key = ChunkKey {
+                            face,
+                            u_idx: cu,
+                            v_idx: cv,
+                        };
+                        for (id, t) in decor_chunk(&p, &cfg, key).blocks {
+                            assert_eq!(
+                                PlanetData::chunk_key(id),
+                                key,
+                                "a block in the wrong chunk"
+                            );
+                            assert!(
+                                union.insert(id, t).is_none(),
+                                "{id:?} generated by two chunks"
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(whole.len(), union.len(), "res {res}");
+            assert!(
+                whole.iter().all(|(id, t)| union.get(id) == Some(t)),
+                "res {res}"
+            );
+        }
+    }
+
+    #[test]
+    fn decor_chunk_is_deterministic_and_has_tops() {
+        let p = PlanetData::new_for_type(96, 5, PlanetType::EarthLike);
+        let cfg = FloraConfig {
+            planet_type: PlanetType::EarthLike,
+            seed: 5,
+            density: 2.0,
+        };
+        let key = ChunkKey {
+            face: 0,
+            u_idx: 1,
+            v_idx: 1,
+        };
+        let a = decor_chunk(&p, &cfg, key);
+        let b = decor_chunk(&p, &cfg, key);
+        assert_eq!(a.blocks, b.blocks);
+        for (&(u, v), &top) in &a.tops {
+            let best = a
+                .blocks
+                .keys()
+                .filter(|id| id.u == u && id.v == v)
+                .map(|id| id.layer)
+                .max();
+            assert_eq!(best, Some(top));
+        }
+    }
+
+    #[test]
+    fn generating_a_chunk_is_fast() {
+        // a loose bound that catches an accidental O(n^2): 16 chunks in well under 320 ms in release
+        let p = PlanetData::new_for_type(128, 5, PlanetType::EarthLike);
+        let cfg = FloraConfig {
+            planet_type: PlanetType::EarthLike,
+            seed: 5,
+            density: 2.0,
+        };
+        let t = std::time::Instant::now();
+        for k in 0..16u32 {
+            let _ = decor_chunk(
+                &p,
+                &cfg,
+                ChunkKey {
+                    face: (k % 6) as u8,
+                    u_idx: (k / 6) % 4,
+                    v_idx: k % 4,
+                },
+            );
+        }
+        eprintln!("16 chunks: {:?}", t.elapsed());
+        assert!(t.elapsed().as_millis() < 320, "{:?}", t.elapsed());
     }
 }
