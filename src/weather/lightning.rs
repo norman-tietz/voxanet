@@ -561,8 +561,10 @@ mod tests {
 
     #[test]
     fn weather_off_means_no_lightning() {
-        let mut s = WeatherSettings::default();
-        s.on = false;
+        let s = WeatherSettings {
+            on: false,
+            ..WeatherSettings::default()
+        };
         let f = s.force_uniform();
         let k = kind(PlanetType::EarthLike);
         assert!(hour(k, &f).is_empty());

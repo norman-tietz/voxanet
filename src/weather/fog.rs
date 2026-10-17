@@ -457,7 +457,9 @@ mod tests {
     fn the_camera_storm_weight_fades_with_height() {
         assert_eq!(camera_storm_mix(1.0, 0.0, 0.0), 0.5);
         assert!((camera_storm_mix(1.0, 0.0, 1000.0) - 0.0).abs() < 1e-6);
-        assert_eq!(camera_storm_mix(0.3, 0.7, 50.0).max(0.0) > 0.5, true);
+        // in between: from the mean (0.5) toward the shaded point's 0.7 with height
+        let m = camera_storm_mix(0.3, 0.7, 50.0);
+        assert!(m > 0.5 && m < 0.7, "{m}");
     }
 
     #[test]
