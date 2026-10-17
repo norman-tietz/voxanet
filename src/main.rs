@@ -205,8 +205,12 @@ fn install_world(
     planet: &mut PlanetData,
     baked: BakedPlanet,
     stream_from: glam::Vec3,
+    plants: Option<(bool, f32)>, // the player's /plants setting, None = what the bake chose
 ) {
     *planet = baked.data;
+    if let Some((on, density)) = plants {
+        planet.set_flora(on, density);
+    }
     // the terrain style's cells (/style hex) carry over to every planet installed
     planet.set_cells(crate::meshing::lowpoly::cells_for(
         crate::meshing::lowpoly::style(),
@@ -301,7 +305,8 @@ struct Game {
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
     galaxy_view: Option<crate::space::map::MapView>, // the galaxy view, while it's open (G)
     travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
-    trip_mouse: TripMouse,  // mouse motion during a trip, toward cancelling it
+    plants: Option<(bool, f32)>, // /plants on|off|density, kept across planets; None = each bake's default
+    trip_mouse: TripMouse,       // mouse motion during a trip, toward cancelling it
     visited: std::collections::HashSet<(usize, usize)>, // (system, planet) whose voxel world has been installed
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
 }
@@ -607,7 +612,14 @@ impl Game {
         let bench = crate::app::perf::parse_bench_args(&std::env::args().collect::<Vec<_>>());
         let clock = GameClock::new(bench.is_some());
         let spawn = noon_spawn(&baked.data, &system, start_planet, 0.0);
-        install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
+        install_world(
+            &mut renderer,
+            &mut controller,
+            &mut planet,
+            baked,
+            spawn,
+            None,
+        );
         player.spawn(spawn);
         player.handover_altitude = Some(crate::player::landing::handover_altitude(
             system.planets[start_planet].radius,
@@ -663,6 +675,7 @@ impl Game {
             map: None,
             galaxy_view: None,
             travel: None,
+            plants: None,
             trip_mouse: TripMouse::new(Instant::now()),
             visited: std::collections::HashSet::new(),
             landed_at: None,
@@ -706,6 +719,7 @@ impl Game {
             visited,
             travel,
             trip_mouse,
+            plants,
             clock,
             loaded_world,
             loaded_system,
@@ -1108,7 +1122,14 @@ impl Game {
                     planet,
                 );
                 edits_by_planet.remove(&key);
-                install_world(renderer, controller, planet, baked, local.as_vec3());
+                install_world(
+                    renderer,
+                    controller,
+                    planet,
+                    baked,
+                    local.as_vec3(),
+                    *plants,
+                );
                 *loaded_world = index;
                 *loaded_system = key.0;
                 *impostor_generation = generation;
@@ -1311,7 +1332,7 @@ impl Game {
                             (0, i),
                             planet,
                         );
-                        install_world(renderer, controller, planet, baked, spawn);
+                        install_world(renderer, controller, planet, baked, spawn, *plants);
                         *impostor_generation = generation;
                         *loaded_world = i;
                         *loaded_system = 0;
@@ -1554,33 +1575,40 @@ impl Game {
         }
         if let Some(cmd) = console.plants_request.take() {
             use crate::app::cmd::PlantsCommand;
-            // the loaded planet's plants only mean something while its voxel world is what you see
-            if *mode == GameMode::Space {
-                console.log("Land on a planet to change its plants.", [1.0, 0.5, 0.0]);
-            } else {
-                let (on, density) = planet
+            let current = |planet: &PlanetData| {
+                planet
                     .flora
                     .as_ref()
-                    .map_or((false, 1.0), |f| (true, f.cfg.density));
-                let next = match cmd {
-                    PlantsCommand::Show => None,
-                    PlantsCommand::On => Some((true, if on { density } else { 1.0 })),
-                    PlantsCommand::Off => Some((false, density)),
-                    PlantsCommand::Density(d) => Some((d > 0.0, d)),
-                };
+                    .map_or((false, 1.0), |f| (true, f.cfg.density))
+            };
+            let (on, density) = (*plants).unwrap_or_else(|| current(planet));
+            let next = match cmd {
+                PlantsCommand::Show => None,
+                PlantsCommand::On => Some((true, if on { density } else { 1.0 })),
+                PlantsCommand::Off => Some((false, density)),
+                PlantsCommand::Density(d) => Some((d > 0.0, d)),
+            };
+            // the loaded planet's plants only mean something while its voxel world is what you see
+            if next.is_some() && *mode == GameMode::Space {
+                console.log("Land on a planet to change its plants.", [1.0, 0.5, 0.0]);
+            } else {
                 if let Some((on, density)) = next {
-                    // a fresh flora (and cache) replaces the old one; the meshes are rebuilt
+                    // kept for every planet installed later; a fresh flora (and cache) replaces the
+                    // old one and the meshes are rebuilt
+                    *plants = Some((on, density));
                     planet.set_flora(on, density);
                     renderer.force_reload_all(planet, player.position);
                 }
+                let (on, density) = (*plants).unwrap_or_else(|| current(planet));
                 let species = crate::planet::flora::species_for(planet.planet_type)
                     .iter()
                     .map(|s| s.name)
                     .collect::<Vec<_>>()
                     .join(", ");
-                let msg = match planet.flora.as_ref() {
-                    Some(f) => format!("Plants: on, density {} ({species})", f.cfg.density),
-                    None => "Plants: off".to_string(),
+                let msg = if on {
+                    format!("Plants: on, density {density} ({species})")
+                } else {
+                    "Plants: off".to_string()
                 };
                 console.log(&msg, [0.0, 1.0, 0.0]);
             }
