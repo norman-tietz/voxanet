@@ -72,9 +72,9 @@ pub struct GlobalUniform {
     pub weather: [f32; 4], // x: overcast at the camera, y: the storm there (weather.rs overcast)
     pub fog: [f32; 4], // x: storm at the camera, y: storm fog extinction at storm 1, z: ground mist, w: mist base radius (weather/fog.rs)
     pub fog_tint: [f32; 4], // rgb: the storm haze's colour
-    pub fog_wind: [f32; 4], // xyz: the structure's scroll offset
-    pub flash: [f32; 4], // x: the lightning's scene flash at the camera (weather/lightning.rs)
-    pub strikes: [[f32; 4]; 6], // active strikes: xyz planet-frame surface position, w intensity
+    pub fog_wind: [f32; 4], // xyz: the structure's scroll offset, w: storm_base (radius of the highest peak)
+    pub flash: [f32; 4],    // x: the lightning's scene flash at the camera (weather/lightning.rs)
+    pub strikes: [[f32; 4]; crate::weather::lightning::MAX_STRIKES], // active strikes: xyz planet-frame surface position, w intensity
 }
 
 #[repr(C)]
@@ -235,7 +235,7 @@ pub struct Renderer {
     warp_flow: Option<(f64, f32)>, // their flow (warp::advance_flow) and the clock it was advanced to
     pub fog_wind: glam::Vec3,      // the storm fog's scrolled offset (weather/fog.rs)
     pub weather_force: crate::weather::WeatherForce, // the uniform used this frame
-    pub strikes: Vec<crate::weather::lightning::Strike>, // this frame's lightning strikes near the camera
+    strikes: Vec<crate::weather::lightning::Strike>, // this frame's lightning strikes near the camera
     cloud_map: crate::render::cloud_map::CloudMap, // shared by the scene and the space renderer (group 0 of both)
     env_map: crate::render::env_map::EnvMap, // the plastic's pre-filtered sky reflection (group 0)
     env_reset: bool, // the environment map no longer fits: bake it whole on the next planet frame
@@ -1101,7 +1101,7 @@ impl Renderer {
             fog_tint: [0.0; 4],
             fog_wind: [0.0; 4],
             flash: [0.0; 4],
-            strikes: [[0.0; 4]; 6],
+            strikes: [[0.0; 4]; crate::weather::lightning::MAX_STRIKES],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1402,8 +1402,6 @@ impl Renderer {
         })
     }
 
-    // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
-    // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
     // the radius of the highest surface (terrain after edits, or the water) under a direction
     fn ground_radius(planet: &PlanetData, dir: Vec3) -> f32 {
         let probe = dir * (planet.resolution as f32 * 0.5);
@@ -1419,6 +1417,8 @@ impl Renderer {
         }
     }
 
+    // the water surface radius over the camera's column (its lake or the sea), 0 when that column holds
+    // no water: GlobalUniform.screen.z, for the underwater tint and fs_water's seen-from-below checks
     pub(crate) fn camera_water_radius(planet: &PlanetData, cam_pos: Vec3) -> f32 {
         planet
             .cell_at(cam_pos)
@@ -2698,6 +2698,12 @@ impl Renderer {
         )
         .uniform();
 
+        // the water surface over the camera's own column (a lake's or the sea's), 0 when that column holds
+        // no water: the underwater tint, fs_water's below-the-surface checks, and no rain, bolts or flare
+        // seen from under water
+        let water_radius = Self::camera_water_radius(planet, cam_pos);
+        let under_water = water_radius > cam_pos.length();
+
         // lightning (weather/lightning.rs): the strikes near the camera, the scene flash they cause
         self.strikes = crate::weather::lightning::frame_strikes(
             crate::weather::lightning::StrikePlanet {
@@ -2716,8 +2722,8 @@ impl Renderer {
             cam_pos,
             planet.resolution as f32 * 0.5,
         );
-        if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
-            flash *= 0.25; // under water
+        if under_water {
+            flash *= 0.25;
         }
         let strikes = crate::weather::lightning::gpu_strikes(&self.strikes);
 
@@ -2734,9 +2740,7 @@ impl Renderer {
             screen: [
                 self.config.width as f32,
                 self.config.height as f32,
-                // the water surface over the camera's own column (a lake's or the sea's), 0 when
-                // that column holds no water: the underwater tint and fs_water's below-the-surface checks
-                Self::camera_water_radius(planet, cam_pos),
+                water_radius,
                 time,
             ], // wrapped: keeps f32 wave phases precise
             sun_dir: [
@@ -2774,7 +2778,7 @@ impl Renderer {
             &self.weather_force,
             time,
         );
-        if Self::camera_water_radius(planet, cam_pos) > cam_pos.length() {
+        if under_water {
             precip.instances = 0;
         }
         self.precip_gpu
@@ -2782,7 +2786,7 @@ impl Renderer {
 
         // the bolts of this frame's strikes (lightning.rs); none seen from under water
         // (and none seen from above the cloud shell: the bolts would shine through the cover)
-        let bolts = if Self::camera_water_radius(planet, cam_pos) > cam_pos.length()
+        let bolts = if under_water
             || cam_pos.length() > planet.resolution as f32 * 0.5 * crate::planet::data::CLOUD_ALT
         {
             Vec::new()
@@ -2819,7 +2823,6 @@ impl Renderer {
             let sun_far = mvp * (cam_pos + sun_dir.normalize() * 1000.0).extend(1.0);
             let ndc = (sun_far.w > 0.0)
                 .then(|| glam::Vec2::new(sun_far.x / sun_far.w, sun_far.y / sun_far.w));
-            let water_radius = Self::camera_water_radius(planet, cam_pos);
             let horizon_radius =
                 CoordSystem::get_layer_radius(planet.terrain.sea_level() + 1, planet.resolution);
             let daylight = crate::render::flare::horizon_visibility(

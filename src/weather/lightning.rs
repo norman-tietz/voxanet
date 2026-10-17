@@ -274,7 +274,7 @@ pub fn bolt_instances(
     cloud_radius: f32,
     ground_radius: impl Fn(Vec3) -> f32,
 ) -> Vec<BoltInstance> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(strikes.len() * super::bolt::MAX_SEGMENTS_PER_BOLT);
     for s in strikes {
         let dir = s.pos.normalize_or_zero();
         if dir == Vec3::ZERO {

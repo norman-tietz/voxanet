@@ -116,10 +116,10 @@ struct PlanetUniform {
     light: [f32; 4],   // ground bounce, wrap lighting (light.rs)
     weather_rule: [f32; 4], // the planet type's weather rule and cover (weather.rs WeatherKind)
     weather_cover: [f32; 4],
-    atmosphere: [f32; 4],   // x: atmosphere density (AtmosphereDef.density)
+    atmosphere: [f32; 4], // x: atmosphere density (AtmosphereDef.density)
     fog_tint: [f32; 4], // rgb: the storm fog's tint, w: its peak extinction x the setting (0 = off)
     flash: [f32; 4],    // x: the lightning's scene flash at the impostor's camera
-    strikes: [[f32; 4]; 6], // active strikes: xyz planet-frame surface position, w intensity
+    strikes: [[f32; 4]; crate::weather::lightning::MAX_STRIKES], // active strikes: xyz planet-frame surface position, w intensity
     model: [[f32; 4]; 3], // planet frame -> space rotation (Planet::orientation), mat3 columns
 }
 

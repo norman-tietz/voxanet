@@ -92,6 +92,12 @@ pub(crate) struct TerrainShape {
     lakes: Vec<Lake>,
 }
 
+// the relief R (highest mountains above sea level, in layers) of a planet of this radius, `scale` being
+// its PlanetTraits::relief; also the impostors' storm fog base (impostor::storm_base), which has no shape
+pub(crate) fn relief_for(radius: f32, scale: f32) -> f32 {
+    (3.0 * radius.sqrt() * scale).min(0.2 * radius)
+}
+
 impl TerrainShape {
     #[cfg(test)]
     pub(crate) fn new(
@@ -118,7 +124,7 @@ impl TerrainShape {
     ) -> Self {
         let radius = resolution as f32 / 2.0;
         let mut shape = Self {
-            relief: (3.0 * radius.sqrt() * tweaks.relief).min(0.2 * radius),
+            relief: relief_for(radius, tweaks.relief),
             hill_freq: (radius / 35.0).max(2.0),
             ridge_freq: (radius / 120.0).max(2.5),
             range_freq: (radius / 400.0).max(1.5),
