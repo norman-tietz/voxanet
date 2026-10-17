@@ -4,6 +4,8 @@
 
 use glam::Vec3;
 
+use super::lightning::{pcg, unit};
+
 pub const LEVELS: u32 = 4; // 2^4 = 16 segments in the main channel
 const BRANCHES: usize = 2;
 const BRANCH_SEGMENTS: usize = 4;
@@ -19,17 +21,11 @@ pub struct Segment {
     pub glow: f32,  // 1 on the main channel, less on branches
 }
 
-fn pcg(mut h: u32) -> u32 {
-    h = h.wrapping_mul(747796405).wrapping_add(2891336453);
-    h = ((h >> ((h >> 28) + 4)) ^ h).wrapping_mul(277803737);
-    (h >> 22) ^ h
-}
-
 struct Rng(u32);
 impl Rng {
     fn next(&mut self) -> f32 {
         self.0 = pcg(self.0);
-        (self.0 >> 8) as f32 / 16_777_216.0
+        unit(self.0)
     }
     fn signed(&mut self) -> f32 {
         self.next() * 2.0 - 1.0

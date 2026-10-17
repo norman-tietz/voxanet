@@ -5,6 +5,7 @@
 // near a camera, their flash envelope, and the values for the GPU. atmosphere.wgsl adds the cloud glow
 // and the flash; bolt.rs builds the bolt geometry.
 
+use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use super::{smoothstep, storm, WeatherForce, WeatherKind};
@@ -62,7 +63,8 @@ pub fn kind_rate(kind: WeatherKind) -> f32 {
     }
 }
 
-fn pcg(mut h: u32) -> u32 {
+// the PCG integer hash (also bolt.rs's random sequence)
+pub(super) fn pcg(mut h: u32) -> u32 {
     h = h.wrapping_mul(747796405).wrapping_add(2891336453);
     h = ((h >> ((h >> 28) + 4)) ^ h).wrapping_mul(277803737);
     (h >> 22) ^ h
@@ -92,7 +94,8 @@ fn face_dir(face: i32, u: f32, v: f32) -> Vec3 {
     p.normalize()
 }
 
-fn unit(h: u32) -> f32 {
+// a hash's top 24 bits as a float in [0, 1)
+pub(super) fn unit(h: u32) -> f32 {
     (h >> 8) as f32 / 16_777_216.0
 }
 
@@ -256,8 +259,6 @@ pub fn frame_strikes(
         force,
     )
 }
-
-use bytemuck::{Pod, Zeroable};
 
 // one bolt segment for lightning.wgsl: a (xyz, width), b (xyz, brightness)
 #[repr(C)]
