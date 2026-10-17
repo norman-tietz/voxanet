@@ -74,14 +74,22 @@ impl MapLayout {
         (D_MAX - STAR_MAP_RADIUS) / self.orbits.len().max(1) as f32
     }
 
-    // the radius of a moon's ring around its parent on the map: compressed (order kept), outside the
-    // parent's marker, inside half an orbit gap
+    // the radius of a moon's ring around its parent on the map: the parent's moons spread evenly in
+    // order between just outside its marker and 0.45 of an orbit gap (less the moon marker), so the rings
+    // keep their order, the moon markers stay apart, and neighbouring parents' rings don't cross; a big
+    // parent whose marker leaves no such room gets the room its moons need instead
     pub fn moon_ring_radius(&self, system: &SolarSystem, i: usize) -> f32 {
         let m = &system.planets[i];
-        let parent = m
-            .parent
-            .map_or(0.0, |p| self.radius(system.planets[p].radius));
-        (parent * (1.8 + 0.9 * m.moon_index as f32)).min(0.45 * self.orbit_gap())
+        let Some(parent) = m.parent else { return 0.0 };
+        let marker = self.radius(system.planets[parent].radius);
+        let (n, mm) = system
+            .moons_of(parent)
+            .fold((0usize, 0.0f32), |(n, mm), j| {
+                (n + 1, mm.max(self.radius(system.planets[j].radius)))
+            });
+        let inner = 1.15 * marker + mm;
+        let outer = (0.45 * self.orbit_gap() - mm).max(inner + 2.2 * mm * (n + 1) as f32);
+        inner + (outer - inner) * (m.moon_index + 1) as f32 / (n + 1) as f32
     }
 
     // body i's map position at time t: a planet by its distance from the star, a moon on its ring around
@@ -575,6 +583,51 @@ mod tests {
             "outside the parent's marker"
         );
         assert!(d < map.orbit_gap() * 0.5, "inside half an orbit gap: {d}");
+    }
+
+    #[test]
+    fn six_moon_rings_keep_order_and_stay_apart() {
+        use crate::space::solar_system::{tests::with_moon, Planet};
+        let mut s = with_moon();
+        let template = s.planets.pop().unwrap();
+        for parent in [6usize, 7] {
+            for k in 0..6 {
+                s.planets.push(Planet {
+                    parent: Some(parent),
+                    moon_index: k,
+                    radius: 40.0 + 2.0 * k as f32,
+                    parent_orbit: Some(s.planets[parent].own_orbit()),
+                    ..template
+                });
+            }
+        }
+        let map = MapLayout::new(&s);
+        for parent in [6usize, 7] {
+            let moons: Vec<usize> = s.moons_of(parent).collect();
+            assert_eq!(moons.len(), 6);
+            let marker = map.radius(s.planets[parent].radius);
+            let rings: Vec<f32> = moons.iter().map(|&j| map.moon_ring_radius(&s, j)).collect();
+            assert!(rings[0] > marker, "outside the parent's marker");
+            for w in 0..5 {
+                let (a, b) = (moons[w], moons[w + 1]);
+                let gap = rings[w + 1] - rings[w];
+                assert!(gap > 0.0, "strictly increasing: {rings:?}");
+                let sizes = map.radius(s.planets[a].radius) + map.radius(s.planets[b].radius);
+                assert!(gap > sizes, "markers apart: {gap} vs {sizes}");
+            }
+        }
+        // neighbouring parents (one orbit gap apart) don't reach into each other's rings
+        let reach = |parent: usize| {
+            s.moons_of(parent)
+                .map(|j| map.moon_ring_radius(&s, j) + map.radius(s.planets[j].radius))
+                .fold(0.0, f32::max)
+        };
+        assert!(
+            reach(6) + reach(7) < map.orbit_gap(),
+            "{} {}",
+            reach(6),
+            reach(7)
+        );
     }
 
     #[test]
