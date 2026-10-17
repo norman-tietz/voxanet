@@ -117,6 +117,7 @@ fn fly_terrain_floor(
     horizontal_dir: Vec3,
     lookahead_dist: f32,
     planet: &PlanetData,
+    plants: bool,
 ) -> f32 {
     let res = planet.resolution;
     let mut max_height = 0u32;
@@ -124,7 +125,13 @@ fn fly_terrain_floor(
         let dist = lookahead_dist * (i as f32) / (FLY_LOOKAHEAD_SAMPLES as f32);
         let sample_pos = pos + horizontal_dir * dist;
         if let Some(id) = planet.cell_at(sample_pos) {
-            max_height = max_height.max(planet.effective_height(id.face, id.u, id.v));
+            // a landing touches down on top of trunks and canopies (and of edits), a cruise ignores them
+            let h = if plants {
+                planet.top(id.face, id.u, id.v)
+            } else {
+                planet.effective_height(id.face, id.u, id.v)
+            };
+            max_height = max_height.max(h);
         }
     }
     crate::meshing::gen::CoordSystem::get_layer_radius(max_height, res) + FLY_HOVER_CLEARANCE
@@ -501,7 +508,7 @@ impl Player {
             };
             let lookahead = (vel_horizontal.length() * FLY_LOOKAHEAD_TIME)
                 .clamp(FLY_LOOKAHEAD_MIN, FLY_LOOKAHEAD_MAX);
-            let floor = fly_terrain_floor(self.position, look_dir, lookahead, planet);
+            let floor = fly_terrain_floor(self.position, look_dir, lookahead, planet, self.landing);
             let radius = self.position.length();
             let vert = self.velocity.dot(up);
             let clamped_vert = fly_max_descent(vert, radius, floor, dt);
@@ -579,7 +586,7 @@ impl Player {
             };
             let lookahead = (vel_horizontal.length() * FLY_LOOKAHEAD_TIME)
                 .clamp(FLY_LOOKAHEAD_MIN, FLY_LOOKAHEAD_MAX);
-            let floor = fly_terrain_floor(self.position, dir, lookahead, planet);
+            let floor = fly_terrain_floor(self.position, dir, lookahead, planet, self.landing);
             let radius = self.position.length();
             let climb = fly_floor_climb(radius, floor, dt);
             if climb > 0.0 {
@@ -650,7 +657,7 @@ impl Player {
         self.velocity += (desired - self.velocity) * (WATER_DRAG * dt).min(1.0);
 
         let (new_pos, new_vel, grounded) =
-            Physics::solve_movement(self.position, self.velocity, dt, planet, false);
+            Physics::solve_movement(self.position, self.velocity, dt, planet, self.landing);
         self.position = new_pos;
         self.velocity = new_vel;
         self.grounded = grounded;
@@ -1115,6 +1122,53 @@ mod tests {
         assert!(lowest > -0.02, "overshot to {lowest}");
     }
 
+    // an F landing over a tree touches down on top of it, never inside the trunk or crown
+    #[test]
+    fn landing_over_a_tree_touches_down_on_top_of_it() {
+        use crate::meshing::gen::CoordSystem;
+        use crate::planet::flora;
+        let mut planet =
+            PlanetData::new_for_type(128, 7, crate::planet::biome::PlanetType::EarthLike)
+                .with_flora(true, 3.0);
+        planet.cells = crate::planet::data::CellShape::Hex;
+        let cfg = planet.flora.as_ref().unwrap().cfg;
+        let plant = (0..128u32)
+            .flat_map(|u| (0..128u32).map(move |v| (u, v)))
+            .find_map(|(u, v)| flora::anchor_at(&planet, &cfg, 0, u, v))
+            .expect("an anchor");
+        let top = planet.top(0, plant.u, plant.v);
+        assert!(top > planet.surface(0, plant.u, plant.v) + 3, "a tall tree");
+        let dir = CoordSystem::get_block_center(0, plant.u, plant.v, top, 128).normalize();
+        let mut player = Player::new();
+        player.spawn(dir * CoordSystem::get_layer_radius(top + 20, 128));
+        player.landing = true;
+        let mut down = false;
+        for _ in 0..3000 {
+            down = player.update(
+                1.0 / 60.0,
+                &planet,
+                Vec3::ZERO,
+                false,
+                false,
+                (0.0, 0.0),
+                0.0,
+                NO_KEYS,
+                true,
+                false,
+            );
+            if down {
+                break;
+            }
+        }
+        assert!(down, "never touched down");
+        for (id, _) in flora::plant_blocks(&planet, &plant, &cfg) {
+            assert!(
+                !Physics::overlaps_block(player.position, id, &planet),
+                "inside the tree at {id:?}"
+            );
+        }
+    }
+
     // an F landing ignores the roll keys and eases the roll level; the take-off climb ignores them too
     #[test]
     fn landing_levels_the_roll_and_ignores_the_roll_keys() {
@@ -1267,7 +1321,7 @@ mod tests {
         let pos =
             crate::meshing::gen::CoordSystem::get_vertex_pos(face, u, v, h + 20, planet.resolution);
 
-        let floor = fly_terrain_floor(pos, Vec3::ZERO, 30.0, &planet);
+        let floor = fly_terrain_floor(pos, Vec3::ZERO, 30.0, &planet, false);
         let expected = crate::meshing::gen::CoordSystem::get_layer_radius(h, planet.resolution)
             + FLY_HOVER_CLEARANCE;
         assert!(
