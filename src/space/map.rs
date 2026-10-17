@@ -297,6 +297,25 @@ pub fn shows_label(
     i == current || hover == Some(i) || selected == Some(i) || visited
 }
 
+// whether body i's label is drawn: planets always; a moon only when hovered, selected, the body you are at,
+// its parent hovered or selected, or its ring is wide enough on screen (`ring_px`, projected radius) for
+// the labels not to clump
+pub const MOON_LABEL_RING_PX: f32 = 40.0;
+pub fn shows_body_label(
+    i: usize,
+    parent: Option<usize>,
+    hover: Option<usize>,
+    selected: Option<usize>,
+    here: Option<usize>,
+    ring_px: f32,
+) -> bool {
+    let Some(parent) = parent else { return true };
+    [hover, selected].contains(&Some(i))
+        || here == Some(i)
+        || [hover, selected].contains(&Some(parent))
+        || ring_px > MOON_LABEL_RING_PX
+}
+
 // the open map's state (main.rs): camera, mouse, hover and selection
 pub struct MapView {
     pub camera: MapCamera,
@@ -702,6 +721,46 @@ mod tests {
         let n2 = clip.truncate() / clip.w;
         let p2 = Vec2::new((n2.x * 0.5 + 0.5) * screen.0, (0.5 - n2.y * 0.5) * screen.1);
         assert!((p2 - px).length() < 12.0);
+    }
+
+    #[test]
+    fn moon_labels_show_only_when_they_will_not_clump() {
+        // planets always
+        assert!(shows_body_label(2, None, None, None, None, 0.0));
+        // moon 7 of parent 2: hidden when small and idle
+        assert!(!shows_body_label(7, Some(2), None, None, None, 10.0));
+        assert!(!shows_body_label(
+            7,
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            10.0
+        ));
+        assert!(
+            shows_body_label(7, Some(2), Some(7), None, None, 10.0),
+            "hovered"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, Some(7), None, 10.0),
+            "selected"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, None, Some(7), 10.0),
+            "here"
+        );
+        assert!(
+            shows_body_label(7, Some(2), Some(2), None, None, 10.0),
+            "parent hovered"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, Some(2), None, 10.0),
+            "parent selected"
+        );
+        assert!(
+            shows_body_label(7, Some(2), None, None, None, 41.0),
+            "wide ring"
+        );
     }
 
     #[test]

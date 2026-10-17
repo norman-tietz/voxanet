@@ -3935,9 +3935,17 @@ impl Renderer {
                 &mut rings,
             );
         }
+        // your place: the ship's mapped position in space, else a ring around the body you are at
         let ship_map = ship.map(|p| map.position(p - star));
         if let Some(c) = ship_map {
             polyline(&circle(c, 0.8), [0.4, 1.0, 0.5, 0.9], true, &mut rings);
+        } else if let Some(h) = here_planet {
+            polyline(
+                &circle(mapped(h), ring_r(h) * 1.25),
+                [0.4, 1.0, 0.5, 0.9],
+                true,
+                &mut rings,
+            );
         }
 
         self.system.render(
@@ -3968,6 +3976,22 @@ impl Renderer {
             };
             let def = p.planet_type.def();
             let r_px = map.radius(p.radius) / (c - eye).length() / (MAP_FOV_Y / screen.1);
+            let ring_px = match p.parent {
+                Some(_) => {
+                    map.moon_ring_radius(system, i) / (c - eye).length() / (MAP_FOV_Y / screen.1)
+                }
+                None => 0.0,
+            };
+            if !crate::space::map::shows_body_label(
+                i,
+                p.parent,
+                map_view.hover,
+                map_view.selected,
+                here_planet,
+                ring_px,
+            ) {
+                continue;
+            }
             let bright = map_view.hover == Some(i) || map_view.selected == Some(i);
             let here = if here_planet == Some(i) {
                 "  <- you"
@@ -3977,9 +4001,16 @@ impl Renderer {
             let k = if p.is_moon() { 0.8 } else { 1.0 };
             texts.push((
                 format!(
-                    "#{} {}{here}",
-                    crate::space::solar_system::body_label(system, i),
-                    def.name
+                    "{}{here}",
+                    if p.is_moon() {
+                        format!("#{}", crate::space::solar_system::body_label(system, i))
+                    } else {
+                        format!(
+                            "#{} {}",
+                            crate::space::solar_system::body_label(system, i),
+                            def.name
+                        )
+                    }
                 ),
                 px.x + r_px + 6.0,
                 px.y - 9.0,

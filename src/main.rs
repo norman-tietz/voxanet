@@ -1417,6 +1417,9 @@ impl Game {
                 },
                 SystemRequest::Time(seconds) => {
                     clock.set(seconds);
+                    // a trip planned for the old time would arrive at where its target is not: end it
+                    *travel = None;
+                    renderer.travel_hud = None;
                     say(console, &format!("Game clock set to {seconds} s."));
                 }
                 SystemRequest::Goto { body, radii } => {
@@ -2100,14 +2103,11 @@ impl Game {
                     });
                     let (here, ship) = match self.mode {
                         GameMode::Planet => (Some(self.loaded_world), None),
-                        GameMode::Space => (
-                            None,
-                            Some(match self.flight_frame {
-                                FlightFrame::Free => self.space_flight.position,
-                                FlightFrame::Captured(i) => self.system.planets[i]
-                                    .from_planet_frame(self.space_flight.position, t),
-                            }),
-                        ),
+                        // captured by a body: you are at that body, not a free "you" beside it
+                        GameMode::Space => match self.flight_frame {
+                            FlightFrame::Free => (None, Some(self.space_flight.position)),
+                            FlightFrame::Captured(i) => (Some(i), None),
+                        },
                     };
                     // a running trip's path, drawn on the map
                     let line: Vec<glam::DVec3> = match &self.travel {
