@@ -413,12 +413,12 @@ mod tests {
     #[test]
     fn a_nearer_moon_blocks_landing_and_forces_liftoff() {
         let s = crate::space::solar_system::tests::with_moon();
-        let (m, t) = (s.planets.len() - 1, 50.0);
+        let t = 50.0;
         let (pp, mp) = (&s.planets[2], &s.planets[s.planets.len() - 1]);
         let moon_local = pp.to_planet_frame(mp.position_at(t), t);
-        // 2 moon radii from the moon, ~3 parent radii from the parent: inside the landing distance
-        let local = moon_local + moon_local.normalize() * 2.0 * mp.radius as f64;
-        assert!(local.length() / (pp.radius as f64) < LAND_HANDOVER_RADII + 0.5);
+        // 2 moon radii from the moon on the parent's side: inside the landing distance
+        let local = moon_local - moon_local.normalize() * 2.0 * mp.radius as f64;
+        assert!(should_land(local.length() / pp.radius as f64, true));
         assert!(!may_land_on(&s, 2, local, t, true));
         assert!(must_lift_off(&s, 2, local, t));
         // far from the moon, landing works and no liftoff is forced
@@ -426,7 +426,6 @@ mod tests {
         assert!(may_land_on(&s, 2, away, t, true));
         assert!(!may_land_on(&s, 2, away, t, false));
         assert!(!must_lift_off(&s, 2, away, t));
-        let _ = m;
     }
 
     // the handover overlay starts as the impostor alone and fades out smoothly, then stops
