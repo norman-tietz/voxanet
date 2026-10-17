@@ -1636,6 +1636,10 @@ mod tests {
             (16 + 1 + 6) * 16 + 3 * 16
         );
         // + plastic, + atmosphere, + fog_tint, + flash, + strikes
+        let size = |name| crate::render::renderer::tests::wgsl_struct_size(SPACE_SHADER, name);
+        assert_eq!(std::mem::size_of::<PlanetUniform>(), size("PlanetUniform"));
+        assert_eq!(std::mem::size_of::<SpaceCameraUniform>(), size("Camera"));
+        assert_eq!(std::mem::size_of::<StarUniform>(), size("StarUniform"));
     }
 
     // the impostors' look with no plastic or fill-light tuning, and this fog, weather and lightning

@@ -1357,9 +1357,13 @@ mod tests {
 
     #[test]
     fn wgsl_constants_match_the_rust_mirror() {
-        let w = include_str!("weather.wgsl");
-        for (name, v) in CONSTANTS {
-            let line = w
+        assert_wgsl_constants(include_str!("weather.wgsl"), &CONSTANTS);
+    }
+
+    // every (name, value) in `constants` is a `const name: f32 = value;` line of the WGSL `source`
+    pub(crate) fn assert_wgsl_constants(source: &str, constants: &[(&str, f32)]) {
+        for &(name, v) in constants {
+            let line = source
                 .lines()
                 .find(|l| l.starts_with(&format!("const {name}: f32 = ")))
                 .unwrap_or_else(|| panic!("{name} missing"));
@@ -1380,5 +1384,14 @@ mod tests {
     #[test]
     fn weather_shader_is_valid_wgsl() {
         crate::render::renderer::tests::assert_valid_wgsl(WEATHER_FN_SHADER);
+    }
+
+    // WeatherForce must match weather.wgsl's (the force_uniform the bakes and the scene read)
+    #[test]
+    fn weather_force_matches_the_wgsl_layout() {
+        assert_eq!(
+            std::mem::size_of::<WeatherForce>(),
+            crate::render::renderer::tests::wgsl_struct_size(WEATHER_FN_SHADER, "WeatherForce")
+        );
     }
 }

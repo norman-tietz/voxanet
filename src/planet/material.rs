@@ -233,10 +233,18 @@ mod tests {
                     }
                 }
             }
-            println!("res {res}: floor {floor_beach}/{floor}, highland basalt {high_dark}/{high}");
-            assert!(floor > 100 && high > 100);
-            assert!(floor_beach as f32 >= 0.8 * floor as f32, "res {res}");
-            assert!((high_dark as f32) < 0.3 * high as f32, "res {res}");
+            assert!(
+                floor > 100 && high > 100,
+                "res {res}: {floor} floor, {high} highland"
+            );
+            assert!(
+                floor_beach as f32 >= 0.8 * floor as f32,
+                "res {res}: floor basalt {floor_beach}/{floor}"
+            );
+            assert!(
+                (high_dark as f32) < 0.3 * high as f32,
+                "res {res}: highland basalt {high_dark}/{high}"
+            );
         }
     }
 

@@ -91,15 +91,7 @@ pub fn mist_optical_depth(mist: f32, h0: f32, h1: f32, dist: f32) -> f32 {
     if mist <= 0.0 {
         return 0.0;
     }
-    let (h0, h1) = (h0.max(0.0), h1.max(0.0));
-    let (e0, e1) = ((-h0 / MIST_HEIGHT).exp(), (-h1 / MIST_HEIGHT).exp());
-    let dh = h1 - h0;
-    let mean = if dh.abs() > 1e-3 {
-        MIST_HEIGHT * (e0 - e1) / dh
-    } else {
-        e0
-    };
-    mist * MIST_EXTINCTION * mean * dist
+    mist * MIST_EXTINCTION * mean_falloff(h0, h1, MIST_HEIGHT) * dist
 }
 
 // mean of exp(-h / H) along a straight climb from height h0 to h1 (both clamped to >= 0)
@@ -120,7 +112,6 @@ fn mean_falloff(h0: f32, h1: f32, scale: f32) -> f32 {
 // extinction there, and falls off with STORM_HEIGHT above it; from altitude only the storm at the shaded
 // point counts (the camera's own weight fades with its height).
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub fn storm_optical_depth(
     peak: f32,
     storm_cam: f32,
@@ -233,8 +224,13 @@ impl FogParams {
         ]
     }
 }
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::planet::biome::PlanetType;
+    use glam::Vec3;
+
     #[test]
     fn sun_elevation_is_the_sine_of_the_sun_above_the_local_horizon() {
         let up = Vec3::new(0.0, 1.0, 0.0);
@@ -251,28 +247,8 @@ mod tests {
     #[test]
     fn wgsl_constants_match_the_rust_mirror() {
         let w = include_str!("../render/atmosphere.wgsl");
-        for (name, v) in CONSTANTS {
-            let line = w
-                .lines()
-                .find(|l| l.starts_with(&format!("const {name}: f32 = ")))
-                .unwrap_or_else(|| panic!("{name} missing"));
-            let value: f32 = line
-                .split('=')
-                .nth(1)
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            assert_eq!(value, v, "{name}");
-        }
+        crate::weather::tests::assert_wgsl_constants(w, &CONSTANTS);
     }
-
-    use super::*;
-    use crate::planet::biome::PlanetType;
-    use glam::Vec3;
 
     fn kind(t: PlanetType) -> WeatherKind {
         WeatherKind::for_planet(t)
@@ -302,6 +278,7 @@ mod tests {
         assert_eq!(p(PlanetType::EarthLike), p(PlanetType::Ocean));
         assert!(p(PlanetType::EarthLike) > 0.0);
         assert_eq!(p(PlanetType::Shattered), 0.0);
+        assert_eq!(p(PlanetType::Cratered), 0.0, "no air, no haze");
     }
 
     #[test]
@@ -320,6 +297,7 @@ mod tests {
             PlanetType::Volcanic,
             PlanetType::Ice,
             PlanetType::Shattered,
+            PlanetType::Cratered,
         ] {
             assert_eq!(mist_strength(kind(ty), dir, t, 0.0), 0.0, "{ty:?}");
         }

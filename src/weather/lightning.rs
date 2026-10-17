@@ -515,23 +515,7 @@ mod tests {
     #[test]
     fn wgsl_constants_match_the_rust_mirror() {
         let w = include_str!("../render/atmosphere.wgsl");
-        for (name, v) in CONSTANTS {
-            let line = w
-                .lines()
-                .find(|l| l.starts_with(&format!("const {name}: f32 = ")))
-                .unwrap_or_else(|| panic!("{name} missing"));
-            let value: f32 = line
-                .split('=')
-                .nth(1)
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            assert_eq!(value, v, "{name}");
-        }
+        crate::weather::tests::assert_wgsl_constants(w, &CONSTANTS);
         assert!(
             w.contains("array<vec4<f32>, 6>"),
             "MAX_STRIKES is 6 in the WGSL arrays"

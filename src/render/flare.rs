@@ -155,7 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn flare_uniform_is_six_vec4s() {
+    fn flare_uniform_is_seven_vec4s() {
         assert_eq!(std::mem::size_of::<FlareUniform>(), 7 * 16);
+        assert_eq!(
+            std::mem::size_of::<FlareUniform>(),
+            crate::render::renderer::tests::wgsl_struct_size(
+                crate::render::renderer::FLARE_SHADER,
+                "Flare"
+            )
+        );
     }
 }

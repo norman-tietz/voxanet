@@ -4876,11 +4876,37 @@ pub(crate) mod tests {
         assert_valid_wgsl(FLARE_SHADER);
     }
 
-    // the Rust BiomeUniform must match the WGSL struct: 15 vec4s (the sun, the star's look and frame,
-    // the weather rule and cover)
+    // the byte size naga gives WGSL struct `name` in `source` (the layout the GPU reads)
+    pub(crate) fn wgsl_struct_size(source: &str, name: &str) -> usize {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("WGSL parse error:\n{}", e.emit_to_string(source)));
+        let size = module.types.iter().find_map(|(_, t)| match t.inner {
+            naga::TypeInner::Struct { span, .. } if t.name.as_deref() == Some(name) => {
+                Some(span as usize)
+            }
+            _ => None,
+        });
+        size.unwrap_or_else(|| panic!("struct {name} missing"))
+    }
+
+    // the Rust BiomeUniform must match the WGSL struct: 16 vec4s (the sun, the star's look and frame,
+    // the weather rule and cover, the atmosphere density)
     #[test]
     fn biome_uniform_matches_the_wgsl_layout() {
         assert_eq!(std::mem::size_of::<BiomeUniform>(), 16 * 16);
+        assert_eq!(
+            std::mem::size_of::<BiomeUniform>(),
+            wgsl_struct_size(SCENE_SHADER, "Biome")
+        );
+    }
+
+    // GlobalUniform must match shader.wgsl's Global
+    #[test]
+    fn global_uniform_matches_the_wgsl_layout() {
+        assert_eq!(
+            std::mem::size_of::<GlobalUniform>(),
+            wgsl_struct_size(SCENE_SHADER, "Global")
+        );
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did
