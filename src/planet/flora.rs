@@ -296,7 +296,11 @@ fn fitting_species(data: &PlanetData, cfg: &FloraConfig, face: u8, u: u32, v: u3
     let all = species_for(cfg.planet_type);
     let h = data.effective_height(face, u, v);
     let sea = data.terrain.sea_level();
-    if all.is_empty() || h <= sea || data.terrain.water_level(face, u, v) >= h {
+    if all.is_empty()
+        || h <= sea
+        || data.terrain.water_level(face, u, v) >= h
+        || data.terrain.in_lake_region(face, u, v)
+    {
         return Vec::new();
     }
     let peak = data.terrain.height_range().1;
@@ -834,8 +838,67 @@ mod tests {
                     sp.name
                 );
                 assert!((sp.height.0..=sp.height.1).contains(&pl.height));
+                // independent of the formulas above: the rules as the player would see them
+                assert_ne!(ground, BlockType::Sand, "{} on a beach", sp.name);
+                assert!(
+                    !p.terrain.in_lake_region(face, pl.u, pl.v),
+                    "{} in a lake region",
+                    sp.name
+                );
+                let above = BlockId {
+                    face,
+                    layer: h + 1,
+                    u: pl.u,
+                    v: pl.v,
+                };
+                assert!(!p.exists(above), "the cell over the ground is open");
+                if !sp.beach_ok {
+                    for ring in rings(&p, face, pl.u, pl.v, 1) {
+                        for (nf, nu, nv) in ring {
+                            assert!(
+                                p.effective_height(nf, nu, nv) > p.terrain.water_level(nf, nu, nv),
+                                "{} next to open water",
+                                sp.name
+                            );
+                        }
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn no_plants_grow_in_a_lake_region() {
+        let seed = (1..60u32)
+            .find(|&s| {
+                PlanetData::new_for_type(256, s, PlanetType::EarthLike)
+                    .terrain
+                    .lake_count()
+                    > 0
+            })
+            .expect("a seed with lakes");
+        let p = PlanetData::new_for_type(256, seed, PlanetType::EarthLike);
+        let cfg = FloraConfig {
+            planet_type: PlanetType::EarthLike,
+            seed,
+            density: 3.0,
+        };
+        let sea = p.terrain.sea_level();
+        let mut shore_land = 0;
+        for face in 0..6u8 {
+            for u in 0..256 {
+                for v in 0..256 {
+                    if p.terrain.in_lake_region(face, u, v) {
+                        shore_land += (p.effective_height(face, u, v) > sea) as usize;
+                        assert!(anchor_at(&p, &cfg, face, u, v).is_none());
+                    }
+                }
+            }
+        }
+        assert!(
+            shore_land > 0,
+            "the lakes have dry columns in their regions"
+        );
     }
 
     #[test]
@@ -919,6 +982,7 @@ mod tests {
         for (res, cells) in [
             (64u32, CellShape::Hex),
             (100, CellShape::Hex),
+            (100, CellShape::Square),
             (64, CellShape::Square),
         ] {
             let mut p = PlanetData::new_for_type(res, 11, PlanetType::EarthLike);

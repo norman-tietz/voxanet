@@ -716,6 +716,12 @@ impl PlanetTerrain {
         self.water_levels[self.water_body[Self::get_index(face, u, v, self.resolution)] as usize]
     }
 
+    // whether the column lies inside a lake's region (under water or on its shore and islands)
+    pub fn in_lake_region(&self, face: u8, u: u32, v: u32) -> bool {
+        let (u, v) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
+        self.water_body[Self::get_index(face, u, v, self.resolution)] != 0
+    }
+
     #[cfg(test)]
     pub fn lake_count(&self) -> usize {
         self.water_levels.len() - 1
