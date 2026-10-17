@@ -716,6 +716,12 @@ impl PlanetTerrain {
         self.water_levels[self.water_body[Self::get_index(face, u, v, self.resolution)] as usize]
     }
 
+    // whether the column lies inside a lake's region (under water or on its shore and islands)
+    pub fn in_lake_region(&self, face: u8, u: u32, v: u32) -> bool {
+        let (u, v) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
+        self.water_body[Self::get_index(face, u, v, self.resolution)] != 0
+    }
+
     #[cfg(test)]
     pub fn lake_count(&self) -> usize {
         self.water_levels.len() - 1
@@ -838,7 +844,7 @@ impl NoiseGenerator {
     }
 
     // fractal Brownian motion, roughly -1..1
-    fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
+    pub(crate) fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
         let (mut sum, mut amp, mut norm, mut freq) = (0.0, 1.0, 0.0, 1.0);
         for _ in 0..octaves {
             sum += self.perlin(p * freq) * amp;

@@ -13,6 +13,34 @@ pub enum SystemRequest {
     }, // debug: append a planet to the solar system
 }
 
+// /plants: no argument shows the state
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlantsCommand {
+    Show,
+    On,
+    Off,
+    Density(f32),
+}
+
+pub const PLANTS_USAGE: &str = "Usage: /plants [on|off|density <0-3>]";
+
+impl PlantsCommand {
+    pub fn parse(args: &[&str]) -> Result<Self, &'static str> {
+        match args {
+            [] => Ok(Self::Show),
+            ["on"] => Ok(Self::On),
+            ["off"] => Ok(Self::Off),
+            ["density", v] => v
+                .parse::<f32>()
+                .ok()
+                .filter(|d| (0.0..=3.0).contains(d))
+                .map(Self::Density)
+                .ok_or(PLANTS_USAGE),
+            _ => Err(PLANTS_USAGE),
+        }
+    }
+}
+
 // every command with its options, shown when the console opens and by `help`; two per line so the
 // whole list fits the quarter-screen console (about 8 lines at 800 px)
 const HELP_LINES: [&str; 13] = [
@@ -27,7 +55,7 @@ const HELP_LINES: [&str; 13] = [
     "  /light [bounce <0-1>|wrap <0-0.5>]   /shadow [on|off|sun <0-10>]",
     "  /weather [on|off|auto|clear|rain|storm|snow|particles [on|off]|fog [on|off|density <v>|mist <v>]|lightning [on|off|rate <v>]]   /perf <seconds> [label]",
     "  /system home | goto <n> <radii> | add earthlike|volcanic|ice|desert|toxic|ocean|shattered|cratered <20-500>   /map [n]   /travel <n>",
-    "  /galaxy [n]   /jump <n>",
+    "  /galaxy [n]   /jump <n>   /plants [on|off|density <0-3>]",
     "  /screenshot <path>             help",
 ];
 const HELP_HEADER_COLOR: [f32; 3] = [0.0, 1.0, 1.0];
@@ -92,6 +120,7 @@ pub struct Console {
     pub weather_request: Option<crate::weather::WeatherCommand>, // set by /weather, applied by the game loop
     pub light_request: Option<crate::render::light::LightCommand>, // set by /light, applied by the game loop (renderer)
     pub shadow_request: Option<crate::render::shadow::ShadowCommand>, // set by /shadow, applied by the game loop (renderer)
+    pub plants_request: Option<PlantsCommand>, // set by /plants, applied by the game loop (planet, renderer)
     command_history: Vec<String>, // submitted commands, oldest first (up/down), separate from the output log
     history_cursor: Option<usize>, // the entry up/down currently shows; None = not browsing
 
@@ -122,6 +151,7 @@ impl Console {
             weather_request: None,
             light_request: None,
             shadow_request: None,
+            plants_request: None,
             command_history: Vec::new(),
             history_cursor: None,
             history_capacity: 50,
@@ -332,6 +362,11 @@ impl Console {
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
             },
 
+            "/plants" => match PlantsCommand::parse(&parts[1..]) {
+                Ok(cmd) => self.plants_request = Some(cmd),
+                Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
+            },
+
             "/shadow" => match crate::render::shadow::ShadowCommand::parse(&parts[1..]) {
                 Ok(cmd) => self.shadow_request = Some(cmd),
                 Err(usage) => self.log(usage, [1.0, 0.5, 0.0]),
@@ -517,6 +552,28 @@ mod tests {
         );
         let c = console_with(&["/weather hail"]);
         assert_eq!(c.weather_request, None);
+    }
+
+    #[test]
+    fn plants_command_sets_a_request() {
+        assert_eq!(
+            console_with(&["/plants"]).plants_request,
+            Some(PlantsCommand::Show)
+        );
+        assert_eq!(
+            console_with(&["/plants off"]).plants_request,
+            Some(PlantsCommand::Off)
+        );
+        assert_eq!(
+            console_with(&["/plants on"]).plants_request,
+            Some(PlantsCommand::On)
+        );
+        assert_eq!(
+            console_with(&["/plants density 2"]).plants_request,
+            Some(PlantsCommand::Density(2.0))
+        );
+        assert_eq!(console_with(&["/plants density 4"]).plants_request, None);
+        assert_eq!(console_with(&["/plants lots"]).plants_request, None);
     }
 
     #[test]

@@ -58,15 +58,13 @@ fn parse_seed(args: &[String]) -> u64 {
         .unwrap_or(1)
 }
 
-// the world-space distance from the planet center to just above the ground along `dir`, using the
-// liquid-less-planet-aware effective height so this never spawns the player inside filled-in ocean
+// the world-space distance from the planet center `margin` above the column's highest solid block along
+// `dir` (plants included), so this never spawns the player inside filled-in ocean or a tree
 fn spawn_radius(planet: &PlanetData, dir: glam::Vec3, margin: f32) -> f32 {
     let res = planet.resolution;
     if let Some(id) = planet.cell_at(dir * (res as f32 / 2.0)) {
-        crate::meshing::gen::CoordSystem::get_layer_radius(
-            planet.effective_height(id.face, id.u, id.v),
-            res,
-        ) + margin
+        crate::meshing::gen::CoordSystem::get_layer_radius(planet.top(id.face, id.u, id.v), res)
+            + margin
     } else {
         (res as f32 / 2.0) + 20.0
     }
@@ -199,6 +197,22 @@ fn loaded_here(loaded: (usize, usize), current: usize, i: usize) -> bool {
     loaded == (current, i)
 }
 
+// the /plants setting after a command: `on` keeps the density that `off` left (like /film keeps its
+// values), and a density of 0 comes back as the default 1
+fn plants_after(
+    cmd: crate::app::cmd::PlantsCommand,
+    on: bool,
+    density: f32,
+) -> Option<(bool, f32)> {
+    use crate::app::cmd::PlantsCommand;
+    match cmd {
+        PlantsCommand::Show => None,
+        PlantsCommand::On => Some((true, if on || density > 0.0 { density } else { 1.0 })),
+        PlantsCommand::Off => Some((false, density)),
+        PlantsCommand::Density(d) => Some((d > 0.0, d)),
+    }
+}
+
 // makes a baked planet the voxel engine's world: palette, full mesh reload streaming from
 // `stream_from` (planet frame), near impostor for the space renderer
 fn install_world(
@@ -207,10 +221,16 @@ fn install_world(
     planet: &mut PlanetData,
     baked: BakedPlanet,
     stream_from: glam::Vec3,
+    plants: Option<(bool, f32)>, // the player's /plants setting, None = what the bake chose
 ) {
     *planet = baked.data;
+    if let Some((on, density)) = plants {
+        planet.set_flora(on, density);
+    }
     // the terrain style's cells (/style hex) carry over to every planet installed
-    planet.cells = crate::meshing::lowpoly::cells_for(crate::meshing::lowpoly::style());
+    planet.set_cells(crate::meshing::lowpoly::cells_for(
+        crate::meshing::lowpoly::style(),
+    ));
     controller.selected_block =
         crate::planet::material::placeable(&planet.planet_type.def().palette)[0];
     renderer.force_reload_all(planet, stream_from);
@@ -301,7 +321,8 @@ struct Game {
     map: Option<crate::space::map::MapView>, // the solar-system map, while it's open (M)
     galaxy_view: Option<crate::space::map::MapView>, // the galaxy view, while it's open (G)
     travel: Option<Travel>, // an automatic flight to a planet's orbit (space/travel.rs), while it runs
-    trip_mouse: TripMouse,  // mouse motion during a trip, toward cancelling it
+    plants: Option<(bool, f32)>, // /plants on|off|density, kept across planets; None = each bake's default
+    trip_mouse: TripMouse,       // mouse motion during a trip, toward cancelling it
     visited: std::collections::HashSet<(usize, usize)>, // (system, planet) whose voxel world has been installed
     landed_at: Option<Instant>, // the last landing handover, for its cross-fade (landing::handover_overlay_opacity)
 }
@@ -607,7 +628,14 @@ impl Game {
         let bench = crate::app::perf::parse_bench_args(&std::env::args().collect::<Vec<_>>());
         let clock = GameClock::new(bench.is_some());
         let spawn = noon_spawn(&baked.data, &system, start_planet, 0.0);
-        install_world(&mut renderer, &mut controller, &mut planet, baked, spawn);
+        install_world(
+            &mut renderer,
+            &mut controller,
+            &mut planet,
+            baked,
+            spawn,
+            None,
+        );
         player.spawn(spawn);
         player.handover_altitude = Some(crate::player::landing::handover_altitude(
             system.planets[start_planet].radius,
@@ -663,6 +691,7 @@ impl Game {
             map: None,
             galaxy_view: None,
             travel: None,
+            plants: None,
             trip_mouse: TripMouse::new(Instant::now()),
             visited: std::collections::HashSet::new(),
             landed_at: None,
@@ -706,6 +735,7 @@ impl Game {
             visited,
             travel,
             trip_mouse,
+            plants,
             clock,
             loaded_world,
             loaded_system,
@@ -1108,7 +1138,14 @@ impl Game {
                     planet,
                 );
                 edits_by_planet.remove(&key);
-                install_world(renderer, controller, planet, baked, local.as_vec3());
+                install_world(
+                    renderer,
+                    controller,
+                    planet,
+                    baked,
+                    local.as_vec3(),
+                    *plants,
+                );
                 *loaded_world = index;
                 *loaded_system = key.0;
                 *impostor_generation = generation;
@@ -1311,7 +1348,7 @@ impl Game {
                             (0, i),
                             planet,
                         );
-                        install_world(renderer, controller, planet, baked, spawn);
+                        install_world(renderer, controller, planet, baked, spawn, *plants);
                         *impostor_generation = generation;
                         *loaded_world = i;
                         *loaded_system = 0;
@@ -1552,6 +1589,40 @@ impl Game {
         if let Some(msg) = renderer.take_perf_message() {
             console.log(&msg, [0.0, 1.0, 0.0]); // also printed to the terminal
         }
+        if let Some(cmd) = console.plants_request.take() {
+            let current = |planet: &PlanetData| {
+                planet
+                    .flora
+                    .as_ref()
+                    .map_or((false, 1.0), |f| (true, f.cfg.density))
+            };
+            let (on, density) = (*plants).unwrap_or_else(|| current(planet));
+            let next = plants_after(cmd, on, density);
+            // the loaded planet's plants only mean something while its voxel world is what you see
+            if next.is_some() && *mode == GameMode::Space {
+                console.log("Land on a planet to change its plants.", [1.0, 0.5, 0.0]);
+            } else {
+                if let Some((on, density)) = next {
+                    // kept for every planet installed later; a fresh flora (and cache) replaces the
+                    // old one and the meshes are rebuilt
+                    *plants = Some((on, density));
+                    planet.set_flora(on, density);
+                    renderer.force_reload_all(planet, player.position);
+                }
+                let (on, density) = (*plants).unwrap_or_else(|| current(planet));
+                let species = crate::planet::flora::species_for(planet.planet_type)
+                    .iter()
+                    .map(|s| s.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let msg = if on {
+                    format!("Plants: on, density {density} ({species})")
+                } else {
+                    "Plants: off".to_string()
+                };
+                console.log(&msg, [0.0, 1.0, 0.0]);
+            }
+        }
         if let Some(cmd) = console.weather_request.take() {
             use crate::weather::WeatherCommand;
             // in space flight the player's position and the loaded planet's type are stale: only the
@@ -1623,7 +1694,7 @@ impl Game {
         }
         if let Some(style) = console.style_request.take() {
             crate::meshing::lowpoly::set_style(style);
-            planet.cells = crate::meshing::lowpoly::cells_for(style);
+            planet.set_cells(crate::meshing::lowpoly::cells_for(style));
             renderer.force_reload_all(planet, player.position);
             console.log(&format!("Terrain style: {style:?}"), [0.0, 1.0, 0.0]);
         }
@@ -2180,6 +2251,43 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // /plants on after off keeps the density that was set
+    #[test]
+    fn plants_on_keeps_the_density_off_left() {
+        use crate::app::cmd::PlantsCommand;
+        let (on, d) = plants_after(PlantsCommand::Density(2.5), false, 1.0).unwrap();
+        assert!(on);
+        let (on, d) = plants_after(PlantsCommand::Off, on, d).unwrap();
+        assert_eq!((on, d), (false, 2.5));
+        assert_eq!(plants_after(PlantsCommand::On, on, d), Some((true, 2.5)));
+        assert_eq!(
+            plants_after(PlantsCommand::On, false, 0.0),
+            Some((true, 1.0))
+        );
+        assert_eq!(plants_after(PlantsCommand::Show, on, d), None);
+    }
+
+    // a spawn stands clear of the plants: the cell at the spawn radius is open air
+    #[test]
+    fn spawn_radius_clears_the_plants() {
+        let p = PlanetData::new_for_type(96, 5, crate::planet::biome::PlanetType::EarthLike)
+            .with_flora(true, 3.0);
+        let mut over_plants = 0;
+        for k in 0..400 {
+            let a = k as f32 * 2.399_963;
+            let y = 1.0 - 2.0 * (k as f32 + 0.5) / 400.0;
+            let r = (1.0 - y * y).sqrt();
+            let dir = glam::Vec3::new(r * a.cos(), y, r * a.sin());
+            let radius = spawn_radius(&p, dir, 1.5);
+            let id = p.cell_at(dir * radius).expect("inside the world");
+            assert!(!p.exists(id), "spawned inside block {id:?}");
+            let id = p.cell_at(dir * (96.0 * 0.5)).unwrap();
+            over_plants +=
+                (p.top(id.face, id.u, id.v) > p.effective_height(id.face, id.u, id.v)) as usize;
+        }
+        assert!(over_plants > 0, "some spawn columns carry plants");
+    }
 
     // Review Focus 5: the autopilot owns the flight frame while it runs, so the planets it passes can't
     // capture it mid-trip (next_flight_frame runs only in the manual arm, which asserts it's chosen)
