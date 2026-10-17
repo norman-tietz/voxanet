@@ -201,6 +201,8 @@ pub struct PlanetData {
     pub seed: u32,
     // the cells' shape (set with /style; physics, the raycast, water and the meshes follow it)
     pub cells: CellShape,
+    // natural plants (None: none; shared with the clones on the mesh workers)
+    pub flora: Option<Arc<crate::planet::flora::Flora>>,
 }
 
 impl PlanetData {
@@ -266,7 +268,71 @@ impl PlanetData {
             traits,
             seed,
             cells: CellShape::Square,
+            flora: None,
         }
+    }
+
+    // plants on or off; a fresh cache for this planet's type and seed
+    pub fn with_flora(mut self, on: bool, density: f32) -> Self {
+        self.flora = on.then(|| {
+            Arc::new(crate::planet::flora::Flora::new(
+                crate::planet::flora::FloraConfig {
+                    planet_type: self.planet_type,
+                    seed: self.seed,
+                    density,
+                },
+            ))
+        });
+        self
+    }
+
+    // the natural plant block at this cell, if any: only above the ground and within the plant height
+    // range (other cells never touch the cache); edits are not consulted
+    pub fn decor_block(&self, id: BlockId) -> Option<BlockType> {
+        let f = self.flora.as_ref()?;
+        let g = self.effective_height(id.face, id.u, id.v);
+        if id.layer <= g || id.layer > g + crate::planet::flora::MAX_PLANT_HEIGHT {
+            return None;
+        }
+        f.chunk(self, Self::get_chunk_key(id))
+            .blocks
+            .get(&id)
+            .copied()
+    }
+
+    #[allow(dead_code)] // used by the meshers (Task 5)
+    pub fn decor_chunk(&self, key: ChunkKey) -> Option<Arc<crate::planet::flora::ChunkDecor>> {
+        Some(self.flora.as_ref()?.chunk(self, key))
+    }
+
+    // the column's highest solid layer including plants (after edits); never below `surface`
+    #[allow(dead_code)] // used by rain and spawn (Task 5)
+    pub fn top(&self, face: u8, u: u32, v: u32) -> u32 {
+        let s = self.surface(face, u, v);
+        let Some(f) = self.flora.as_ref() else {
+            return s;
+        };
+        let (cu, cv) = (u.min(self.resolution - 1), v.min(self.resolution - 1));
+        let key = ChunkKey {
+            face,
+            u_idx: cu / CHUNK_SIZE,
+            v_idx: cv / CHUNK_SIZE,
+        };
+        let Some(&t) = f.chunk(self, key).tops.get(&(cu, cv)) else {
+            return s;
+        };
+        let mut layer = t.max(s);
+        while layer > s
+            && !self.exists(BlockId {
+                face,
+                layer,
+                u: cu,
+                v: cv,
+            })
+        {
+            layer -= 1;
+        }
+        layer
     }
 
     // switches the active planet type in place: clears edits (they reference the old palette)
@@ -373,7 +439,9 @@ impl PlanetData {
         if id.layer < self.mining_floor() {
             return Err(EditRefused::MiningFloor);
         }
-        let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v);
+        // a natural block (terrain or plant) is removed by a `mined` entry, a placed one by dropping it
+        let terrain_below = id.layer <= self.terrain.get_height(id.face, id.u, id.v)
+            || self.decor_block(id).is_some();
         let key = Self::get_chunk_key(id);
         let (was_mined, was_placed) = self.edits.chunks.get(&key).map_or((false, false), |m| {
             (m.mined.contains(&id), m.placed.contains_key(&id))
@@ -407,7 +475,10 @@ impl PlanetData {
         }
 
         // instead of a flat floor, we check the pre-calculated noise map
-        id.layer <= self.effective_height(id.face, id.u, id.v)
+        if id.layer <= self.effective_height(id.face, id.u, id.v) {
+            return true;
+        }
+        self.flora.is_some() && self.decor_block(id).is_some()
     }
 
     // the height `exists()`/mesh generation should treat as solid: on a liquid-less planet (no
@@ -709,6 +780,9 @@ impl PlanetData {
                 return None;
             }
         }
+        if let Some(ty) = self.decor_block(id) {
+            return Some(ty);
+        }
         self.natural_type(id)
     }
 
@@ -807,6 +881,143 @@ fn spawn_samples() -> impl Iterator<Item = glam::Vec3> {
 pub(crate) mod tests {
     use super::*;
     use crate::planet::biome::PlanetType;
+
+    fn forest_planet() -> (PlanetData, BlockId, BlockType) {
+        use crate::planet::flora::{anchor_at, plant_blocks};
+        let mut p = PlanetData::new_for_type(96, 5, PlanetType::EarthLike).with_flora(true, 3.0);
+        p.cells = CellShape::Hex;
+        let cfg = p.flora.as_ref().unwrap().cfg;
+        let plant = (0..6u8)
+            .flat_map(|f| (0..96u32).flat_map(move |u| (0..96u32).map(move |v| (f, u, v))))
+            .find_map(|(f, u, v)| anchor_at(&p, &cfg, f, u, v))
+            .expect("a plant exists");
+        let (id, ty) = plant_blocks(&p, &plant, &cfg)[0];
+        (p, id, ty)
+    }
+
+    #[test]
+    fn plants_are_solid_blocks_between_the_edits_and_the_heightmap() {
+        let (mut p, id, ty) = forest_planet();
+        assert!(p.exists(id));
+        assert_eq!(p.block_type(id), Some(ty));
+        p.remove_block(id).unwrap();
+        assert!(!p.exists(id));
+        assert_eq!(p.block_type(id), None);
+        // add_block does not treat a plant as occupied: the placed block overrides it
+        let (mut q, id2, _) = forest_planet();
+        q.add_block(id2, BlockType::Stone).unwrap();
+        assert!(q.exists(id2));
+        assert_eq!(q.block_type(id2), Some(BlockType::Stone));
+        // mining the placed block mines the plant block under it too
+        q.remove_block(id2).unwrap();
+        assert!(!q.exists(id2));
+    }
+
+    #[test]
+    fn without_flora_nothing_changes() {
+        let p = PlanetData::new_for_type(96, 5, PlanetType::EarthLike);
+        assert!(p.flora.is_none());
+        for layer in [10u32, 60, 120] {
+            let id = BlockId {
+                face: 0,
+                layer,
+                u: 10,
+                v: 10,
+            };
+            assert_eq!(p.exists(id), layer <= p.effective_height(0, 10, 10));
+        }
+        assert_eq!(p.top(0, 10, 10), p.surface(0, 10, 10));
+    }
+
+    #[test]
+    fn top_includes_the_plants_and_is_never_below_the_surface() {
+        let (p, id, _) = forest_planet();
+        assert!(p.top(id.face, id.u, id.v) >= id.layer);
+        assert!(p.top(id.face, id.u, id.v) >= p.surface(id.face, id.u, id.v));
+        let mut q = p.clone();
+        let t = q.top(id.face, id.u, id.v);
+        q.remove_block(BlockId { layer: t, ..id }).unwrap();
+        assert!(q.top(id.face, id.u, id.v) < t);
+    }
+
+    #[test]
+    fn eviction_and_regeneration_give_the_same_blocks() {
+        let (p, id, ty) = forest_planet();
+        let key = PlanetData::chunk_key(id);
+        let a = p.decor_chunk(key).unwrap().blocks.clone();
+        p.flora.as_ref().unwrap().evict(key);
+        assert_eq!(p.decor_chunk(key).unwrap().blocks, a);
+        assert_eq!(p.block_type(id), Some(ty));
+    }
+
+    #[test]
+    fn a_mined_plant_block_stays_mined_after_eviction() {
+        let (mut p, id, _) = forest_planet();
+        p.remove_block(id).unwrap();
+        p.flora.as_ref().unwrap().clear();
+        assert!(!p.exists(id));
+    }
+
+    #[test]
+    fn many_threads_share_the_cache_without_deadlock() {
+        let (p, id, ty) = forest_planet();
+        let key = PlanetData::chunk_key(id);
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        p.flora.as_ref().unwrap().evict(key);
+                        assert_eq!(p.block_type(id), Some(ty));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn cells_outside_the_plant_height_range_never_touch_the_cache() {
+        use crate::planet::flora::MAX_PLANT_HEIGHT;
+        let (p, id, _) = forest_planet();
+        p.flora.as_ref().unwrap().clear();
+        let g = p.effective_height(id.face, id.u, id.v);
+        let below = BlockId { layer: g, ..id };
+        let high = BlockId {
+            layer: g + MAX_PLANT_HEIGHT + 5,
+            ..id
+        };
+        assert!(p.exists(below));
+        assert!(!p.exists(high));
+        assert_eq!(p.flora.as_ref().unwrap().len(), 0);
+    }
+
+    #[test]
+    #[ignore]
+    fn exists_overhead() {
+        let (with, _, _) = forest_planet();
+        let without = PlanetData::new_for_type(96, 5, PlanetType::EarthLike);
+        let time = |p: &PlanetData| {
+            let t = std::time::Instant::now();
+            let mut n = 0u32;
+            for i in 0..10_000_000u32 {
+                let id = BlockId {
+                    face: (i % 6) as u8,
+                    layer: 40 + (i / 7) % 40,
+                    u: (i * 7) % 96,
+                    v: (i * 13) % 96,
+                };
+                n += p.exists(id) as u32;
+            }
+            (t.elapsed(), n)
+        };
+        time(&with); // warm the cache
+        let (a, _) = time(&without);
+        let (b, _) = time(&with);
+        println!("exists x1e7: without flora {a:?}, with flora {b:?}");
+    }
 
     #[test]
     fn neutral_traits_bake_todays_terrain() {

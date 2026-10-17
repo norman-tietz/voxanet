@@ -10,12 +10,14 @@ use crate::planet::noise::NoiseGenerator;
 use crate::weather::smoothstep;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 pub const ANCHOR_CELL: u32 = 6;
 pub const MAX_PLANT_HEIGHT: u32 = 12;
 pub const MAX_PLANT_REACH: u32 = 3;
 
 // canopy radius in rings
+#[allow(dead_code)] // the other shapes are built by the species of Task 6
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Template {
     Blob(u32),
@@ -31,6 +33,7 @@ pub enum Template {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Species {
+    #[allow(dead_code)] // read by /plants (Task 5)
     pub name: &'static str,
     pub trunk: BlockType,
     pub crown: BlockType,
@@ -336,6 +339,54 @@ pub fn decor_chunk(data: &PlanetData, cfg: &FloraConfig, key: ChunkKey) -> Chunk
         }
     }
     out
+}
+
+// hard cap of cached chunks (a full flight over forests would otherwise grow without bound)
+pub const MAX_CACHED_CHUNKS: usize = 2048;
+
+// The natural plants of a planet: its config and the per-chunk cache, shared (behind an Arc) by the
+// planet's clones on the mesh worker threads. Generation runs outside the lock.
+pub struct Flora {
+    pub cfg: FloraConfig,
+    cache: RwLock<HashMap<ChunkKey, Arc<ChunkDecor>>>,
+}
+
+impl Flora {
+    pub fn new(cfg: FloraConfig) -> Self {
+        Self {
+            cfg,
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    // the chunk's decor: a read-locked hit, else generated with no lock held and inserted under a short
+    // write lock (a racing thread's equal result may be stored first; whichever is stored is returned)
+    pub fn chunk(&self, data: &PlanetData, key: ChunkKey) -> Arc<ChunkDecor> {
+        if let Some(hit) = self.cache.read().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let made = Arc::new(decor_chunk(data, &self.cfg, key));
+        let mut map = self.cache.write().unwrap();
+        if map.len() >= MAX_CACHED_CHUNKS && !map.contains_key(&key) {
+            map.clear();
+        }
+        map.entry(key).or_insert(made).clone()
+    }
+
+    #[allow(dead_code)] // used by the renderer (Task 5)
+    pub fn evict(&self, key: ChunkKey) {
+        self.cache.write().unwrap().remove(&key);
+    }
+
+    #[allow(dead_code)] // used when the cell shape changes (Task 5)
+    pub fn clear(&self) {
+        self.cache.write().unwrap().clear();
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.cache.read().unwrap().len()
+    }
 }
 
 #[cfg(test)]
