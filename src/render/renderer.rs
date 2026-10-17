@@ -75,6 +75,10 @@ pub struct GlobalUniform {
     pub fog_wind: [f32; 4], // xyz: the structure's scroll offset, w: storm_base (radius of the highest peak)
     pub flash: [f32; 4],    // x: the lightning's scene flash at the camera (weather/lightning.rs)
     pub strikes: [[f32; 4]; crate::weather::lightning::MAX_STRIKES], // active strikes: xyz planet-frame surface position, w intensity
+    // moons and the parent in the sky (space/eclipse.rs pack_family): per body xyz centre + w radius, then rgb
+    // colour + w 1; family_info: x body count, y sun visibility at the camera, z sky/fill dim factor
+    pub family: [[f32; 4]; crate::space::eclipse::MAX_FAMILY * 2],
+    pub family_info: [f32; 4],
 }
 
 #[repr(C)]
@@ -1120,6 +1124,8 @@ impl Renderer {
             fog_wind: [0.0; 4],
             flash: [0.0; 4],
             strikes: [[0.0; 4]; crate::weather::lightning::MAX_STRIKES],
+            family: [[0.0; 4]; crate::space::eclipse::MAX_FAMILY * 2],
+            family_info: [0.0, 1.0, 1.0, 0.0],
         };
 
         let global_buf_identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2745,6 +2751,39 @@ impl Renderer {
         }
         let strikes = crate::weather::lightning::gpu_strikes(&self.strikes);
 
+        // the installed body's family (moons, or a moon's parent and siblings): eclipses, phases and discs in
+        // the sky, from the camera's place in the body's frame; none when the voxel world is not a body of
+        // the backdrop's system
+        let (family, family_info, eclipse_visibility) = match backdrop.content {
+            crate::space::render::SpaceContent::AllButPlanet(i) => {
+                let fam = crate::space::eclipse::family_of(backdrop.system, i, backdrop.t);
+                if fam.is_empty() {
+                    (
+                        [[0.0; 4]; crate::space::eclipse::MAX_FAMILY * 2],
+                        [0.0, 1.0, 1.0, 0.0],
+                        1.0,
+                    )
+                } else {
+                    let (vis, dim) = crate::space::eclipse::camera_visibility(
+                        backdrop.system,
+                        i,
+                        cam_pos,
+                        backdrop.t,
+                    );
+                    (
+                        crate::space::eclipse::pack_family(&fam),
+                        [fam.len() as f32, vis, dim, 0.0],
+                        vis,
+                    )
+                }
+            }
+            crate::space::render::SpaceContent::Everything => (
+                [[0.0; 4]; crate::space::eclipse::MAX_FAMILY * 2],
+                [0.0, 1.0, 1.0, 0.0],
+                1.0,
+            ),
+        };
+
         // update main global uni
         let global_data = GlobalUniform {
             view_proj: mvp.to_cols_array(),
@@ -2783,6 +2822,8 @@ impl Renderer {
             fog_wind: fog[2],
             flash: [flash, 0.0, 0.0, 0.0],
             strikes,
+            family,
+            family_info,
         };
         self.queue
             .write_buffer(&self.global_buf, 0, bytemuck::cast_slice(&[global_data]));
@@ -2859,7 +2900,7 @@ impl Renderer {
                 0.0,
                 angular_radius,
                 controller.fov_y(),
-                daylight * above_water * (1.0 - overcast), // storm clouds hide the sun
+                daylight * above_water * (1.0 - overcast) * eclipse_visibility, // storm clouds and the moon hide the sun
                 backdrop.system.star.star_type.def(),
                 true,
                 [
@@ -4996,6 +5037,69 @@ pub(crate) mod tests {
             std::mem::size_of::<GlobalUniform>(),
             wgsl_struct_size(SCENE_SHADER, "Global")
         );
+    }
+
+    // the family list sits last in the uniform: 12 vec4 + family_info, offsets as naga lays the WGSL out
+    #[test]
+    fn global_uniform_family_fields_are_appended_in_order() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(
+            offset_of!(GlobalUniform, family),
+            offset_of!(GlobalUniform, strikes) + size_of::<[[f32; 4]; 6]>()
+        );
+        assert_eq!(offset_of!(GlobalUniform, family) % 16, 0);
+        assert_eq!(
+            offset_of!(GlobalUniform, family_info),
+            offset_of!(GlobalUniform, family) + 12 * 16
+        );
+        assert_eq!(
+            size_of::<GlobalUniform>(),
+            offset_of!(GlobalUniform, family_info) + 16
+        );
+        // naga: the WGSL struct ends with the same two members at the same offsets
+        let module = naga::front::wgsl::parse_str(SCENE_SHADER).unwrap();
+        let members = module
+            .types
+            .iter()
+            .find_map(|(_, t)| match &t.inner {
+                naga::TypeInner::Struct { members, .. } if t.name.as_deref() == Some("Global") => {
+                    Some(members.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let off = |n: &str| {
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(n))
+                .unwrap()
+                .offset as usize
+        };
+        assert_eq!(off("family"), offset_of!(GlobalUniform, family));
+        assert_eq!(off("family_info"), offset_of!(GlobalUniform, family_info));
+    }
+
+    #[test]
+    fn the_scene_shader_knows_eclipses_and_sky_discs() {
+        let atmo = include_str!("atmosphere.wgsl");
+        assert!(atmo.contains("fn atmo_sun_visibility("));
+        assert!(atmo.contains("fn atmo_sky_bodies("));
+        assert!(atmo.contains("fn atmo_disc_overlap("));
+        // a family-less frame exits at once
+        assert!(atmo.contains("if (count <= 0.0)"), "no family, no work");
+        assert!(
+            SCENE_SHADER.contains("atmo_sun_visibility("),
+            "direct sunlight is scaled by the eclipse"
+        );
+        assert!(
+            SCENE_SHADER.contains("global.family_info.z"),
+            "the sky and fill dim in an eclipse"
+        );
+        assert!(
+            SCENE_SHADER.contains("atmo_sky_bodies("),
+            "the sky draws moon discs"
+        );
+        assert!(include_str!("../weather/precip.wgsl").contains("atmo_sun_visibility("));
     }
 
     // a Yellow star lights its planets exactly as the old SUN_COLOR did

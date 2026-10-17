@@ -121,6 +121,8 @@ struct PlanetUniform {
     fog_tint: vec4<f32>,      // rgb: the storm fog's tint, w: peak extinction x setting (0 = off)
     flash: vec4<f32>,         // x: the lightning's scene flash at the impostor's camera
     strikes: array<vec4<f32>, 6>, // active strikes: xyz planet-frame surface position, w intensity
+    family: array<vec4<f32>, 12>, // moons / parent (eclipse.rs pack_family) in the planet's frame
+    family_info: vec4<f32>,       // x: body count, z: sky/fill dim (1 = none), w: the star's angular radius here
     model: mat3x3<f32>,     // planet frame -> space rotation: the planet's spin at this time
 }
 
@@ -218,10 +220,12 @@ fn planet_color(in: PlanetVertexOut, N: vec3<f32>) -> vec3<f32> {
     let wm = weather_material(pow(in.flat_color, vec3<f32>(2.2)), planet.plastic.x, planet.plastic.z, N,
                               in.local_pos, 1.0, ws, planet.weather_rule, planet.weather_cover);
     let albedo = wm.albedo;
-    let sun = a.sun_color * atmo_cloud_shadow_map(in.local_pos, L, a.planet_r, a.density);
+    // a moon in front of the star takes its light (eclipse.rs; exactly 1.0 without a family)
+    let sun = a.sun_color * atmo_cloud_shadow_map(in.local_pos, L, a.planet_r, a.density)
+        * atmo_sun_visibility(in.local_pos, L, planet.family_info.w, planet.family, planet.family_info.x);
     let direct = sun * atmo_wrap_diffuse(dot(N, L), planet.light.y);
     let hemi = dot(N, normalize(in.local_pos)) * 0.5 + 0.5;
-    let sky_light = atmo_ambient_daylight(in.local_pos, L);
+    let sky_light = atmo_ambient_daylight(in.local_pos, L) * planet.family_info.z;
     // the engine's fill light: the ground's bounce in the surface's colour below, sky above (shade())
     let ground = atmo_ground_bounce(albedo, in.local_pos, L, sun, planet.light.x);
     let ambient = mix(ground, a.sky_zenith * sky_light, hemi) * (1.0 - STORM_FILL_DROP * (ws.x * a.density))

@@ -124,8 +124,9 @@ fn fs_precip(in: PrecipOut) -> @location(0) vec4<f32> {
     if (a <= 0.001) { discard; }
     // lit by the sky and (a little) the sun, no shadows; rain takes the sky colour itself
     let L = normalize(global.sun_dir.xyz);
-    let light = biome.sky_zenith.rgb * atmo_ambient_daylight(in.world, L)
+    let light = biome.sky_zenith.rgb * atmo_ambient_daylight(in.world, L) * global.family_info.z
         + biome.sun.rgb * cloud_shadow(in.world, L) * 0.5
+            * atmo_sun_visibility(in.world, L, biome.sun.w, global.family, global.family_info.x)
             * smoothstep(SKY_NIGHT_ELEVATION, SKY_DAY_ELEVATION, dot(normalize(in.world), L)); // none at night
     let base = select(precip.color.rgb, vec3<f32>(0.6, 0.65, 0.7), kind == 0u);
     let lit = base * light;

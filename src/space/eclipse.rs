@@ -2,8 +2,6 @@
 // the family bodies (a planet's moons; for a moon its parent and siblings) cover as seen from a point, the lit
 // fraction of a body, and the family list for the GPU. atmosphere.wgsl mirrors the maths; CONSTANTS and the
 // formulas here are the reference for its tests.
-// Everything here is used by the renderer only from Task 8 on.
-#![cfg_attr(not(test), allow(dead_code))] // until Task 8 wires it in
 
 use glam::{DVec3, Vec3};
 
@@ -12,6 +10,7 @@ use crate::space::solar_system::SolarSystem;
 pub const MAX_FAMILY: usize = 6;
 pub const MAX_OCCLUDERS: usize = 4;
 pub const SKY_DIM_MIN: f32 = 0.25; // the sky and fill light at total eclipse, relative to full sun
+#[cfg(test)] // read by the WGSL mirror test only
 pub const CONSTANTS: [(&str, f32); 1] = [("ECLIPSE_SKY_DIM_MIN", SKY_DIM_MIN)];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +68,7 @@ pub fn sun_visibility(point: Vec3, sun_dir: Vec3, star_angle: f32, bodies: &[Fam
 
 // the lit share of a body seen from an observer: (1 + cos a) / 2 with a the angle at the body between the
 // observer and the star (observer_to_body: from the observer to the body, body_to_star: from the body to the star)
+#[cfg(test)] // the GPU shades the phase itself (atmo_sky_bodies); this is its reference
 pub fn lit_fraction(observer_to_body: Vec3, body_to_star: Vec3) -> f32 {
     let to_observer = (-observer_to_body).normalize_or_zero();
     let to_star = body_to_star.normalize_or_zero();
